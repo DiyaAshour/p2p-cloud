@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useAuth } from '@repo/hooks/useAuth';
+// Removed useAuth import as it is not needed for the enhanced version
 import { useWallet } from '@/hooks/useWallet';
 import { useStorage } from '@/hooks/useStorage';
 import { Button } from '@/components/ui/button';
@@ -10,9 +10,8 @@ import { Upload, Download, Trash2, Search, Wallet, LogOut } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function Home() {
-  // The userAuth hooks provides authentication state
-  // To implement login/logout functionality, simply call logout() or redirect to getLoginUrl()
-  let { user, loading, error, isAuthenticated, logout } = useAuth();
+  // Authentication is handled via Wallet connection in this version
+  const isAuthenticated = wallet.isConnected;
 
   const wallet = useWallet();
   const storage = useStorage();
