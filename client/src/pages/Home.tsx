@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-// Removed useAuth import as it is not needed for the enhanced version
 import { useWallet } from '@/hooks/useWallet';
 import { useStorage } from '@/hooks/useStorage';
 import { Button } from '@/components/ui/button';
@@ -10,11 +9,9 @@ import { Upload, Download, Trash2, Search, Wallet, LogOut } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function Home() {
-  // Authentication is handled via Wallet connection in this version
-  const isAuthenticated = wallet.isConnected;
-
   const wallet = useWallet();
   const storage = useStorage();
+  
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isIndexing, setIsIndexing] = useState(false);
@@ -23,7 +20,9 @@ export default function Home() {
 
   useEffect(() => {
     // Initialize storage
-    storage.refreshFiles();
+    if (storage.refreshFiles) {
+      storage.refreshFiles();
+    }
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -62,6 +61,7 @@ export default function Home() {
       setTempEncryptionKey('');
       setIsEncrypting(false);
     } catch (error) {
+      console.error('Upload error:', error);
       toast.error('Failed to upload files');
     }
   };
@@ -76,6 +76,7 @@ export default function Home() {
       const results = await storage.searchFiles(searchQuery);
       toast.success(`Found ${results.length} file(s)`);
     } catch (error) {
+      console.error('Search error:', error);
       toast.error('Search failed');
     }
   };
@@ -87,10 +88,13 @@ export default function Home() {
       const a = document.createElement('a');
       a.href = url;
       a.download = fileName;
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
       toast.success('File downloaded');
     } catch (error) {
+      console.error('Download error:', error);
       toast.error('Failed to download file');
     }
   };
@@ -100,6 +104,7 @@ export default function Home() {
       await storage.deleteFile(fileHash);
       toast.success('File deleted');
     } catch (error) {
+      console.error('Delete error:', error);
       toast.error('Failed to delete file');
     }
   };
@@ -299,11 +304,11 @@ export default function Home() {
                         type="password"
                         value={tempEncryptionKey}
                         onChange={(e) => setTempEncryptionKey(e.target.value)}
-                        placeholder="Enter a strong encryption key (e.g., MyP@ssw0rd123!)"
+                        placeholder="Enter a strong encryption key"
                         className="bg-slate-700 border-slate-600 text-white"
                       />
                       <p className="text-xs text-slate-300">
-                        ⚠️ Keep this key safe! You'll need it to decrypt your files. Store it securely.
+                        ⚠️ Keep this key safe! You'll need it to decrypt your files.
                       </p>
                     </div>
                   )}
@@ -334,21 +339,7 @@ export default function Home() {
                 <Card className="p-6 bg-slate-800 border-slate-700">
                   <p className="text-sm text-slate-400 mb-2">Storage Used</p>
                   <p className="text-3xl font-bold text-white">
-                    {storage.quota.usedGB.toFixed(2)} GB
-                  </p>
-                </Card>
-
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Available Storage</p>
-                  <p className="text-3xl font-bold text-white">
-                    {storage.quota.availableGB.toFixed(2)} GB
-                  </p>
-                </Card>
-
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Monthly Cost</p>
-                  <p className="text-3xl font-bold text-white">
-                    ${storage.quota.costPerMonth.toFixed(2)}
+                    {storage.quota?.usedGB?.toFixed(2) || '0.00'} GB
                   </p>
                 </Card>
 
@@ -358,33 +349,7 @@ export default function Home() {
                     {storage.files.filter(f => f.isEncrypted).length}
                   </p>
                 </Card>
-
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Indexed Files</p>
-                  <p className="text-3xl font-bold text-blue-400">
-                    {storage.files.filter(f => f.indexed).length}
-                  </p>
-                </Card>
               </div>
-
-              <Card className="p-6 bg-slate-800 border-slate-700">
-                <h3 className="text-lg font-bold text-white mb-4">
-                  Upgrade Storage
-                </h3>
-                <div className="space-y-3">
-                  {[1, 3, 5, 10].map((tb) => (
-                    <Button
-                      key={tb}
-                      variant="outline"
-                      className="w-full justify-between"
-                      onClick={() => storage.setStorageQuota(tb)}
-                    >
-                      <span>{tb} TB Storage</span>
-                      <span className="text-green-400">${tb * 1}/month</span>
-                    </Button>
-                  ))}
-                </div>
-              </Card>
 
               <Card className="p-6 bg-slate-800 border-slate-700">
                 <h3 className="text-lg font-bold text-white mb-4">
@@ -399,7 +364,7 @@ export default function Home() {
                     className="bg-slate-700 border-slate-600 text-white"
                   />
                   <p className="text-xs text-slate-400">
-                    This key will be used to decrypt encrypted files during download. Make sure it matches the key used during upload.
+                    This key will be used to decrypt encrypted files during download.
                   </p>
                 </div>
               </Card>
