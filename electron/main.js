@@ -42,18 +42,39 @@ function startFrontend() {
   }
 }
 
+import http from 'http';
+
+async function checkServerReady(url, timeout = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      await new Promise((resolve, reject) => {
+        const req = http.get(url, (res) => {
+          if (res.statusCode === 200) resolve();
+          else reject();
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      return true;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  return false;
+}
+
 async function createWindow() {
   const url = 'http://127.0.0.1:3000';
 
-  // فتح المتصفح الافتراضي
-  await shell.openExternal(url);
-
+  // إظهار نافذة انتظار احترافية
   mainWindow = new BrowserWindow({
-    width: 450,
-    height: 250,
+    width: 500,
+    height: 300,
     resizable: false,
     alwaysOnTop: true,
     frame: false,
+    transparent: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -61,26 +82,40 @@ async function createWindow() {
   });
 
   mainWindow.loadURL(`data:text/html;charset=utf-8,
-    <body style="background: #0f172a; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; border: 2px solid #1e293b; border-radius: 8px;">
-      <div style="text-align: center; padding: 20px;">
-        <div style="font-size: 40px; margin-bottom: 10px;">🔐</div>
-        <h2 style="margin: 0 0 10px 0; color: #38bdf8;">P2P Storage Browser</h2>
-        <p style="font-size: 14px; color: #94a3b8; line-height: 1.5;">
-          Opening in your default browser for <b>MetaMask</b> support...<br>
-          Make sure the background server is running.
-        </p>
-        <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">
-          <button onclick="window.close()" style="padding: 8px 20px; background: #0369a1; border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: background 0.2s;">
-            Close
-          </button>
+    <body style="background: #0f172a; color: white; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; border: 2px solid #38bdf8; border-radius: 12px; overflow: hidden;">
+      <div style="text-align: center;">
+        <div style="font-size: 50px; margin-bottom: 15px; animation: pulse 2s infinite;">🔐</div>
+        <h2 style="margin: 0 0 10px 0; color: #38bdf8;">P2P Storage System</h2>
+        <div id="status" style="font-size: 14px; color: #94a3b8;">Initializing background servers...</div>
+        <div style="margin-top: 20px; width: 200px; height: 4px; background: #1e293b; border-radius: 2px; overflow: hidden;">
+          <div id="progress" style="width: 30%; height: 100%; background: #38bdf8; transition: width 0.5s;"></div>
         </div>
       </div>
+      <style>
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
+      </style>
     </body>
   `);
-  
-  setTimeout(() => {
-    if (mainWindow) mainWindow.close();
-  }, 5000);
+
+  // التحقق من جاهزية السيرفر
+  const isReady = await checkServerReady(url);
+
+  if (isReady) {
+    await shell.openExternal(url);
+    mainWindow.webContents.executeJavaScript(`
+      document.getElementById('status').innerHTML = '✅ System Ready! Opening browser...';
+      document.getElementById('progress').style.width = '100%';
+      document.getElementById('progress').style.background = '#22c55e';
+    `);
+    setTimeout(() => { if (mainWindow) mainWindow.close(); }, 3000);
+  } else {
+    mainWindow.webContents.executeJavaScript(`
+      document.getElementById('status').innerHTML = '❌ Error: Server timed out. Please run "pnpm dev" manually.';
+      document.getElementById('status').style.color = '#ef4444';
+      document.getElementById('progress').style.background = '#ef4444';
+    `);
+    mainWindow.setClosable(true);
+  }
 }
 
 app.on('ready', createWindow);
