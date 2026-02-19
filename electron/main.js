@@ -43,16 +43,10 @@ function startFrontend() {
 }
 
 async function createWindow() {
-  // تشغيل السيرفرات في الخلفية
-  startBackend();
-  startFrontend();
-
   const url = 'http://127.0.0.1:3000';
 
-  // الانتظار قليلاً لضمان تشغيل السيرفر قبل فتح المتصفح
-  setTimeout(async () => {
-    await shell.openExternal(url);
-  }, 3000);
+  // فتح المتصفح الافتراضي
+  await shell.openExternal(url);
 
   mainWindow = new BrowserWindow({
     width: 450,
@@ -70,19 +64,23 @@ async function createWindow() {
     <body style="background: #0f172a; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; border: 2px solid #1e293b; border-radius: 8px;">
       <div style="text-align: center; padding: 20px;">
         <div style="font-size: 40px; margin-bottom: 10px;">🔐</div>
-        <h2 style="margin: 0 0 10px 0; color: #38bdf8;">P2P Storage Active</h2>
+        <h2 style="margin: 0 0 10px 0; color: #38bdf8;">P2P Storage Browser</h2>
         <p style="font-size: 14px; color: #94a3b8; line-height: 1.5;">
-          The decentralized network is running in the background.<br>
-          Opening your browser with <b>MetaMask</b> support...
+          Opening in your default browser for <b>MetaMask</b> support...<br>
+          Make sure the background server is running.
         </p>
         <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">
           <button onclick="window.close()" style="padding: 8px 20px; background: #0369a1; border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: background 0.2s;">
-            Got it!
+            Close
           </button>
         </div>
       </div>
     </body>
   `);
+  
+  setTimeout(() => {
+    if (mainWindow) mainWindow.close();
+  }, 5000);
 }
 
 app.on('ready', createWindow);
