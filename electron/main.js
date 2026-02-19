@@ -24,13 +24,16 @@ function createWindow() {
     icon: path.join(__dirname, '../assets/icon.png'),
   });
 
-  const startUrl = isDev
-    ? 'http://127.0.0.1:3000'
-    : `file://${path.join(__dirname, '../dist/public/index.html')}`;
-
-  mainWindow.loadURL(startUrl);
-
   if (isDev) {
+    mainWindow.loadURL('http://127.0.0.1:3000');
+    mainWindow.webContents.openDevTools();
+  } else {
+    const indexPath = path.join(__dirname, '../dist/public/index.html');
+    console.log('Loading index from:', indexPath);
+    mainWindow.loadFile(indexPath).catch(err => {
+      console.error('Failed to load index.html:', err);
+    });
+    // تفعيل DevTools مؤقتاً في نسخة الإنتاج لمعرفة سبب الشاشة البيضاء
     mainWindow.webContents.openDevTools();
   }
 
