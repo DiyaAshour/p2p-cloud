@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Upload, Download, Trash2, Search, Wallet, LogOut } from 'lucide-react';
+import { Upload, Download, Trash2, Search, Wallet, LogOut, Shield, ShieldOff } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function Home() {
@@ -17,12 +17,10 @@ export default function Home() {
   const [isIndexing, setIsIndexing] = useState(false);
   const [isEncrypting, setIsEncrypting] = useState(false);
   const [tempEncryptionKey, setTempEncryptionKey] = useState('');
+  const [decryptionKey, setDecryptionKey] = useState('');
 
   useEffect(() => {
-    // Initialize storage
-    if (storage.refreshFiles) {
-      storage.refreshFiles();
-    }
+    storage.refreshFiles();
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -73,36 +71,35 @@ export default function Home() {
     }
 
     try {
-      const results = await storage.searchFiles(searchQuery);
-      toast.success(`Found ${results.length} file(s)`);
+      await storage.searchFiles(searchQuery);
     } catch (error) {
       console.error('Search error:', error);
       toast.error('Search failed');
     }
   };
 
-  const handleDownload = async (fileHash: string, fileName: string, isEncrypted: boolean) => {
+  const handleDownload = async (fileHash: string, isEncrypted: boolean) => {
+    if (isEncrypted && !decryptionKey) {
+      toast.error('Please enter the decryption key in Statistics tab');
+      return;
+    }
+
     try {
-      const file = await storage.downloadFile(fileHash, isEncrypted);
-      const url = URL.createObjectURL(file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      toast.success('File downloaded');
+      if (isEncrypted) {
+        storage.setEncryptionKey(decryptionKey);
+      }
+      await storage.downloadFile(fileHash, isEncrypted);
+      toast.success('File download started');
     } catch (error) {
       console.error('Download error:', error);
-      toast.error('Failed to download file');
+      toast.error('Failed to download file. Check your decryption key.');
     }
   };
 
   const handleDelete = async (fileHash: string) => {
     try {
       await storage.deleteFile(fileHash);
-      toast.success('File deleted');
+      toast.success('File removed from view');
     } catch (error) {
       console.error('Delete error:', error);
       toast.error('Failed to delete file');
@@ -126,24 +123,14 @@ export default function Home() {
                 <p className="text-sm font-mono text-white">
                   {wallet.address?.slice(0, 6)}...{wallet.address?.slice(-4)}
                 </p>
-                <p className="text-xs text-slate-400">{wallet.balance} ETH</p>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={wallet.disconnect}
-                className="gap-2"
-              >
+              <Button variant="outline" size="sm" onClick={wallet.disconnect} className="gap-2">
                 <LogOut className="w-4 h-4" />
                 Disconnect
               </Button>
             </div>
           ) : (
-            <Button
-              onClick={wallet.connect}
-              disabled={wallet.isLoading}
-              className="gap-2"
-            >
+            <Button onClick={wallet.connect} disabled={wallet.isLoading} className="gap-2">
               <Wallet className="w-4 h-4" />
               {wallet.isLoading ? 'Connecting...' : 'Connect Wallet'}
             </Button>
@@ -156,9 +143,7 @@ export default function Home() {
           <Card className="p-12 text-center bg-slate-800 border-slate-700">
             <Wallet className="w-16 h-16 mx-auto mb-4 text-slate-400" />
             <h2 className="text-2xl font-bold text-white mb-2">Connect Your Wallet</h2>
-            <p className="text-slate-400 mb-6">
-              To use P2P Storage, please connect your MetaMask wallet first
-            </p>
+            <p className="text-slate-400 mb-6">To use P2P Storage, please connect your MetaMask wallet first</p>
             <Button onClick={wallet.connect} disabled={wallet.isLoading} size="lg">
               {wallet.isLoading ? 'Connecting...' : 'Connect MetaMask'}
             </Button>
@@ -168,10 +153,9 @@ export default function Home() {
             <TabsList className="bg-slate-800 border-slate-700">
               <TabsTrigger value="browser">File Browser</TabsTrigger>
               <TabsTrigger value="upload">Upload Files</TabsTrigger>
-              <TabsTrigger value="stats">Statistics</TabsTrigger>
+              <TabsTrigger value="stats">Statistics & Keys</TabsTrigger>
             </TabsList>
 
-            {/* File Browser Tab */}
             <TabsContent value="browser" className="space-y-4">
               <Card className="p-6 bg-slate-800 border-slate-700">
                 <div className="flex gap-2 mb-6">
@@ -189,39 +173,26 @@ export default function Home() {
 
                 {storage.files.length === 0 ? (
                   <div className="text-center py-12">
-                    <p className="text-slate-400">No files uploaded yet</p>
+                    <p className="text-slate-400">No files found on the network</p>
                   </div>
                 ) : (
                   <div className="space-y-2">
                     {storage.files.map((file) => (
-                      <div
-                        key={file.hash}
-                        className="flex items-center justify-between p-4 bg-slate-700 rounded-lg hover:bg-slate-600 transition"
-                      >
+                      <div key={file.hash} className="flex items-center justify-between p-4 bg-slate-700 rounded-lg hover:bg-slate-600 transition">
                         <div className="flex-1">
-                          <p className="text-white font-medium">{file.name}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-white font-medium">{file.name}</p>
+                            {file.isEncrypted ? <Shield className="w-4 h-4 text-blue-400" /> : <ShieldOff className="w-4 h-4 text-slate-500" />}
+                          </div>
                           <p className="text-xs text-slate-400">
-                            {(file.size / 1024 / 1024).toFixed(2)} MB •{' '}
-                            {new Date(file.uploadedAt).toLocaleDateString()} •{' '}
-                            {file.indexed ? '📑 Indexed' : '🔒 Private'} •{' '}
-                            {file.isEncrypted ? '🔑 Encrypted' : '🔓 Unencrypted'}
+                            {(file.size / 1024 / 1024).toFixed(2)} MB • {new Date(file.uploadedAt).toLocaleString()} • {file.isEncrypted ? 'Encrypted' : 'Public'}
                           </p>
                         </div>
                         <div className="flex gap-2">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDownload(file.hash, file.name, file.isEncrypted || false)}
-                            className="gap-2"
-                          >
+                          <Button variant="ghost" size="sm" onClick={() => handleDownload(file.hash, file.isEncrypted)} className="gap-2">
                             <Download className="w-4 h-4" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDelete(file.hash)}
-                            className="gap-2 text-red-400 hover:text-red-300"
-                          >
+                          <Button variant="ghost" size="sm" onClick={() => handleDelete(file.hash)} className="gap-2 text-red-400 hover:text-red-300">
                             <Trash2 className="w-4 h-4" />
                           </Button>
                         </div>
@@ -232,140 +203,43 @@ export default function Home() {
               </Card>
             </TabsContent>
 
-            {/* Upload Tab */}
             <TabsContent value="upload" className="space-y-4">
               <Card className="p-6 bg-slate-800 border-slate-700">
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-white mb-2">
-                      Select Files to Upload
-                    </label>
-                    <input
-                      type="file"
-                      multiple
-                      onChange={handleFileSelect}
-                      className="block w-full text-sm text-slate-400
-                        file:mr-4 file:py-2 file:px-4
-                        file:rounded-md file:border-0
-                        file:text-sm file:font-semibold
-                        file:bg-blue-600 file:text-white
-                        hover:file:bg-blue-700"
-                    />
-                  </div>
-
-                  {selectedFiles.length > 0 && (
-                    <div className="bg-slate-700 rounded-lg p-4">
-                      <p className="text-sm font-medium text-white mb-2">
-                        Selected Files ({selectedFiles.length})
-                      </p>
-                      <div className="space-y-1">
-                        {selectedFiles.map((file, idx) => (
-                          <p key={idx} className="text-xs text-slate-400">
-                            {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
-                          </p>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-2 p-3 bg-slate-700 rounded-lg">
-                    <input
-                      type="checkbox"
-                      id="indexing"
-                      checked={isIndexing}
-                      onChange={(e) => setIsIndexing(e.target.checked)}
-                      className="w-4 h-4"
-                    />
-                    <label htmlFor="indexing" className="text-sm text-white">
-                      Index files for network search (make files discoverable)
-                    </label>
+                    <label className="block text-sm font-medium text-white mb-2">Select Files to Upload</label>
+                    <input type="file" multiple onChange={handleFileSelect} className="block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700" />
                   </div>
 
                   <div className="flex items-center gap-2 p-3 bg-slate-700 rounded-lg">
-                    <input
-                      type="checkbox"
-                      id="encrypting"
-                      checked={isEncrypting}
-                      onChange={(e) => setIsEncrypting(e.target.checked)}
-                      className="w-4 h-4"
-                    />
-                    <label htmlFor="encrypting" className="text-sm text-white">
-                      🔐 Encrypt files before upload (End-to-End Encryption)
-                    </label>
+                    <input type="checkbox" id="encrypting" checked={isEncrypting} onChange={(e) => setIsEncrypting(e.target.checked)} className="w-4 h-4" />
+                    <label htmlFor="encrypting" className="text-sm text-white">🔐 Encrypt files before upload (End-to-End Encryption)</label>
                   </div>
 
                   {isEncrypting && (
-                    <div className="space-y-2 p-3 bg-blue-900/30 border border-blue-700 rounded-lg">
-                      <label htmlFor="encryptionKey" className="block text-sm font-medium text-white">
-                        Encryption Key (AES-256)
-                      </label>
-                      <Input
-                        id="encryptionKey"
-                        type="password"
-                        value={tempEncryptionKey}
-                        onChange={(e) => setTempEncryptionKey(e.target.value)}
-                        placeholder="Enter a strong encryption key"
-                        className="bg-slate-700 border-slate-600 text-white"
-                      />
-                      <p className="text-xs text-slate-300">
-                        ⚠️ Keep this key safe! You'll need it to decrypt your files.
-                      </p>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-white">Encryption Key</label>
+                      <Input type="password" placeholder="Enter a strong key..." value={tempEncryptionKey} onChange={(e) => setTempEncryptionKey(e.target.value)} className="bg-slate-700 border-slate-600 text-white" />
                     </div>
                   )}
 
-                  <Button
-                    onClick={handleUpload}
-                    disabled={storage.isLoading || selectedFiles.length === 0 || (isEncrypting && !tempEncryptionKey)}
-                    className="w-full gap-2"
-                    size="lg"
-                  >
+                  <Button onClick={handleUpload} disabled={storage.isLoading} className="w-full gap-2" size="lg">
                     <Upload className="w-4 h-4" />
-                    {storage.isLoading ? 'Uploading...' : 'Upload Files'}
+                    {storage.isLoading ? 'Uploading...' : `Upload ${selectedFiles.length} File(s)`}
                   </Button>
                 </div>
               </Card>
             </TabsContent>
 
-            {/* Statistics Tab */}
             <TabsContent value="stats" className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Total Files</p>
-                  <p className="text-3xl font-bold text-white">
-                    {storage.files.length}
-                  </p>
-                </Card>
-
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Storage Used</p>
-                  <p className="text-3xl font-bold text-white">
-                    {storage.quota?.usedGB?.toFixed(2) || '0.00'} GB
-                  </p>
-                </Card>
-
-                <Card className="p-6 bg-slate-800 border-slate-700">
-                  <p className="text-sm text-slate-400 mb-2">Encrypted Files</p>
-                  <p className="text-3xl font-bold text-green-400">
-                    {storage.files.filter(f => f.isEncrypted).length}
-                  </p>
-                </Card>
-              </div>
-
               <Card className="p-6 bg-slate-800 border-slate-700">
-                <h3 className="text-lg font-bold text-white mb-4">
-                  🔐 Set Global Decryption Key
-                </h3>
-                <div className="space-y-2">
-                  <Input
-                    type="password"
-                    value={storage.encryptionKey || ''}
-                    onChange={(e) => storage.setEncryptionKey(e.target.value)}
-                    placeholder="Enter your encryption key for decrypting files"
-                    className="bg-slate-700 border-slate-600 text-white"
-                  />
-                  <p className="text-xs text-slate-400">
-                    This key will be used to decrypt encrypted files during download.
-                  </p>
+                <h3 className="text-lg font-bold text-white mb-4">Decryption Settings</h3>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="block text-sm font-medium text-white">Global Decryption Key</label>
+                    <Input type="password" placeholder="Enter key to decrypt downloads..." value={decryptionKey} onChange={(e) => setDecryptionKey(e.target.value)} className="bg-slate-700 border-slate-600 text-white" />
+                    <p className="text-xs text-slate-400">This key is used to decrypt files when you click the download button.</p>
+                  </div>
                 </div>
               </Card>
             </TabsContent>

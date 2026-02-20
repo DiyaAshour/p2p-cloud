@@ -1,18 +1,14 @@
-import { v4 as uuidv4 } from 'uuid';
 import CryptoJS from 'crypto-js';
 
 export interface FileMetadata {
-  isEncrypted?: boolean;
-  encryptionKeyId?: string;
   id: string;
   name: string;
   size: number;
   hash: string;
   uploadedAt: number;
-  indexed: boolean;
-  peerId: string;
-  mimeType: string;
-  checksum: string;
+  isEncrypted: boolean;
+  path?: string;
+  mimeType?: string;
 }
 
 export interface StorageQuota {
@@ -23,272 +19,161 @@ export interface StorageQuota {
 }
 
 class StorageService {
-  private db: any;
-  private fileIndex: Map<string, FileMetadata> = new Map();
+  private baseUrl = 'http://127.0.0.1:3000/api';
   private storageQuota: StorageQuota = {
-    totalGB: 0,
+    totalGB: 10,
     usedGB: 0,
-    availableGB: 0,
-    costPerMonth: 0,
+    availableGB: 10,
+    costPerMonth: 10,
   };
 
-  async initialize(dbPath: string) {
-    try {
-      // Initialize IndexedDB for browser storage
-      const dbRequest = indexedDB.open('p2p-storage', 1);
-
-      dbRequest.onerror = () => {
-        console.error('Failed to open IndexedDB');
-      };
-
-      dbRequest.onsuccess = (event: any) => {
-        this.db = event.target.result;
-        this.loadFileIndex();
-      };
-
-      dbRequest.onupgradeneeded = (event: any) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains('files')) {
-          db.createObjectStore('files', { keyPath: 'id' });
-        }
-        if (!db.objectStoreNames.contains('metadata')) {
-          db.createObjectStore('metadata', { keyPath: 'hash' });
-        }
-      };
-    } catch (error) {
-      console.error('Failed to initialize storage:', error);
-      throw error;
-    }
-  }
-
+  /**
+   * Upload a file to the local P2P node with optional encryption
+   */
   async addFile(
     file: File,
-    indexed: boolean = false,
-    peerId: string = '',
+    _indexed: boolean = false,
+    _peerId: string = '',
     encryptionKey?: string
   ): Promise<FileMetadata> {
-    try {
-      const fileId = uuidv4();
-      let fileBuffer = await file.arrayBuffer();
-      let isEncrypted = false;
-      let encryptionKeyId: string | undefined;
+    console.log(`📤 Starting upload for: ${file.name}`);
 
-      if (encryptionKey) {
-        const wordArray = CryptoJS.lib.WordArray.create(fileBuffer as any);
-        const encrypted = CryptoJS.AES.encrypt(wordArray, encryptionKey).toString();
-        fileBuffer = new TextEncoder().encode(encrypted).buffer;
-        isEncrypted = true;
-        encryptionKeyId = CryptoJS.SHA256(encryptionKey).toString(); // Simple key ID
+    let fileData: any = await this.readFileAsArrayBuffer(file);
+    const isEncrypted = !!encryptionKey;
+
+    if (isEncrypted && encryptionKey) {
+      console.log('🔐 Encrypting file before upload...');
+      const wordUint8Array = new Uint8Array(fileData);
+      const wordBuffer = CryptoJS.lib.WordArray.create(wordUint8Array as any);
+      const encrypted = CryptoJS.AES.encrypt(wordBuffer, encryptionKey).toString();
+      fileData = new Blob([encrypted], { type: 'text/plain' });
+    } else {
+      fileData = new Blob([fileData], { type: file.type });
+    }
+
+    const formData = new FormData();
+    formData.append('file', fileData, file.name);
+    formData.append('isEncrypted', isEncrypted.toString());
+    formData.append('hash', Math.random().toString(36).substring(7));
+
+    const response = await fetch(`${this.baseUrl}/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Upload failed: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    const metadata: FileMetadata = {
+      id: result.hash,
+      name: result.name,
+      size: result.size,
+      hash: result.hash,
+      uploadedAt: new Date(result.uploadedAt).getTime(),
+      isEncrypted: result.isEncrypted,
+      path: result.path,
+      mimeType: file.type
+    };
+
+    console.log('✅ Upload successful:', metadata);
+    return metadata;
+  }
+
+  /**
+   * Download and decrypt a file from the local P2P node
+   */
+  async getFile(fileHash: string, decryptionKey?: string): Promise<File | null> {
+    console.log(`📥 Downloading file with hash: ${fileHash}`);
+
+    const files = await this.listFiles();
+    const metadata = files.find(f => f.hash === fileHash);
+    
+    if (!metadata) {
+      console.error('File metadata not found');
+      return null;
+    }
+
+    const response = await fetch(`${this.baseUrl}/download/${metadata.path || metadata.name}`);
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.statusText}`);
+    }
+
+    let data: any = await response.blob();
+
+    if (metadata.isEncrypted && decryptionKey) {
+      console.log('🔓 Decrypting file...');
+      const encryptedText = await data.text();
+      try {
+        const decrypted = CryptoJS.AES.decrypt(encryptedText, decryptionKey);
+        const typedArray = this.wordArrayToUint8Array(decrypted);
+        data = new Blob([typedArray]);
+      } catch (e) {
+        console.error('❌ Decryption failed. Check your key.');
+        throw new Error('Decryption failed. Invalid key?');
       }
-      const fileHash = this.calculateHash(fileBuffer);
-      const checksum = CryptoJS.SHA256(
-        CryptoJS.enc.Hex.parse(fileHash)
-      ).toString();
-
-      const metadata: FileMetadata = {
-        id: fileId,
-        name: file.name,
-        size: file.size,
-        hash: fileHash,
-        uploadedAt: Date.now(),
-        indexed,
-        peerId,
-        mimeType: file.type,
-        checksum,
-        isEncrypted,
-        encryptionKeyId,
-      };
-
-      // Store in IndexedDB
-      if (this.db) {
-        const transaction = this.db.transaction(['files', 'metadata'], 'readwrite');
-        const fileStore = transaction.objectStore('files');
-        const metadataStore = transaction.objectStore('metadata');
-
-        fileStore.add({
-          id: fileId,
-          data: fileBuffer,
-          metadata,
-        });
-
-        metadataStore.add(metadata);
-      }
-
-      // Update file index
-      this.fileIndex.set(fileHash, metadata);
-
-      // Update storage quota
-      this.updateStorageQuota();
-
-      return metadata;
-    } catch (error) {
-      console.error('Failed to add file:', error);
-      throw error;
     }
+
+    return new File([data], metadata.name, { type: metadata.mimeType || 'application/octet-stream' });
   }
 
-  async getFile(fileHash: string, encryptionKey?: string): Promise<File | null> {
+  /**
+   * Get all files from the local P2P node
+   */
+  async listFiles(): Promise<FileMetadata[]> {
     try {
-      if (!this.db) return null;
-
-      return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['files'], 'readonly');
-        const store = transaction.objectStore('files');
-        const request = store.getAll();
-
-        request.onsuccess = (event: any) => {
-          const files = event.target.result;
-            const fileData = files.find(
-              (f: any) => f.metadata.hash === fileHash
-            );
-
-            if (fileData && fileData.metadata.isEncrypted && encryptionKey) {
-              try {
-                const decrypted = CryptoJS.AES.decrypt(new TextDecoder().decode(fileData.data), encryptionKey);
-                const wordArray = decrypted.words;
-                const byteArray = new Uint8Array(wordArray.length * 4);
-                for (let i = 0; i < wordArray.length; i++) {
-                  byteArray[i * 4] = (wordArray[i] >> 24) & 0xFF;
-                  byteArray[i * 4 + 1] = (wordArray[i] >> 16) & 0xFF;
-                  byteArray[i * 4 + 2] = (wordArray[i] >> 8) & 0xFF;
-                  byteArray[i * 4 + 3] = wordArray[i] & 0xFF;
-                }
-                fileData.data = byteArray.buffer;
-              } catch (e) {
-                console.error('Decryption failed:', e);
-                reject(new Error('Decryption failed'));
-                return;
-              }
-            }
-
-          if (fileData) {
-            const blob = new Blob([fileData.data], {
-              type: fileData.metadata.mimeType,
-            });
-            const file = new File([blob], fileData.metadata.name, {
-              type: fileData.metadata.mimeType,
-            });
-            resolve(file);
-          } else {
-            resolve(null);
-          }
-        };
-
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('Failed to get file:', error);
-      throw error;
+      const response = await fetch(`${this.baseUrl}/files`);
+      if (!response.ok) return [];
+      const data = await response.json();
+      return data.map((f: any) => ({
+        id: f.hash,
+        name: f.name,
+        size: f.size,
+        hash: f.hash,
+        uploadedAt: new Date(f.uploadedAt).getTime(),
+        isEncrypted: f.isEncrypted,
+        path: f.path
+      }));
+    } catch (e) {
+      console.error('Failed to list files:', e);
+      return [];
     }
   }
 
-  async deleteFile(fileHash: string): Promise<boolean> {
-    try {
-      if (!this.db) return false;
-
-      return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['files', 'metadata'], 'readwrite');
-        const fileStore = transaction.objectStore('files');
-        const metadataStore = transaction.objectStore('metadata');
-
-        // Delete from metadata
-        metadataStore.delete(fileHash);
-
-        // Delete from files
-        const fileRequest = fileStore.getAll();
-        fileRequest.onsuccess = (event: any) => {
-          const files = event.target.result;
-          const fileToDelete = files.find(
-            (f: any) => f.metadata.hash === fileHash
-          );
-          if (fileToDelete) {
-            fileStore.delete(fileToDelete.id);
-          }
-        };
-
-        transaction.oncomplete = () => {
-          this.fileIndex.delete(fileHash);
-          this.updateStorageQuota();
-          resolve(true);
-        };
-
-        transaction.onerror = () => reject(transaction.error);
-      });
-    } catch (error) {
-      console.error('Failed to delete file:', error);
-      throw error;
-    }
-  }
-
+  /**
+   * Search for files (local implementation)
+   */
   async searchFiles(query: string): Promise<FileMetadata[]> {
-    try {
-      const results: FileMetadata[] = [];
-      const lowerQuery = query.toLowerCase();
-
-      for (const metadata of this.fileIndex.values()) {
-        if (
-          metadata.name.toLowerCase().includes(lowerQuery) ||
-          metadata.hash.includes(query)
-        ) {
-          results.push(metadata);
-        }
-      }
-
-      return results;
-    } catch (error) {
-      console.error('Failed to search files:', error);
-      throw error;
-    }
-  }
-
-  getFileIndex(): FileMetadata[] {
-    return Array.from(this.fileIndex.values());
+    const files = await this.listFiles();
+    const lowerQuery = query.toLowerCase();
+    return files.filter(f => 
+      f.name.toLowerCase().includes(lowerQuery) || 
+      f.hash.includes(query)
+    );
   }
 
   getStorageQuota(): StorageQuota {
     return this.storageQuota;
   }
 
-  setStorageQuota(totalGB: number): void {
-    this.storageQuota.totalGB = totalGB;
-    this.storageQuota.costPerMonth = totalGB * 1; // $1 per TB
-    this.updateStorageQuota();
+  private readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
   }
 
-  private updateStorageQuota(): void {
-    let usedBytes = 0;
-    for (const metadata of this.fileIndex.values()) {
-      usedBytes += metadata.size;
+  private wordArrayToUint8Array(wordArray: any): Uint8Array {
+    const l = wordArray.sigBytes;
+    const words = wordArray.words;
+    const result = new Uint8Array(l);
+    for (let i = 0; i < l; i++) {
+      result[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
     }
-
-    this.storageQuota.usedGB = usedBytes / (1024 * 1024 * 1024);
-    this.storageQuota.availableGB =
-      this.storageQuota.totalGB - this.storageQuota.usedGB;
-  }
-
-  private calculateHash(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let hash = '';
-    for (let i = 0; i < bytes.length; i++) {
-      hash += bytes[i].toString(16).padStart(2, '0');
-    }
-    return hash;
-  }
-
-  private loadFileIndex(): void {
-    if (!this.db) return;
-
-    const transaction = this.db.transaction(['metadata'], 'readonly');
-    const store = transaction.objectStore('metadata');
-    const request = store.getAll();
-
-    request.onsuccess = (event: any) => {
-      const files = event.target.result;
-      for (const metadata of files) {
-        this.fileIndex.set(metadata.hash, metadata);
-      }
-      this.updateStorageQuota();
-    };
+    return result;
   }
 }
 
