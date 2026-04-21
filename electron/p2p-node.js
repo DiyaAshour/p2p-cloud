@@ -111,10 +111,7 @@ export class ElectronP2PNode {
       const payload = JSON.parse(raw || '{}');
       const stored = await this.storeChunk(payload);
 
-      await pipe(
-        [uint8ArrayFromString(JSON.stringify({ ok: stored }))],
-        stream
-      );
+      await pipe([uint8ArrayFromString(JSON.stringify(stored))], stream);
     });
 
     this.node.handle(CHUNK_REQUEST_PROTOCOL, async ({ stream }) => {
@@ -252,18 +249,23 @@ export class ElectronP2PNode {
   }
 
   async storeChunk(payload) {
-    if (!payload?.chunkId || !payload?.base64) {
-      return false;
+    if (!payload?.chunkId || !payload?.base64 || !payload?.checksum) {
+      return { ok: false, error: 'INVALID_PAYLOAD' };
     }
 
     if (!this.config.acceptsNetworkStorage) {
-      return false;
+      return { ok: false, error: 'STORAGE_DISABLED' };
     }
 
     const bytes = Buffer.from(payload.base64, 'base64');
+    const actualChecksum = this.createChecksum(bytes);
+    if (actualChecksum !== payload.checksum) {
+      return { ok: false, error: 'CHECKSUM_MISMATCH' };
+    }
+
     const nextUsage = this.getLocalChunkBytes() + bytes.byteLength;
     if (nextUsage > this.config.totalSharedBytes) {
-      return false;
+      return { ok: false, error: 'INSUFFICIENT_CAPACITY' };
     }
 
     const chunkPath = path.join(this.chunkDir, `${payload.chunkId}.bin`);
@@ -281,7 +283,7 @@ export class ElectronP2PNode {
 
     await this.announceNode();
     this.broadcast();
-    return true;
+    return { ok: true, checksum: actualChecksum };
   }
 
   async readChunk(chunkId) {
@@ -292,10 +294,16 @@ export class ElectronP2PNode {
 
     const chunkPath = path.join(this.chunkDir, `${chunkId}.bin`);
     const data = await fs.readFile(chunkPath);
+    const checksum = this.createChecksum(data);
+    if (checksum !== entry.checksum) {
+      return { ok: false, error: 'CHECKSUM_MISMATCH' };
+    }
+
     return {
       ok: true,
       chunkId,
       base64: data.toString('base64'),
+      checksum,
       metadata: entry,
     };
   }
