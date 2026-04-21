@@ -4,12 +4,14 @@ const ipc = (window as any).electron?.ipcRenderer;
 
 export default function Onboarding({ onReady }) {
   const [step, setStep] = useState(0);
-  const [wallet, setWallet] = useState(null);
+  const [wallet, setWallet] = useState<string | null>(null);
   const [disk, setDisk] = useState({ total: 0, free: 0 });
   const [selected, setSelected] = useState(0);
 
   useEffect(() => {
     const init = async () => {
+      if (!ipc) return;
+
       const existing = await ipc.invoke("onboarding:read");
       if (existing?.wallet && existing?.storage) {
         onReady();
@@ -26,6 +28,12 @@ export default function Onboarding({ onReady }) {
   }, []);
 
   const connectWallet = async () => {
+    if (!window.ethereum) {
+      window.open("http://127.0.0.1:3000", "_blank");
+      alert("MetaMask is not available inside Electron. A browser tab has been opened so you can connect your wallet there.");
+      return;
+    }
+
     const accounts = await window.ethereum.request({
       method: "eth_requestAccounts",
     });
@@ -35,6 +43,8 @@ export default function Onboarding({ onReady }) {
   };
 
   const activate = async () => {
+    if (!ipc) return;
+
     await ipc.invoke("p2p:start");
 
     await ipc.invoke("p2p:update-config", {
@@ -56,6 +66,7 @@ export default function Onboarding({ onReady }) {
       {step === 0 && (
         <>
           <h2>Connect Wallet</h2>
+          <p>If MetaMask is unavailable in Electron, this button will open the wallet flow in your browser.</p>
           <button onClick={connectWallet}>Connect MetaMask</button>
         </>
       )}
