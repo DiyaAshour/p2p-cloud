@@ -48,6 +48,7 @@ export default function Home() {
   const [sharedGB, setSharedGB] = useState('5');
   const [acceptStorage, setAcceptStorage] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
+  const [earningsUsd, setEarningsUsd] = useState(0);
 
   const sharedBytes = useMemo(() => {
     const value = Number(sharedGB || '0');
@@ -58,6 +59,12 @@ export default function Home() {
     if (!ipc) return;
     const nextStatus = await ipc.invoke('p2p:status');
     setStatus(nextStatus);
+  };
+
+  const refreshEarnings = async (peerId?: string | null) => {
+    if (!ipc || !peerId) return;
+    const earnings = await ipc.invoke('earnings:get');
+    setEarningsUsd(Number(earnings?.[peerId] || 0));
   };
 
   useEffect(() => {
@@ -78,6 +85,10 @@ export default function Home() {
 
     bootstrap();
   }, [wallet.address, sharedBytes, acceptStorage]);
+
+  useEffect(() => {
+    refreshEarnings(status?.peerId);
+  }, [status?.peerId]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -105,10 +116,11 @@ export default function Home() {
     try {
       const manifests: UploadedManifest[] = [];
       for (const file of selectedFiles) {
-        const manifest = await p2pUploadService.uploadFile(
+        const result = await p2pUploadService.uploadFile(
           file,
           isEncrypting ? tempEncryptionKey : undefined
         );
+        const manifest = result.manifest;
         manifests.push({
           fileId: manifest.fileId,
           originalName: manifest.originalName,
@@ -123,6 +135,7 @@ export default function Home() {
       setTempEncryptionKey('');
       toast.success('Files uploaded to the P2P network');
       await refreshStatus();
+      await refreshEarnings(status?.peerId);
     } catch (error) {
       console.error(error);
       toast.error('P2P upload failed');
@@ -160,6 +173,15 @@ export default function Home() {
     }
   };
 
+  const handlePayout = async () => {
+    if (earningsUsd <= 0) {
+      toast.error('No earnings available yet');
+      return;
+    }
+
+    toast.message(`Payout flow placeholder: $${earningsUsd.toFixed(6)} available`);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
       <header className="border-b border-slate-700 bg-slate-800/60 backdrop-blur-sm sticky top-0 z-50">
@@ -190,7 +212,7 @@ export default function Home() {
       </header>
 
       <main className="container mx-auto px-4 py-8 space-y-6">
-        <div className="grid md:grid-cols-4 gap-4">
+        <div className="grid md:grid-cols-5 gap-4">
           <Card className="p-4 bg-slate-800 border-slate-700">
             <div className="flex items-center gap-3">
               <Network className="w-5 h-5 text-blue-400" />
@@ -211,6 +233,11 @@ export default function Home() {
           <Card className="p-4 bg-slate-800 border-slate-700">
             <p className="text-slate-400 text-sm">Shared Capacity</p>
             <p className="text-2xl font-bold">{((status?.sharedCapacityBytes || 0) / 1024 / 1024 / 1024).toFixed(1)} GB</p>
+          </Card>
+          <Card className="p-4 bg-slate-800 border-slate-700">
+            <p className="text-slate-400 text-sm">Earnings (USD)</p>
+            <p className="text-2xl font-bold">${earningsUsd.toFixed(6)}</p>
+            <Button variant="outline" size="sm" onClick={handlePayout} className="mt-3">Withdraw</Button>
           </Card>
         </div>
 
