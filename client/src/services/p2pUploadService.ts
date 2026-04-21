@@ -1,11 +1,12 @@
 import { chunkingService } from './chunkingService';
 import { placementService } from './placementService';
+import { chunkCryptoService } from './chunkCryptoService';
 import { FileManifest } from '@shared/p2p-types';
 
 const ipc = (window as any).electron?.ipcRenderer;
 
 export class P2PUploadService {
-  async uploadFile(file: File) {
+  async uploadFile(file: File, encryptionKey?: string) {
     if (!ipc) {
       throw new Error('Electron IPC not available');
     }
@@ -16,11 +17,7 @@ export class P2PUploadService {
     const chunks = await chunkingService.splitFile(file);
     const chunkIds = chunks.map((c) => c.id);
 
-    const placements = placementService.planPlacement(
-      chunkIds,
-      peers,
-      2
-    );
+    const placements = placementService.planPlacement(chunkIds, peers, 2);
 
     const manifest: FileManifest = {
       fileId: crypto.randomUUID(),
@@ -28,7 +25,7 @@ export class P2PUploadService {
       originalName: file.name,
       mimeType: file.type,
       size: file.size,
-      encrypted: false,
+      encrypted: !!encryptionKey,
       createdAt: Date.now(),
       chunkSize: 1024 * 1024,
       replicationFactor: 2,
@@ -38,9 +35,12 @@ export class P2PUploadService {
     for (const chunk of chunks) {
       const placement = placements.find((p) => p.chunkId === chunk.id);
 
-      const base64 = btoa(
-        String.fromCharCode(...new Uint8Array(chunk.buffer))
-      );
+      let payloadData: string;
+      if (encryptionKey) {
+        payloadData = chunkCryptoService.encryptBuffer(chunk.buffer, encryptionKey);
+      } else {
+        payloadData = btoa(String.fromCharCode(...new Uint8Array(chunk.buffer)));
+      }
 
       const record = {
         chunkId: chunk.id,
@@ -48,14 +48,14 @@ export class P2PUploadService {
         index: chunk.index,
         size: chunk.buffer.byteLength,
         checksum: '',
-        encrypted: false,
+        encrypted: !!encryptionKey,
         storagePeerIds: placement?.targetPeerIds || [],
       };
 
       for (const peerId of record.storagePeerIds) {
         await ipc.invoke('p2p:chunk-store', peerId, {
           ...record,
-          base64,
+          base64: payloadData,
         });
       }
 
@@ -68,13 +68,13 @@ export class P2PUploadService {
       name: manifest.originalName,
       size: manifest.size,
       uploadedAt: manifest.createdAt,
-      isEncrypted: false,
+      isEncrypted: manifest.encrypted,
     });
 
     return manifest;
   }
 
-  async downloadFile(fileId: string): Promise<File> {
+  async downloadFile(fileId: string, encryptionKey?: string): Promise<File> {
     if (!ipc) {
       throw new Error('Electron IPC not available');
     }
@@ -89,12 +89,22 @@ export class P2PUploadService {
       for (const peerId of chunk.storagePeerIds) {
         const res = await ipc.invoke('p2p:chunk-request', peerId, chunk.chunkId);
         if (res?.base64) {
-          const binary = atob(res.base64);
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
+          let buffer: ArrayBuffer;
+          if (chunk.encrypted) {
+            if (!encryptionKey) {
+              throw new Error('Missing encryption key for encrypted file');
+            }
+            buffer = chunkCryptoService.decryptToBuffer(res.base64, encryptionKey);
+          } else {
+            const binary = atob(res.base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+            buffer = bytes.buffer;
           }
-          buffers.push(bytes.buffer);
+
+          buffers.push(buffer);
           found = true;
           break;
         }
