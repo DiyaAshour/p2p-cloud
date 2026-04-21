@@ -38,7 +38,6 @@ export default function Onboarding({ onReady }) {
     init();
   }, []);
 
-  // 🔥 Browser wallet connect handler
   useEffect(() => {
     if (!ipc || typeof window === "undefined") return;
 
@@ -70,7 +69,6 @@ export default function Onboarding({ onReady }) {
     }
   }, []);
 
-  // 🔥 Electron polling for wallet after browser connect
   useEffect(() => {
     if (!ipc || step !== 0) return;
 
@@ -87,7 +85,11 @@ export default function Onboarding({ onReady }) {
 
   const connectWallet = async () => {
     if (!window.ethereum) {
-      window.open(browserConnectUrl, "_blank");
+      if (ipc) {
+        await ipc.invoke("system:open-external", browserConnectUrl);
+      } else {
+        window.open(browserConnectUrl, "_blank");
+      }
       alert("Opening browser to connect wallet...");
       return;
     }
