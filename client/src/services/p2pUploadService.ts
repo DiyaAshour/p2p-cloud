@@ -1,6 +1,7 @@
 import { chunkingService } from './chunkingService';
 import { placementService } from './placementService';
 import { chunkCryptoService } from './chunkCryptoService';
+import { paymentService } from './paymentService';
 import { FileManifest } from '@shared/p2p-types';
 
 const ipc = (window as any).electron?.ipcRenderer;
@@ -9,6 +10,12 @@ export class P2PUploadService {
   async uploadFile(file: File, encryptionKey?: string) {
     if (!ipc) {
       throw new Error('Electron IPC not available');
+    }
+
+    // 🔥 PAYMENT GATE
+    const { txHash } = await paymentService.payForUpload(file.size);
+    if (!txHash) {
+      throw new Error('PAYMENT_REQUIRED');
     }
 
     const nodeStatus = await ipc.invoke('p2p:status');
@@ -71,7 +78,7 @@ export class P2PUploadService {
       isEncrypted: manifest.encrypted,
     });
 
-    return manifest;
+    return { manifest, txHash };
   }
 
   async downloadFile(fileId: string, encryptionKey?: string): Promise<File> {
