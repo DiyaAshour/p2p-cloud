@@ -14,18 +14,18 @@ async function openExternalUrl(url = APP_URL) {
   return { ok: true, url: parsed.toString() };
 }
 
-app.whenReady().then(async () => {
-  ipcMain.handle('system:open-external', async (_event, url) => {
-    try {
-      return await openExternalUrl(url);
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  });
+ipcMain.handle('system:open-external', async (_event, url) => {
+  try {
+    return await openExternalUrl(url);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
 
+app.whenReady().then(async () => {
   try {
     await openExternalUrl(APP_URL);
   } catch (error) {
