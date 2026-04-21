@@ -27,7 +27,28 @@ export class PaymentService {
     };
   }
 
-  async payForUpload(bytes: number): Promise<{ txHash: string; intent: PaymentIntent }> {
+  async waitForConfirmation(txHash: string) {
+    let receipt = null;
+
+    while (!receipt) {
+      receipt = await window.ethereum.request({
+        method: 'eth_getTransactionReceipt',
+        params: [txHash],
+      });
+
+      if (!receipt) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+
+    if (receipt.status !== '0x1') {
+      throw new Error('PAYMENT_FAILED');
+    }
+
+    return receipt;
+  }
+
+  async payForUpload(bytes: number): Promise<{ txHash: string; intent: PaymentIntent; receipt: any }> {
     if (!window.ethereum) {
       throw new Error('MetaMask is required');
     }
@@ -53,7 +74,8 @@ export class PaymentService {
       ],
     });
 
-    return { txHash, intent };
+    const receipt = await this.waitForConfirmation(txHash);
+    return { txHash, intent, receipt };
   }
 }
 
