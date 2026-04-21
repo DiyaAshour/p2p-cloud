@@ -21,23 +21,54 @@ function Router() {
   );
 }
 
+function BrowserFallback() {
+  return (
+    <div style={{ padding: 40, color: "white", background: "#0f172a", minHeight: "100vh" }}>
+      <h1>P2P Cloud</h1>
+      <p>This app is running in the browser without Electron IPC.</p>
+      <p>
+        Wallet features may still work in the browser, but local node controls,
+        onboarding persistence, and system-level storage integration require Electron.
+      </p>
+    </div>
+  );
+}
+
 function App() {
   const [ready, setReady] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [isElectron, setIsElectron] = useState(false);
 
   useEffect(() => {
     const init = async () => {
-      const session = await ipc.invoke("onboarding:read");
-      if (session?.wallet && session?.storage) {
-        setReady(true);
+      if (!ipc) {
+        setIsElectron(false);
+        setChecked(true);
+        return;
       }
-      setChecked(true);
+
+      setIsElectron(true);
+
+      try {
+        const session = await ipc.invoke("onboarding:read");
+        if (session?.wallet && session?.storage) {
+          setReady(true);
+        }
+      } catch (error) {
+        console.error("Failed to read onboarding session:", error);
+      } finally {
+        setChecked(true);
+      }
     };
 
     init();
   }, []);
 
   if (!checked) return null;
+
+  if (!isElectron) {
+    return <BrowserFallback />;
+  }
 
   if (!ready) {
     return <Onboarding onReady={() => setReady(true)} />;
