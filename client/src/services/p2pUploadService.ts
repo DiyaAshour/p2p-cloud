@@ -6,15 +6,21 @@ import { FileManifest } from '@shared/p2p-types';
 
 const ipc = (window as any).electron?.ipcRenderer;
 
+async function sha256(buffer: ArrayBuffer) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 export class P2PUploadService {
   async uploadFile(file: File, encryptionKey?: string) {
     if (!ipc) {
       throw new Error('Electron IPC not available');
     }
 
-    // 🔥 PAYMENT GATE
-    const { txHash } = await paymentService.payForUpload(file.size);
-    if (!txHash) {
+    const payment = await paymentService.payForUpload(file.size);
+    if (!payment?.txHash) {
       throw new Error('PAYMENT_REQUIRED');
     }
 
@@ -23,7 +29,6 @@ export class P2PUploadService {
 
     const chunks = await chunkingService.splitFile(file);
     const chunkIds = chunks.map((c) => c.id);
-
     const placements = placementService.planPlacement(chunkIds, peers, 2);
 
     const manifest: FileManifest = {
@@ -41,6 +46,7 @@ export class P2PUploadService {
 
     for (const chunk of chunks) {
       const placement = placements.find((p) => p.chunkId === chunk.id);
+      const checksum = await sha256(chunk.buffer);
 
       let payloadData: string;
       if (encryptionKey) {
@@ -54,17 +60,19 @@ export class P2PUploadService {
         fileId: manifest.fileId,
         index: chunk.index,
         size: chunk.buffer.byteLength,
-        checksum: '',
+        checksum,
         encrypted: !!encryptionKey,
         storagePeerIds: placement?.targetPeerIds || [],
       };
 
-      for (const peerId of record.storagePeerIds) {
-        await ipc.invoke('p2p:chunk-store', peerId, {
-          ...record,
-          base64: payloadData,
-        });
-      }
+      await Promise.all(
+        record.storagePeerIds.map((peerId) =>
+          ipc.invoke('p2p:chunk-store', peerId, {
+            ...record,
+            base64: payloadData,
+          })
+        )
+      );
 
       manifest.chunks.push(record);
     }
@@ -78,7 +86,20 @@ export class P2PUploadService {
       isEncrypted: manifest.encrypted,
     });
 
-    return { manifest, txHash };
+    const nodeShare = payment.intent.amountUsd * 0.7;
+    const totalChunks = Math.max(manifest.chunks.length, 1);
+
+    for (const chunk of manifest.chunks) {
+      const rewardPerChunk = nodeShare / totalChunks;
+      for (const peerId of chunk.storagePeerIds) {
+        await ipc.invoke('earnings:add', {
+          peerId,
+          amount: rewardPerChunk,
+        });
+      }
+    }
+
+    return { manifest, payment };
   }
 
   async downloadFile(fileId: string, encryptionKey?: string): Promise<File> {
@@ -87,7 +108,6 @@ export class P2PUploadService {
     }
 
     const manifest: FileManifest = await ipc.invoke('p2p:manifest-read', fileId);
-
     const buffers: ArrayBuffer[] = [];
 
     for (const chunk of manifest.chunks.sort((a, b) => a.index - b.index)) {
@@ -96,6 +116,10 @@ export class P2PUploadService {
       for (const peerId of chunk.storagePeerIds) {
         const res = await ipc.invoke('p2p:chunk-request', peerId, chunk.chunkId);
         if (res?.base64) {
+          if (res.checksum && res.checksum !== chunk.checksum) {
+            continue;
+          }
+
           let buffer: ArrayBuffer;
           if (chunk.encrypted) {
             if (!encryptionKey) {
@@ -111,6 +135,11 @@ export class P2PUploadService {
             buffer = bytes.buffer;
           }
 
+          const actualChecksum = await sha256(buffer);
+          if (actualChecksum !== chunk.checksum) {
+            continue;
+          }
+
           buffers.push(buffer);
           found = true;
           break;
@@ -118,7 +147,7 @@ export class P2PUploadService {
       }
 
       if (!found) {
-        throw new Error(`Missing chunk ${chunk.chunkId}`);
+        throw new Error(`Missing or corrupted chunk ${chunk.chunkId}`);
       }
     }
 
