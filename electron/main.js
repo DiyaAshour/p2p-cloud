@@ -2,9 +2,11 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { ElectronP2PNode } from './p2p-node.js';
 
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -12,6 +14,7 @@ let mainWindow;
 const vaultDir = path.resolve(__dirname, '..', 'uploads');
 const manifestsDir = path.join(vaultDir, 'manifests');
 const onboardingPath = path.join(vaultDir, 'onboarding.json');
+const earningsPath = path.join(vaultDir, 'earnings.json');
 const p2pNode = new ElectronP2PNode({ vaultDir });
 
 async function ensureDirs() {
@@ -57,13 +60,44 @@ async function readOnboardingSession() {
   }
 }
 
-function getDiskInfo() {
-  const total = os.totalmem();
-  const free = os.freemem();
-  return {
-    total,
-    free,
-  };
+async function readEarnings() {
+  try {
+    const content = await fs.readFile(earningsPath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+async function saveEarnings(data) {
+  await fs.writeFile(earningsPath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+async function getDiskInfo() {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('wmic', ['logicaldisk', 'where', 'DeviceID="C:"', 'get', 'Size,FreeSpace', '/format:value']);
+      const sizeMatch = stdout.match(/Size=(\d+)/);
+      const freeMatch = stdout.match(/FreeSpace=(\d+)/);
+      return {
+        total: sizeMatch ? Number(sizeMatch[1]) : 0,
+        free: freeMatch ? Number(freeMatch[1]) : 0,
+      };
+    }
+
+    const { stdout } = await execFileAsync('df', ['-k', '.']);
+    const lines = stdout.trim().split('\n');
+    const parts = lines[lines.length - 1].trim().split(/\s+/);
+    return {
+      total: Number(parts[1] || 0) * 1024,
+      free: Number(parts[3] || 0) * 1024,
+    };
+  } catch {
+    return {
+      total: 0,
+      free: 0,
+    };
+  }
 }
 
 app.whenReady().then(async () => {
@@ -113,3 +147,10 @@ ipcMain.handle('onboarding:save', async (_event, payload) => {
   return true;
 });
 ipcMain.handle('onboarding:read', async () => readOnboardingSession());
+ipcMain.handle('earnings:get', async () => readEarnings());
+ipcMain.handle('earnings:add', async (_event, { peerId, amount }) => {
+  const earnings = await readEarnings();
+  earnings[peerId] = (earnings[peerId] || 0) + amount;
+  await saveEarnings(earnings);
+  return true;
+});
