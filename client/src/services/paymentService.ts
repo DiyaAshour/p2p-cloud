@@ -6,7 +6,7 @@ declare global {
   }
 }
 
-const PLATFORM_WALLET = '0x1111111111111111111111111111111111111111';
+const PLATFORM_WALLET = import.meta.env.VITE_PLATFORM_WALLET || '';
 const USD_PER_ETH = 3000;
 
 export type PaymentIntent = {
@@ -17,6 +17,10 @@ export type PaymentIntent = {
 
 export class PaymentService {
   createIntent(bytes: number): PaymentIntent {
+    if (!PLATFORM_WALLET) {
+      throw new Error('Missing platform wallet address');
+    }
+
     const amountUsd = pricingService.calculateMonthlyPriceUsd(bytes);
     const amountEth = amountUsd / USD_PER_ETH;
 
