@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const ipc = (window as any).electron?.ipcRenderer;
 
@@ -7,6 +7,12 @@ export default function Onboarding({ onReady }) {
   const [wallet, setWallet] = useState<string | null>(null);
   const [disk, setDisk] = useState({ total: 0, free: 0 });
   const [selected, setSelected] = useState(0);
+
+  const browserConnectUrl = useMemo(() => {
+    const url = new URL("http://127.0.0.1:3000/");
+    url.searchParams.set("walletConnect", "1");
+    return url.toString();
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -18,6 +24,11 @@ export default function Onboarding({ onReady }) {
         return;
       }
 
+      if (existing?.wallet) {
+        setWallet(existing.wallet);
+        setStep(1);
+      }
+
       const d = await ipc.invoke("system:get-disk-info");
       const defaultShare = d.total * 0.3;
       setDisk(d);
@@ -27,10 +38,57 @@ export default function Onboarding({ onReady }) {
     init();
   }, []);
 
+  // 🔥 Browser wallet connect handler
+  useEffect(() => {
+    if (!ipc || typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const connectMode = params.get("walletConnect") === "1";
+
+    if (connectMode && window.ethereum) {
+      const run = async () => {
+        try {
+          const accounts = await window.ethereum.request({
+            method: "eth_requestAccounts",
+          });
+
+          const nextWallet = accounts?.[0];
+          if (!nextWallet) return;
+
+          await ipc.invoke("onboarding:save", {
+            wallet: nextWallet,
+            storage: null,
+          });
+
+          alert("Wallet connected. Go back to the app.");
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      run();
+    }
+  }, []);
+
+  // 🔥 Electron polling for wallet after browser connect
+  useEffect(() => {
+    if (!ipc || step !== 0) return;
+
+    const timer = setInterval(async () => {
+      const existing = await ipc.invoke("onboarding:read");
+      if (existing?.wallet) {
+        setWallet(existing.wallet);
+        setStep(1);
+      }
+    }, 1500);
+
+    return () => clearInterval(timer);
+  }, [step]);
+
   const connectWallet = async () => {
     if (!window.ethereum) {
-      window.open("http://127.0.0.1:3000", "_blank");
-      alert("MetaMask is not available inside Electron. A browser tab has been opened so you can connect your wallet there.");
+      window.open(browserConnectUrl, "_blank");
+      alert("Opening browser to connect wallet...");
       return;
     }
 
@@ -66,7 +124,7 @@ export default function Onboarding({ onReady }) {
       {step === 0 && (
         <>
           <h2>Connect Wallet</h2>
-          <p>If MetaMask is unavailable in Electron, this button will open the wallet flow in your browser.</p>
+          <p>This will open Chrome to connect MetaMask.</p>
           <button onClick={connectWallet}>Connect MetaMask</button>
         </>
       )}
@@ -75,6 +133,7 @@ export default function Onboarding({ onReady }) {
         <>
           <h2>Allocate Storage</h2>
 
+          <p>Wallet: {wallet}</p>
           <p>Total: {(disk.total / 1e9).toFixed(2)} GB</p>
           <p>Selected: {(selected / 1e9).toFixed(2)} GB</p>
 
