@@ -30,6 +30,11 @@ export class ElectronP2PNode {
     this.remoteNodes = new Map();
     this.localChunks = new Map();
     this.subscribers = new Set();
+    this.repairTimer = null;
+    this.bootstrapPeers = [
+      '/ip4/127.0.0.1/tcp/15002',
+      '/ip4/127.0.0.1/tcp/15003',
+    ];
     this.config = {
       walletAddress: null,
       totalSharedBytes: 5 * 1024 * 1024 * 1024,
@@ -110,7 +115,6 @@ export class ElectronP2PNode {
 
       const payload = JSON.parse(raw || '{}');
       const stored = await this.storeChunk(payload);
-
       await pipe([uint8ArrayFromString(JSON.stringify(stored))], stream);
     });
 
@@ -159,13 +163,27 @@ export class ElectronP2PNode {
 
     await this.node.start();
     this.started = true;
+
+    for (const addr of this.bootstrapPeers) {
+      try {
+        await this.node.dial(addr);
+      } catch {
+        // ignore unavailable bootstrap peers
+      }
+    }
+
     await this.announceNode();
+    this.startRepairLoop();
     this.broadcast();
     return this.getStatus();
   }
 
   async stop() {
     if (!this.node || !this.started) return;
+    if (this.repairTimer) {
+      clearInterval(this.repairTimer);
+      this.repairTimer = null;
+    }
     await this.node.stop();
     this.started = false;
     this.broadcast();
@@ -278,7 +296,7 @@ export class ElectronP2PNode {
       size: bytes.byteLength,
       checksum: payload.checksum,
       encrypted: payload.encrypted,
-      storagePeerIds: [this.node?.peerId?.toString?.()].filter(Boolean),
+      storagePeerIds: Array.from(new Set([...(payload.storagePeerIds || []), this.node?.peerId?.toString?.()].filter(Boolean))),
     });
 
     await this.announceNode();
@@ -384,6 +402,44 @@ export class ElectronP2PNode {
       metadata: parsed.metadata,
       buffer: parsed.file,
     };
+  }
+
+  startRepairLoop() {
+    if (this.repairTimer) {
+      clearInterval(this.repairTimer);
+    }
+
+    this.repairTimer = setInterval(async () => {
+      for (const [chunkId, chunk] of this.localChunks.entries()) {
+        const alivePeers = chunk.storagePeerIds.filter((id) =>
+          id === this.node?.peerId?.toString?.() || this.remoteNodes.has(id)
+        );
+
+        if (alivePeers.length >= this.config.defaultReplicationFactor) {
+          continue;
+        }
+
+        const data = await this.readChunk(chunkId);
+        if (!data?.base64) {
+          continue;
+        }
+
+        const targets = Array.from(this.remoteNodes.keys())
+          .filter((id) => !chunk.storagePeerIds.includes(id))
+          .slice(0, this.config.defaultReplicationFactor - alivePeers.length);
+
+        for (const peerId of targets) {
+          const ok = await this.sendChunkToPeer(peerId, {
+            ...chunk,
+            base64: data.base64,
+          });
+
+          if (ok) {
+            chunk.storagePeerIds.push(peerId);
+          }
+        }
+      }
+    }, 15000);
   }
 
   getLocalChunkBytes() {
