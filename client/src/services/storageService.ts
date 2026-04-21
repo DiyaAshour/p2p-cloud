@@ -18,6 +18,14 @@ export interface StorageQuota {
   costPerMonth: number;
 }
 
+export interface VaultStats {
+  totalFiles: number;
+  encryptedFiles: number;
+  publicFiles: number;
+  totalBytes: number;
+  totalMB: number;
+}
+
 class StorageService {
   private baseUrl = 'http://127.0.0.1:3000/api';
   private storageQuota: StorageQuota = {
@@ -27,33 +35,28 @@ class StorageService {
     costPerMonth: 10,
   };
 
-  /**
-   * Upload a file to the local P2P node with optional encryption
-   */
   async addFile(
     file: File,
     _indexed: boolean = false,
     _peerId: string = '',
     encryptionKey?: string
   ): Promise<FileMetadata> {
-    console.log(`📤 Starting upload for: ${file.name}`);
-
-    let fileData: any = await this.readFileAsArrayBuffer(file);
+    let fileData: Blob;
+    const buffer = await this.readFileAsArrayBuffer(file);
     const isEncrypted = !!encryptionKey;
 
     if (isEncrypted && encryptionKey) {
-      console.log('🔐 Encrypting file before upload...');
-      const wordUint8Array = new Uint8Array(fileData);
-      const wordBuffer = CryptoJS.lib.WordArray.create(wordUint8Array as any);
-      const encrypted = CryptoJS.AES.encrypt(wordBuffer, encryptionKey).toString();
+      const uint8Array = new Uint8Array(buffer);
+      const wordArray = CryptoJS.lib.WordArray.create(uint8Array as any);
+      const encrypted = CryptoJS.AES.encrypt(wordArray, encryptionKey).toString();
       fileData = new Blob([encrypted], { type: 'text/plain' });
     } else {
-      fileData = new Blob([fileData], { type: file.type });
+      fileData = new Blob([buffer], { type: file.type || 'application/octet-stream' });
     }
 
     const formData = new FormData();
     formData.append('file', fileData, file.name);
-    formData.append('isEncrypted', isEncrypted.toString());
+    formData.append('isEncrypted', String(isEncrypted));
     formData.append('hash', Math.random().toString(36).substring(7));
 
     const response = await fetch(`${this.baseUrl}/upload`, {
@@ -66,7 +69,7 @@ class StorageService {
     }
 
     const result = await response.json();
-    const metadata: FileMetadata = {
+    return {
       id: result.hash,
       name: result.name,
       size: result.size,
@@ -74,83 +77,95 @@ class StorageService {
       uploadedAt: new Date(result.uploadedAt).getTime(),
       isEncrypted: result.isEncrypted,
       path: result.path,
-      mimeType: file.type
+      mimeType: result.mimeType || file.type,
     };
-
-    console.log('✅ Upload successful:', metadata);
-    return metadata;
   }
 
-  /**
-   * Download and decrypt a file from the local P2P node
-   */
-  async getFile(fileHash: string, decryptionKey?: string): Promise<File | null> {
-    console.log(`📥 Downloading file with hash: ${fileHash}`);
-
-    const files = await this.listFiles();
-    const metadata = files.find(f => f.hash === fileHash);
-    
-    if (!metadata) {
-      console.error('File metadata not found');
-      return null;
-    }
-
-    const response = await fetch(`${this.baseUrl}/download/${metadata.path || metadata.name}`);
+  async getFile(metadata: FileMetadata, decryptionKey?: string): Promise<File | null> {
+    const response = await fetch(`${this.baseUrl}/download/${metadata.hash}`);
     if (!response.ok) {
       throw new Error(`Download failed: ${response.statusText}`);
     }
 
-    let data: any = await response.blob();
+    let blob: Blob = await response.blob();
 
-    if (metadata.isEncrypted && decryptionKey) {
-      console.log('🔓 Decrypting file...');
-      const encryptedText = await data.text();
-      try {
-        const decrypted = CryptoJS.AES.decrypt(encryptedText, decryptionKey);
-        const typedArray = this.wordArrayToUint8Array(decrypted);
-        data = new Blob([typedArray]);
-      } catch (e) {
-        console.error('❌ Decryption failed. Check your key.');
+    if (metadata.isEncrypted) {
+      if (!decryptionKey) {
+        throw new Error('Missing decryption key');
+      }
+
+      const encryptedText = await blob.text();
+      const decrypted = CryptoJS.AES.decrypt(encryptedText, decryptionKey);
+
+      if (!decrypted.sigBytes) {
         throw new Error('Decryption failed. Invalid key?');
       }
+
+      blob = new Blob([this.wordArrayToUint8Array(decrypted)], {
+        type: metadata.mimeType || 'application/octet-stream',
+      });
     }
 
-    return new File([data], metadata.name, { type: metadata.mimeType || 'application/octet-stream' });
+    return new File([blob], metadata.name, {
+      type: metadata.mimeType || 'application/octet-stream',
+    });
   }
 
-  /**
-   * Get all files from the local P2P node
-   */
   async listFiles(): Promise<FileMetadata[]> {
-    try {
-      const response = await fetch(`${this.baseUrl}/files`);
-      if (!response.ok) return [];
-      const data = await response.json();
-      return data.map((f: any) => ({
-        id: f.hash,
-        name: f.name,
-        size: f.size,
-        hash: f.hash,
-        uploadedAt: new Date(f.uploadedAt).getTime(),
-        isEncrypted: f.isEncrypted,
-        path: f.path
-      }));
-    } catch (e) {
-      console.error('Failed to list files:', e);
-      return [];
+    const response = await fetch(`${this.baseUrl}/files`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.map((f: any) => ({
+      id: f.hash,
+      name: f.name,
+      size: f.size,
+      hash: f.hash,
+      uploadedAt: new Date(f.uploadedAt).getTime(),
+      isEncrypted: f.isEncrypted,
+      path: f.path,
+      mimeType: f.mimeType,
+    }));
+  }
+
+  async deleteFile(fileHash: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/files/${fileHash}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to delete file');
     }
   }
 
-  /**
-   * Search for files (local implementation)
-   */
   async searchFiles(query: string): Promise<FileMetadata[]> {
-    const files = await this.listFiles();
-    const lowerQuery = query.toLowerCase();
-    return files.filter(f => 
-      f.name.toLowerCase().includes(lowerQuery) || 
-      f.hash.includes(query)
-    );
+    const response = await fetch(`${this.baseUrl}/files?q=${encodeURIComponent(query)}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.map((f: any) => ({
+      id: f.hash,
+      name: f.name,
+      size: f.size,
+      hash: f.hash,
+      uploadedAt: new Date(f.uploadedAt).getTime(),
+      isEncrypted: f.isEncrypted,
+      path: f.path,
+      mimeType: f.mimeType,
+    }));
+  }
+
+  async getStats(): Promise<VaultStats> {
+    const response = await fetch(`${this.baseUrl}/stats`);
+    if (!response.ok) {
+      return {
+        totalFiles: 0,
+        encryptedFiles: 0,
+        publicFiles: 0,
+        totalBytes: 0,
+        totalMB: 0,
+      };
+    }
+
+    return response.json();
   }
 
   getStorageQuota(): StorageQuota {
@@ -167,10 +182,10 @@ class StorageService {
   }
 
   private wordArrayToUint8Array(wordArray: any): Uint8Array {
-    const l = wordArray.sigBytes;
+    const length = wordArray.sigBytes;
     const words = wordArray.words;
-    const result = new Uint8Array(l);
-    for (let i = 0; i < l; i++) {
+    const result = new Uint8Array(length);
+    for (let i = 0; i < length; i++) {
       result[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
     }
     return result;
