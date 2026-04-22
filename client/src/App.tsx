@@ -21,19 +21,6 @@ function Router() {
   );
 }
 
-function BrowserFallback() {
-  return (
-    <div style={{ padding: 40, color: "white", background: "#0f172a", minHeight: "100vh" }}>
-      <h1>P2P Cloud</h1>
-      <p>This app is running in the browser without Electron IPC.</p>
-      <p>
-        Wallet features may still work in the browser, but local node controls,
-        onboarding persistence, and system-level storage integration require Electron.
-      </p>
-    </div>
-  );
-}
-
 function App() {
   const [ready, setReady] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -43,6 +30,7 @@ function App() {
     const init = async () => {
       if (!ipc) {
         setIsElectron(false);
+        setReady(true);
         setChecked(true);
         return;
       }
@@ -66,11 +54,7 @@ function App() {
 
   if (!checked) return null;
 
-  if (!isElectron) {
-    return <BrowserFallback />;
-  }
-
-  if (!ready) {
+  if (isElectron && !ready) {
     return <Onboarding onReady={() => setReady(true)} />;
   }
 
