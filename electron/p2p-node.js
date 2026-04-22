@@ -3,7 +3,6 @@ import { tcp } from '@libp2p/tcp';
 import { webSockets } from '@libp2p/websockets';
 import { noise } from '@libp2p/noise';
 import { yamux } from '@libp2p/yamux';
-import { identify } from '@libp2p/identify';
 import { kadDHT } from '@libp2p/kad-dht';
 import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { fromString as uint8ArrayFromString } from 'uint8arrays/from-string';
@@ -62,7 +61,6 @@ export class ElectronP2PNode {
       connectionEncryption: [noise()],
       streamMuxers: [yamux()],
       services: {
-        identify: identify(),
         dht: kadDHT(),
         pubsub: gossipsub({
           allowPublishToZeroPeers: true,
