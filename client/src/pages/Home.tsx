@@ -1,42 +1,95 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useWallet } from '@/hooks/useWallet';
-import { useStorage } from '@/hooks/useStorage';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Upload, Download, Wallet, LogOut, Shield, ShieldOff, HardDrive } from 'lucide-react';
+import { Upload, Download, Wallet, LogOut, Shield, ShieldOff, HardDrive, Network } from 'lucide-react';
 import { toast } from 'sonner';
+import { p2pUploadService } from '@/services/p2pUploadService';
+import { contractService } from '@/services/contractService';
 
-type UploadedFileView = {
-  hash: string;
-  name: string;
-  size: number;
-  isEncrypted: boolean;
-  uploadedAt: number;
+type NodeStatus = {
+  started: boolean;
+  peerId: string | null;
+  peers: number;
+  localFiles: number;
+  remoteFiles: number;
+  localChunks?: number;
+  sharedCapacityBytes?: number;
+  acceptsNetworkStorage?: boolean;
+  knownNodes?: Array<{
+    peerId: string;
+    walletAddress: string | null;
+    totalSharedBytes: number;
+    availableSharedBytes: number;
+    acceptsNewChunks: boolean;
+    lastSeenAt: number;
+  }>;
 };
+
+type UploadedManifest = {
+  fileId: string;
+  originalName: string;
+  size: number;
+  encrypted: boolean;
+  createdAt: number;
+};
+
+const ipc = (window as any).electron?.ipcRenderer;
 
 export default function Home() {
   const wallet = useWallet();
-  const storage = useStorage();
+  const [status, setStatus] = useState<NodeStatus | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedManifest[]>([]);
   const [isEncrypting, setIsEncrypting] = useState(false);
   const [tempEncryptionKey, setTempEncryptionKey] = useState('');
   const [decryptionKey, setDecryptionKey] = useState('');
   const [sharedGB, setSharedGB] = useState('5');
+  const [acceptStorage, setAcceptStorage] = useState(true);
+  const [isBusy, setIsBusy] = useState(false);
+  const [earningsUsd, setEarningsUsd] = useState(0);
 
   const sharedBytes = useMemo(() => {
     const value = Number(sharedGB || '0');
     return Math.max(0, value) * 1024 * 1024 * 1024;
   }, [sharedGB]);
 
-  const uploadedFiles: UploadedFileView[] = storage.files.map((file) => ({
-    hash: file.hash,
-    name: file.name,
-    size: file.size,
-    isEncrypted: file.isEncrypted,
-    uploadedAt: file.uploadedAt,
-  }));
+  const refreshStatus = async () => {
+    if (!ipc) return;
+    const nextStatus = await ipc.invoke('p2p:status');
+    setStatus(nextStatus);
+  };
+
+  const refreshEarnings = async (peerId?: string | null) => {
+    if (!ipc || !peerId) return;
+    const earnings = await ipc.invoke('earnings:get');
+    setEarningsUsd(Number(earnings?.[peerId] || 0));
+  };
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      if (!ipc) return;
+      try {
+        await ipc.invoke('p2p:start');
+        const nextStatus = await ipc.invoke('p2p:update-config', {
+          walletAddress: wallet.address,
+          totalSharedBytes: sharedBytes,
+          acceptsNetworkStorage: acceptStorage,
+        });
+        setStatus(nextStatus);
+      } catch (error) {
+        console.error(error);
+      }
+    };
+
+    bootstrap();
+  }, [wallet.address, sharedBytes, acceptStorage]);
+
+  useEffect(() => {
+    refreshEarnings(status?.peerId);
+  }, [status?.peerId]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -60,46 +113,80 @@ export default function Home() {
       return;
     }
 
+    setIsBusy(true);
     try {
-      if (isEncrypting) {
-        storage.setEncryptionKey(tempEncryptionKey);
-      }
-
+      const manifests: UploadedManifest[] = [];
       for (const file of selectedFiles) {
-        await storage.uploadFile(file, false, '', isEncrypting);
+        const result = await p2pUploadService.uploadFile(
+          file,
+          isEncrypting ? tempEncryptionKey : undefined
+        );
+        const manifest = result.manifest;
+        manifests.push({
+          fileId: manifest.fileId,
+          originalName: manifest.originalName,
+          size: manifest.size,
+          encrypted: manifest.encrypted,
+          createdAt: manifest.createdAt,
+        });
       }
 
+      setUploadedFiles((prev) => [...manifests, ...prev]);
       setSelectedFiles([]);
       setTempEncryptionKey('');
-      toast.success('Files uploaded successfully');
-      await storage.refreshFiles();
+      toast.success('Files uploaded to the P2P network');
+      await refreshStatus();
+      await refreshEarnings(status?.peerId);
     } catch (error) {
       console.error(error);
-      toast.error('Upload failed');
+      toast.error('P2P upload failed');
+    } finally {
+      setIsBusy(false);
     }
   };
 
-  const handleDownload = async (fileHash: string, isEncrypted: boolean) => {
-    if (isEncrypted && !decryptionKey) {
+  const handleDownload = async (fileId: string, encrypted: boolean) => {
+    if (encrypted && !decryptionKey) {
       toast.error('Enter the decryption key first');
       return;
     }
 
+    setIsBusy(true);
     try {
-      if (isEncrypted) {
-        storage.setEncryptionKey(decryptionKey);
-      }
-
-      const file = storage.files.find((entry) => entry.hash === fileHash);
-      if (!file) {
-        throw new Error('File not found');
-      }
-
-      await storage.downloadFile(file);
-      toast.success('Download started');
+      const file = await p2pUploadService.downloadFile(
+        fileId,
+        encrypted ? decryptionKey : undefined
+      );
+      const url = window.URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      toast.success('File reconstructed from the network');
     } catch (error) {
       console.error(error);
       toast.error('Download failed');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handlePayout = async () => {
+    if (earningsUsd <= 0) {
+      toast.error('No earnings available yet');
+      return;
+    }
+
+    try {
+      const txHash = await contractService.withdraw();
+      toast.success(`Withdraw sent: ${txHash}`);
+      await refreshEarnings(status?.peerId);
+    } catch (error) {
+      console.error(error);
+      toast.error('Withdraw failed');
     }
   };
 
@@ -109,7 +196,7 @@ export default function Home() {
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <div>
             <h1 className="text-2xl font-bold">P2P Cloud</h1>
-            <p className="text-sm text-slate-400">Browser-based encrypted storage experience</p>
+            <p className="text-sm text-slate-400">Distributed encrypted storage using user-contributed disk space</p>
           </div>
 
           {wallet.isConnected ? (
@@ -133,31 +220,40 @@ export default function Home() {
       </header>
 
       <main className="container mx-auto px-4 py-8 space-y-6">
-        <div className="grid md:grid-cols-3 gap-4">
-          <Card className="p-4 bg-slate-800 border-slate-700">
-            <p className="text-slate-400 text-sm">Stored Files</p>
-            <p className="text-2xl font-bold">{storage.stats.totalFiles}</p>
-          </Card>
-          <Card className="p-4 bg-slate-800 border-slate-700">
-            <p className="text-slate-400 text-sm">Encrypted Files</p>
-            <p className="text-2xl font-bold">{storage.stats.encryptedFiles}</p>
-          </Card>
+        <div className="grid md:grid-cols-5 gap-4">
           <Card className="p-4 bg-slate-800 border-slate-700">
             <div className="flex items-center gap-3">
-              <HardDrive className="w-5 h-5 text-blue-400" />
+              <Network className="w-5 h-5 text-blue-400" />
               <div>
-                <p className="text-slate-400 text-sm">Shared Capacity</p>
-                <p className="text-2xl font-bold">{(sharedBytes / 1024 / 1024 / 1024).toFixed(1)} GB</p>
+                <p className="text-slate-400 text-sm">Peer ID</p>
+                <p className="text-xs break-all">{status?.peerId || 'Not started'}</p>
               </div>
             </div>
+          </Card>
+          <Card className="p-4 bg-slate-800 border-slate-700">
+            <p className="text-slate-400 text-sm">Connected Peers</p>
+            <p className="text-2xl font-bold">{status?.peers || 0}</p>
+          </Card>
+          <Card className="p-4 bg-slate-800 border-slate-700">
+            <p className="text-slate-400 text-sm">Local Hosted Chunks</p>
+            <p className="text-2xl font-bold">{status?.localChunks || 0}</p>
+          </Card>
+          <Card className="p-4 bg-slate-800 border-slate-700">
+            <p className="text-slate-400 text-sm">Shared Capacity</p>
+            <p className="text-2xl font-bold">{((status?.sharedCapacityBytes || 0) / 1024 / 1024 / 1024).toFixed(1)} GB</p>
+          </Card>
+          <Card className="p-4 bg-slate-800 border-slate-700">
+            <p className="text-slate-400 text-sm">Earnings (USD)</p>
+            <p className="text-2xl font-bold">${earningsUsd.toFixed(6)}</p>
+            <Button variant="outline" size="sm" onClick={handlePayout} className="mt-3">Withdraw</Button>
           </Card>
         </div>
 
         <Tabs defaultValue="upload" className="space-y-6">
           <TabsList className="bg-slate-800 border-slate-700">
             <TabsTrigger value="upload">Upload</TabsTrigger>
-            <TabsTrigger value="files">My Files</TabsTrigger>
-            <TabsTrigger value="settings">Settings</TabsTrigger>
+            <TabsTrigger value="files">My Network Files</TabsTrigger>
+            <TabsTrigger value="node">Node Settings</TabsTrigger>
           </TabsList>
 
           <TabsContent value="upload">
@@ -169,7 +265,7 @@ export default function Home() {
 
               <div className="flex items-center gap-2 p-3 bg-slate-700 rounded-lg">
                 <input type="checkbox" id="encrypting" checked={isEncrypting} onChange={(e) => setIsEncrypting(e.target.checked)} className="w-4 h-4" />
-                <label htmlFor="encrypting" className="text-sm">Encrypt files before upload</label>
+                <label htmlFor="encrypting" className="text-sm">Encrypt chunks before upload</label>
               </div>
 
               {isEncrypting && (
@@ -179,9 +275,9 @@ export default function Home() {
                 </div>
               )}
 
-              <Button onClick={handleUpload} disabled={storage.isLoading} className="w-full gap-2" size="lg">
+              <Button onClick={handleUpload} disabled={isBusy} className="w-full gap-2" size="lg">
                 <Upload className="w-4 h-4" />
-                {storage.isLoading ? 'Uploading...' : `Upload ${selectedFiles.length} file(s)`}
+                {isBusy ? 'Uploading...' : `Upload ${selectedFiles.length} file(s) to network`}
               </Button>
             </Card>
           </TabsContent>
@@ -194,19 +290,19 @@ export default function Home() {
               </div>
 
               {uploadedFiles.length === 0 ? (
-                <p className="text-slate-400">No uploaded files yet.</p>
+                <p className="text-slate-400">No uploaded manifests in this session yet.</p>
               ) : (
                 <div className="space-y-2">
                   {uploadedFiles.map((file) => (
-                    <div key={file.hash} className="flex items-center justify-between p-4 bg-slate-700 rounded-lg">
+                    <div key={file.fileId} className="flex items-center justify-between p-4 bg-slate-700 rounded-lg">
                       <div>
                         <div className="flex items-center gap-2">
-                          <p className="font-medium">{file.name}</p>
-                          {file.isEncrypted ? <Shield className="w-4 h-4 text-blue-400" /> : <ShieldOff className="w-4 h-4 text-slate-500" />}
+                          <p className="font-medium">{file.originalName}</p>
+                          {file.encrypted ? <Shield className="w-4 h-4 text-blue-400" /> : <ShieldOff className="w-4 h-4 text-slate-500" />}
                         </div>
-                        <p className="text-xs text-slate-400">{(file.size / 1024 / 1024).toFixed(2)} MB • {new Date(file.uploadedAt).toLocaleString()}</p>
+                        <p className="text-xs text-slate-400">{(file.size / 1024 / 1024).toFixed(2)} MB • {new Date(file.createdAt).toLocaleString()}</p>
                       </div>
-                      <Button variant="ghost" size="sm" onClick={() => handleDownload(file.hash, file.isEncrypted)} className="gap-2">
+                      <Button variant="ghost" size="sm" onClick={() => handleDownload(file.fileId, file.encrypted)} className="gap-2">
                         <Download className="w-4 h-4" />
                         Download
                       </Button>
@@ -217,13 +313,37 @@ export default function Home() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="settings">
+          <TabsContent value="node">
             <Card className="p-6 bg-slate-800 border-slate-700 space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-2">Shared Storage (GB)</label>
-                <Input value={sharedGB} onChange={(e) => setSharedGB(e.target.value)} className="bg-slate-700 border-slate-600 text-white" />
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2">Shared Storage (GB)</label>
+                  <Input value={sharedGB} onChange={(e) => setSharedGB(e.target.value)} className="bg-slate-700 border-slate-600 text-white" />
+                </div>
+                <div className="flex items-center gap-2 p-3 bg-slate-700 rounded-lg self-end">
+                  <HardDrive className="w-4 h-4 text-blue-400" />
+                  <input type="checkbox" id="accept-storage" checked={acceptStorage} onChange={(e) => setAcceptStorage(e.target.checked)} className="w-4 h-4" />
+                  <label htmlFor="accept-storage" className="text-sm">Accept other users' chunks</label>
+                </div>
               </div>
-              <p className="text-sm text-slate-400">This value is currently cosmetic in browser mode and can be wired to a backend later.</p>
+
+              <Button onClick={refreshStatus} variant="outline">Refresh node status</Button>
+
+              <div className="space-y-2">
+                <h3 className="font-semibold">Known Nodes</h3>
+                {(status?.knownNodes || []).length === 0 ? (
+                  <p className="text-slate-400">No advertised nodes discovered yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {status?.knownNodes?.map((node) => (
+                      <div key={node.peerId} className="p-3 bg-slate-700 rounded-lg text-sm">
+                        <p className="font-mono break-all">{node.peerId}</p>
+                        <p className="text-slate-400">Available: {(node.availableSharedBytes / 1024 / 1024 / 1024).toFixed(2)} GB</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </Card>
           </TabsContent>
         </Tabs>
