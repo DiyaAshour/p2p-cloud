@@ -30,8 +30,7 @@ export class ElectronP2PNode {
     this.subscribers = new Set();
     this.repairTimer = null;
     this.bootstrapPeers = [
-      '/dns4/node1.p2pcloud.net/tcp/443/wss',
-      '/dns4/node2.p2pcloud.net/tcp/443/wss'
+      '/ip4/13.51.69.60/tcp/4001'
     ];
     this.config = {
       walletAddress: null,
