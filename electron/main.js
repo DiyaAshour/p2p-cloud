@@ -6,6 +6,17 @@ import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
 import { ElectronP2PNode } from './p2p-node.js';
 
+if (typeof globalThis.CustomEvent === 'undefined') {
+  class NodeCustomEvent extends Event {
+    constructor(type, params = {}) {
+      super(type, params);
+      this.detail = params.detail ?? null;
+    }
+  }
+
+  globalThis.CustomEvent = NodeCustomEvent;
+}
+
 const execFileAsync = promisify(execFile);
 const APP_URL = process.env.P2P_CLOUD_URL || 'http://127.0.0.1:3000';
 const __filename = fileURLToPath(import.meta.url);
