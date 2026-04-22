@@ -1,6 +1,5 @@
 import { createLibp2p } from 'libp2p';
 import { tcp } from '@libp2p/tcp';
-import { webRTC } from '@libp2p/webrtc';
 import { webSockets } from '@libp2p/websockets';
 import { noise } from '@libp2p/noise';
 import { yamux } from '@libp2p/yamux';
@@ -59,7 +58,7 @@ export class ElectronP2PNode {
     await this.ensureDirs();
 
     this.node = await createLibp2p({
-      transports: [tcp(), webRTC(), webSockets()],
+      transports: [tcp(), webSockets()],
       connectionEncryption: [noise()],
       streamMuxers: [yamux()],
       services: {
