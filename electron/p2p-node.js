@@ -59,7 +59,6 @@ export class ElectronP2PNode {
       addresses: {
         listen: [
           `/ip4/0.0.0.0/tcp/${this.listenPort}`,
-          `/ip4/0.0.0.0/tcp/${this.listenPort}/ws`,
         ],
       },
       transports: [tcp(), webSockets()],
