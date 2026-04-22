@@ -16,6 +16,8 @@ const CHUNK_STORE_PROTOCOL = '/p2p-cloud/chunk-store/1.0.0';
 const CHUNK_REQUEST_PROTOCOL = '/p2p-cloud/chunk-request/1.0.0';
 const FILE_TOPIC = 'p2p-cloud/files';
 const NODE_TOPIC = 'p2p-cloud/nodes';
+const DEFAULT_BOOTSTRAP = '/ip4/13.51.69.60/tcp/4001';
+const DEFAULT_PORT = 4001;
 
 export class ElectronP2PNode {
   constructor(options = {}) {
@@ -29,9 +31,8 @@ export class ElectronP2PNode {
     this.localChunks = new Map();
     this.subscribers = new Set();
     this.repairTimer = null;
-    this.bootstrapPeers = [
-      '/ip4/13.51.69.60/tcp/4001'
-    ];
+    this.listenPort = Number(process.env.P2P_PORT || options.port || DEFAULT_PORT);
+    this.bootstrapPeers = [process.env.P2P_BOOTSTRAP_ADDR || options.bootstrapAddr || DEFAULT_BOOTSTRAP].filter(Boolean);
     this.config = {
       walletAddress: null,
       totalSharedBytes: 5 * 1024 * 1024 * 1024,
@@ -55,6 +56,12 @@ export class ElectronP2PNode {
     await this.ensureDirs();
 
     this.node = await createLibp2p({
+      addresses: {
+        listen: [
+          `/ip4/0.0.0.0/tcp/${this.listenPort}`,
+          `/ip4/0.0.0.0/tcp/${this.listenPort}/ws`,
+        ],
+      },
       transports: [tcp(), webSockets()],
       connectionEncryption: [noise()],
       streamMuxers: [yamux()],
