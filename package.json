@@ -27,6 +27,7 @@
     "@libp2p/pubsub-peer-discovery": "^10.0.0",
     "@libp2p/tcp": "^9.0.0",
     "@libp2p/webrtc": "^6.0.0",
+    "@libp2p/websockets": "^10.1.10",
     "@libp2p/yamux": "^8.0.0",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
