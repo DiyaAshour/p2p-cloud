@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
@@ -6,20 +6,49 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ElectronP2PNode } from './p2p-node.js';
 
-// 🔥 CRITICAL FIX: prevent system:open-external crash
-ipcMain.handle('system:open-external', async (_event, url) => {
-  try {
-    const parsed = new URL(url);
-    await shell.openExternal(parsed.toString());
-    return { ok: true };
-  } catch (e) {
-    return { ok: false };
-  }
-});
-
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Open wallet connect in Google Chrome when possible
+ipcMain.handle('system:open-external', async (_event, url) => {
+  try {
+    const target = new URL(url).toString();
+
+    if (process.platform === 'win32') {
+      try {
+        await execFileAsync('cmd', ['/c', 'start', 'chrome', '', target]);
+        return { ok: true, browser: 'chrome', url: target };
+      } catch {
+        await execFileAsync('cmd', ['/c', 'start', '', target]);
+        return { ok: true, browser: 'default', url: target };
+      }
+    }
+
+    if (process.platform === 'darwin') {
+      try {
+        await execFileAsync('open', ['-a', 'Google Chrome', target]);
+        return { ok: true, browser: 'chrome', url: target };
+      } catch {
+        await execFileAsync('open', [target]);
+        return { ok: true, browser: 'default', url: target };
+      }
+    }
+
+    try {
+      await execFileAsync('google-chrome', [target]);
+      return { ok: true, browser: 'chrome', url: target };
+    } catch {
+      await execFileAsync('xdg-open', [target]);
+      return { ok: true, browser: 'default', url: target };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
 
 let mainWindow;
 const vaultDir = path.resolve(__dirname, '..', 'uploads');
@@ -45,6 +74,70 @@ function createWindow() {
   });
 
   mainWindow.loadURL('http://127.0.0.1:3000');
+}
+
+async function saveManifest(manifest) {
+  const filePath = path.join(manifestsDir, `${manifest.fileId}.json`);
+  await fs.writeFile(filePath, JSON.stringify(manifest, null, 2), 'utf-8');
+}
+
+async function readManifest(fileId) {
+  const filePath = path.join(manifestsDir, `${fileId}.json`);
+  const content = await fs.readFile(filePath, 'utf-8');
+  return JSON.parse(content);
+}
+
+async function saveOnboardingSession(payload) {
+  await fs.writeFile(onboardingPath, JSON.stringify(payload, null, 2), 'utf-8');
+}
+
+async function readOnboardingSession() {
+  try {
+    const content = await fs.readFile(onboardingPath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+async function readEarnings() {
+  try {
+    const content = await fs.readFile(earningsPath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+async function saveEarnings(data) {
+  await fs.writeFile(earningsPath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+async function getDiskInfo() {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileAsync('wmic', ['logicaldisk', 'where', 'DeviceID="C:"', 'get', 'Size,FreeSpace', '/format:value']);
+      const sizeMatch = stdout.match(/Size=(\d+)/);
+      const freeMatch = stdout.match(/FreeSpace=(\d+)/);
+      return {
+        total: sizeMatch ? Number(sizeMatch[1]) : 0,
+        free: freeMatch ? Number(freeMatch[1]) : 0,
+      };
+    }
+
+    const { stdout } = await execFileAsync('df', ['-k', '.']);
+    const lines = stdout.trim().split('\n');
+    const parts = lines[lines.length - 1].trim().split(/\s+/);
+    return {
+      total: Number(parts[1] || 0) * 1024,
+      free: Number(parts[3] || 0) * 1024,
+    };
+  } catch {
+    return {
+      total: 0,
+      free: 0,
+    };
+  }
 }
 
 app.whenReady().then(async () => {
