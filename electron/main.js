@@ -8,15 +8,20 @@ import { ElectronP2PNode } from './p2p-node.js';
 
 if (typeof globalThis.CustomEvent !== 'function') {
   function NodeCustomEvent(type, params = {}) {
+    if (!(this instanceof NodeCustomEvent)) {
+      return new NodeCustomEvent(type, params);
+    }
     const event = new Event(type, params);
     Object.defineProperty(event, 'detail', {
       value: params.detail ?? null,
       enumerable: true,
       configurable: true,
+      writable: false,
     });
     return event;
   }
 
+  NodeCustomEvent.prototype = Event.prototype;
   globalThis.CustomEvent = NodeCustomEvent;
 }
 
