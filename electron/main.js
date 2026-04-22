@@ -6,12 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { promises as fs } from 'node:fs';
 import { ElectronP2PNode } from './p2p-node.js';
 
-if (typeof globalThis.CustomEvent === 'undefined') {
-  class NodeCustomEvent extends Event {
-    constructor(type, params = {}) {
-      super(type, params);
-      this.detail = params.detail ?? null;
-    }
+if (typeof globalThis.CustomEvent !== 'function') {
+  function NodeCustomEvent(type, params = {}) {
+    const event = new Event(type, params);
+    Object.defineProperty(event, 'detail', {
+      value: params.detail ?? null,
+      enumerable: true,
+      configurable: true,
+    });
+    return event;
   }
 
   globalThis.CustomEvent = NodeCustomEvent;
