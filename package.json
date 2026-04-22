@@ -5,8 +5,9 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3000",
-    "dev:electron": "concurrently \"pnpm dev\" \"wait-on http://127.0.0.1:3000 && electron .\"",
-    "electron:dev": "concurrently \"pnpm dev\" \"wait-on http://127.0.0.1:3000 && electron .\"",
+    "dev:p2p": "node electron/headless-p2p-service.js",
+    "dev:all": "concurrently \"pnpm dev\" \"pnpm dev:p2p\"",
+    "electron:dev": "pnpm dev:all",
     "electron:build": "pnpm build && electron-builder",
     "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "build:electron": "vite build && electron-builder",
