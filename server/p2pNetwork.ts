@@ -155,6 +155,10 @@ class P2PNetworkService extends EventEmitter {
     return this.sendMessageToPeer(fromPeerId, message);
   }
 
+  getPeerCount(): number {
+    return this.peers.size;
+  }
+
   /**
    * Send a message to a specific peer
    */
