@@ -1,20 +1,42 @@
 # P2P Decentralized Storage Browser
 
-A peer-to-peer decentralized file storage application built with Electron, React, and Web3 technologies. This application allows users to store files on a distributed network, with payment processing via cryptocurrency wallets.
+A peer-to-peer decentralized file storage application built with Electron, React, and Web3 technologies. This application allows users to store files locally, model file metadata across a peer network, and connect cryptocurrency wallets for future storage payments.
+
+> **Project status:** this is an active prototype. The UI, wallet flow, local storage, and P2P metadata layer are in progress. Some production-grade P2P behaviors, such as real peer transport, DHT-backed discovery, encrypted chunk replication, and automated crypto payments, are planned but not fully implemented yet.
 
 ## Features
 
 - **Web3 Wallet Integration**: Connect MetaMask or other Web3 wallets
-- **P2P File Sharing**: Distribute files across a peer-to-peer network using libp2p
-- **Decentralized Storage**: Store files locally with distributed backup
-- **Payment System**: Pay for storage using cryptocurrency ($1 per 1TB per month)
-- **File Indexing**: Make files discoverable on the network or keep them private
-- **File Search**: Search for files by name or hash across the network
+- **P2P Metadata Layer**: Track peers, heartbeats, file metadata, and replication targets
+- **Local Storage Foundation**: Store files locally as the base for distributed backup
+- **Payment Model Prototype**: Storage pricing model for future cryptocurrency payments ($1 per 1TB per month)
+- **File Indexing**: Mark files as discoverable or private in metadata
+- **File Search**: Search known file metadata by name or hash
 - **Desktop Application**: Built with Electron for cross-platform support
+
+## Current P2P Implementation
+
+The current P2P service is a prototype abstraction rather than a complete distributed network transport. It currently supports:
+
+- registering peers in memory
+- tracking peer online/offline state with heartbeat timestamps
+- broadcasting file metadata events through application events
+- searching known file metadata
+- calculating basic network statistics
+
+The following items are still roadmap work before this can be considered a production P2P storage network:
+
+- real transport between peers using libp2p, WebRTC, WebSocket, or TCP
+- bootstrap peer configuration and peer discovery outside localhost
+- file chunk upload/download between peers
+- encryption before replication
+- hash verification for downloaded chunks
+- replication repair when peers go offline
+- persistent peer and file metadata storage
 
 ## System Requirements
 
-- Node.js 18+ and npm/pnpm
+- Node.js 18+ and pnpm
 - MetaMask browser extension (for Web3 wallet integration)
 - 2GB RAM minimum
 - 500MB disk space
@@ -24,8 +46,8 @@ A peer-to-peer decentralized file storage application built with Electron, React
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd p2p-storage-browser
+git clone https://github.com/DiyaAshour/p2p-cloud.git
+cd p2p-cloud
 ```
 
 ### 2. Install Dependencies
@@ -99,40 +121,43 @@ This creates a distributable Electron application.
 ### 4. Search Files
 
 1. Use the search bar to find files by name or hash
-2. Results are displayed in real-time
+2. Results are displayed from known local/network metadata
 
 ### 5. Manage Storage
 
 1. Go to the "Statistics" tab
-2. View storage usage and costs
-3. Upgrade storage by selecting a plan (1TB, 3TB, 5TB, 10TB)
+2. View storage usage and estimated costs
+3. Select a storage plan (1TB, 3TB, 5TB, 10TB)
 
 ## Architecture
 
 ### Frontend Structure
 
-```
+```text
 client/
 ├── src/
 │   ├── pages/           # Page components
-│   │   └── Home.tsx     # Main application page
 │   ├── components/      # Reusable UI components
 │   ├── hooks/           # Custom React hooks
-│   │   ├── useWallet.ts # Wallet management
-│   │   └── useStorage.ts # Storage management
-│   ├── services/        # Business logic services
-│   │   ├── web3Service.ts    # Web3 and MetaMask integration
-│   │   ├── p2pService.ts     # P2P networking
-│   │   └── storageService.ts # Local file storage
+│   ├── services/        # Client-side business logic services
 │   ├── App.tsx          # Root component
 │   └── index.css        # Global styles
 ├── public/              # Static assets
 └── index.html           # HTML entry point
 ```
 
-### Backend Structure
+### Server / Core Structure
 
-```
+```text
+server/
+├── p2pNetwork.ts        # In-memory P2P metadata and peer status service
+├── index.ts             # Server entry point
+└── _core/               # Framework/core server utilities
+
+shared/
+├── types.ts             # Shared app types
+└── const.ts             # Shared constants
+
 electron/
 ├── main.js              # Electron main process
 └── preload.js           # Preload script for IPC
@@ -143,37 +168,41 @@ electron/
 - **React 19**: UI framework
 - **Electron 28**: Desktop application framework
 - **ethers.js 6**: Web3 library for wallet integration
-- **libp2p**: P2P networking protocol
+- **libp2p packages**: Planned P2P networking foundation
 - **Tailwind CSS 4**: Styling
 - **shadcn/ui**: UI component library
-- **IndexedDB**: Client-side storage
+- **IndexedDB / local storage services**: Client-side storage foundation
 
 ## Payment System
 
-The application uses a simple payment model:
+The application currently uses a simple payment model:
 
 - **1 TB Storage**: $1/month
 - **3 TB Storage**: $3/month
 - **5 TB Storage**: $5/month
 - **10 TB Storage**: $10/month
 
-Payments are processed through cryptocurrency transactions using the connected wallet.
+Automated smart-contract payments are planned roadmap work. Do not treat the current prototype as a production payment processor.
 
-## P2P Network
+## P2P Network Roadmap
 
-The application uses libp2p for peer-to-peer networking:
+The intended production design is to use libp2p-style peer networking for:
 
-- **Peer Discovery**: Automatic peer discovery using DHT
-- **File Distribution**: Files are distributed across connected peers
-- **Network Resilience**: Files remain available as long as at least one peer is online
-- **Indexing**: Optional file indexing for network-wide search
+- peer discovery through bootstrap nodes and/or DHT
+- file chunk distribution across multiple peers
+- redundancy and replication repair
+- optional public indexing for searchable files
+- private encrypted storage for non-indexed files
 
 ## Security
 
+Current and planned security goals:
+
 - **Wallet Integration**: Uses MetaMask for secure key management
-- **Message Signing**: Sign messages with your private key for authentication
-- **Encryption**: Files can be encrypted before upload
-- **Sandbox Mode**: Electron runs in sandbox mode for security
+- **Message Signing**: Planned authentication for peer actions
+- **Encryption**: Planned file encryption before upload/replication
+- **Integrity Checks**: Planned content hashes for files and chunks
+- **Electron Safety**: Keep browser windows isolated and restrict unsafe IPC patterns
 
 ## Troubleshooting
 
@@ -187,13 +216,13 @@ The application uses libp2p for peer-to-peer networking:
 
 1. Check available disk space
 2. Ensure files are not too large (max 4GB per file)
-3. Check network connectivity
+3. Check local app permissions
 
 ### P2P Network Issues
 
-1. Ensure ports are not blocked by firewall
-2. Check that other peers are online
-3. Restart the application
+1. Remember that real peer transport is still prototype/roadmap work
+2. Check that peer metadata is being registered correctly
+3. Restart the application to clear in-memory peer state
 
 ## API Reference
 
@@ -253,9 +282,13 @@ For issues and questions:
 
 ## Roadmap
 
+- [ ] Real libp2p node startup and peer transport
+- [ ] Bootstrap peer configuration
+- [ ] File chunking and hash verification
+- [ ] Encrypted file/chunk replication
+- [ ] Replication factor and repair jobs
 - [ ] Smart contract integration for automated payments
-- [ ] File encryption and decryption
-- [ ] IPFS integration for distributed storage
+- [ ] IPFS integration option for distributed storage
 - [ ] Multi-chain wallet support
 - [ ] Mobile application
 - [ ] Advanced file versioning
@@ -264,4 +297,4 @@ For issues and questions:
 
 ## Disclaimer
 
-This is a beta application. Use at your own risk. Always backup important files before uploading to the network.
+This is a prototype application. Use at your own risk. Always back up important files before uploading to any experimental storage network.
