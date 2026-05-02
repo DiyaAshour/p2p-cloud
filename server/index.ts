@@ -11,7 +11,13 @@ const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
 const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
 const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
 
-let peers: any[] = [];
+type PeerInfo = {
+  peerId: string;
+  url: string;
+  lastSeen: string;
+};
+
+let peers: PeerInfo[] = [];
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +52,7 @@ type StoredFile = {
 };
 
 const dbPath = path.resolve(__dirname, "..", "files_db.json");
+const peersDbPath = path.resolve(__dirname, "..", "peers_db.json");
 let filesDb: StoredFile[] = [];
 
 if (fs.existsSync(dbPath)) {
@@ -56,8 +63,46 @@ if (fs.existsSync(dbPath)) {
   }
 }
 
+if (fs.existsSync(peersDbPath)) {
+  try {
+    peers = JSON.parse(fs.readFileSync(peersDbPath, "utf-8"));
+  } catch {
+    peers = [];
+  }
+}
+
 function saveDb() {
   fs.writeFileSync(dbPath, JSON.stringify(filesDb, null, 2));
+}
+
+function savePeers() {
+  fs.writeFileSync(peersDbPath, JSON.stringify(peers, null, 2));
+}
+
+function hashFile(filePath: string) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex");
+}
+
+function upsertPeer(peer: any) {
+  if (!peer?.peerId || !peer?.url || peer.peerId === NODE_ID) return;
+
+  const existing = peers.find((entry) => entry.peerId === peer.peerId);
+  const normalizedUrl = String(peer.url).replace(/\/+$/, "");
+
+  if (existing) {
+    existing.url = normalizedUrl;
+    existing.lastSeen = new Date().toISOString();
+  } else {
+    peers.push({
+      peerId: peer.peerId,
+      url: normalizedUrl,
+      lastSeen: new Date().toISOString(),
+    });
+  }
+
+  savePeers();
 }
 
 async function registerNode() {
@@ -76,18 +121,25 @@ async function registerNode() {
     });
 
     const data = await response.json();
-    peers = data.peers || [];
+    const discoveredPeers = Array.isArray(data.peers) ? data.peers : [];
+
+    for (const peer of discoveredPeers) {
+      upsertPeer(peer);
+    }
+
     console.log("connected peers:", peers.length);
   } catch (error) {
     console.log("bootstrap register failed");
   }
 }
 
-async function replicate(filePath: string, fileName: string) {
+async function replicate(filePath: string, fileName: string, hash: string) {
   for (const peer of peers.slice(0, REPLICATION_FACTOR - 1)) {
     try {
       const form = new FormData();
       form.append("file", new Blob([fs.readFileSync(filePath)]), fileName);
+      form.append("hash", hash);
+      form.append("ownerNodeId", NODE_ID);
 
       await fetch(`${peer.url}/api/p2p/store`, {
         method: "POST",
@@ -137,15 +189,34 @@ async function startServer() {
     res.json({ ok: true, peers });
   });
 
+  app.post("/api/peers", (req, res) => {
+    const { peerId, url } = req.body || {};
+    if (!peerId || !url) {
+      return res.status(400).json({ error: "peerId and url required" });
+    }
+
+    upsertPeer({ peerId, url });
+    res.status(201).json({ ok: true, peers });
+  });
+
+  app.get("/api/peers", (_req, res) => {
+    res.json(peers);
+  });
+
   app.post("/api/p2p/store", upload.single("file"), (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "no file" });
     }
 
-    const hash = req.body.hash || crypto.randomBytes(12).toString("hex");
+    const storedPath = path.join(uploadsDir, req.file.filename);
+    const hash = req.body.hash || hashFile(storedPath);
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
+      if (!existing.replicas.includes(NODE_ID)) {
+        existing.replicas.push(NODE_ID);
+        saveDb();
+      }
       return res.json({ ok: true, file: existing, duplicate: true });
     }
 
@@ -178,7 +249,14 @@ async function startServer() {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const hash = req.body.hash || crypto.randomBytes(12).toString("hex");
+    const filePath = path.join(uploadsDir, req.file.filename);
+    const hash = req.body.hash || hashFile(filePath);
+    const existing = filesDb.find((entry) => entry.hash === hash);
+
+    if (existing) {
+      await replicate(filePath, req.file.originalname, hash);
+      return res.json({ ...existing, duplicate: true });
+    }
 
     const fileInfo: StoredFile = {
       id: hash,
@@ -196,7 +274,7 @@ async function startServer() {
     filesDb.push(fileInfo);
     saveDb();
 
-    await replicate(path.join(uploadsDir, req.file.filename), req.file.originalname);
+    await replicate(filePath, req.file.originalname, hash);
 
     res.status(201).json(fileInfo);
   });
