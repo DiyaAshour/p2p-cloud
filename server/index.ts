@@ -8,7 +8,6 @@ import crypto from "node:crypto";
 import {
   type ChunkInfo,
   splitFileIntoChunks,
-  rebuildFileFromLocalChunks,
   getChunkPath,
   hashBuffer,
 } from "./chunking";
@@ -56,7 +55,7 @@ const storage = multer.diskStorage({
 });
 
 const chunkStorage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  destination: (_req, _file, cb) => cb(null, chunksDir),
   filename: (_req, file, cb) => {
     const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
     const uniquePrefix = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -175,6 +174,26 @@ function upsertPeer(peer: any) {
   }
 
   savePeers();
+}
+
+function deleteLocalFile(filePath: string) {
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
+function deleteLocalChunks(chunks: ChunkInfo[] = []) {
+  const hashes = new Set(chunks.map((chunk) => chunk.hash));
+
+  for (const chunkHash of hashes) {
+    const stillReferenced = filesDb.some((file) => {
+      return file.chunks?.some((chunk) => chunk.hash === chunkHash);
+    });
+
+    if (!stillReferenced) {
+      deleteLocalFile(getChunkPath(chunksDir, chunkHash));
+    }
+  }
 }
 
 async function registerNode() {
@@ -629,10 +648,10 @@ async function startServer() {
     const [file] = filesDb.splice(index, 1);
     saveDb();
 
-    const filePath = path.join(uploadsDir, file.path);
+    deleteLocalFile(path.join(uploadsDir, file.path));
 
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    if (file.storageMode === "chunks") {
+      deleteLocalChunks(file.chunks || []);
     }
 
     res.json({ success: true, removed: file.hash });
