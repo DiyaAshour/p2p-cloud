@@ -1,15 +1,11 @@
-// FIXED VERSION
-// Removed ipc.invoke('system:open-external') to avoid Electron error
+import { useMemo, useState } from "react";
 
-import { useEffect, useMemo, useState } from "react";
+type OnboardingProps = {
+  onReady?: () => void;
+};
 
-const ipc = (window as any).electron?.ipcRenderer;
-
-export default function Onboarding({ onReady }) {
+export default function Onboarding({ onReady }: OnboardingProps) {
   const [step, setStep] = useState(0);
-  const [wallet, setWallet] = useState<string | null>(null);
-  const [disk, setDisk] = useState({ total: 0, free: 0 });
-  const [selected, setSelected] = useState(0);
 
   const browserConnectUrl = useMemo(() => {
     const url = new URL("http://127.0.0.1:3000/");
@@ -17,9 +13,12 @@ export default function Onboarding({ onReady }) {
     return url.toString();
   }, []);
 
-  const connectWallet = async () => {
-    // FIX: always use browser redirect (no IPC)
+  const connectWallet = () => {
     window.location.href = browserConnectUrl;
+  };
+
+  const finishOnboarding = () => {
+    onReady?.();
   };
 
   return (
@@ -28,6 +27,14 @@ export default function Onboarding({ onReady }) {
         <>
           <h2>Connect Wallet</h2>
           <button onClick={connectWallet}>Connect MetaMask</button>
+          <button onClick={() => setStep(1)}>Skip for now</button>
+        </>
+      )}
+
+      {step === 1 && (
+        <>
+          <h2>Node Ready</h2>
+          <button onClick={finishOnboarding}>Continue</button>
         </>
       )}
     </div>
