@@ -21,6 +21,7 @@ const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
 const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 4 * 1024 * 1024);
+const MAX_PARALLEL_CHUNK_FETCHES = Number(process.env.P2P_MAX_PARALLEL_CHUNK_FETCHES || 8);
 
 type PeerInfo = {
   peerId: string;
@@ -259,27 +260,56 @@ async function replicateChunks(chunks: ChunkInfo[]) {
   }
 }
 
+async function fetchOneChunkFast(chunk: ChunkInfo) {
+  const localPath = getChunkPath(chunksDir, chunk.hash);
+  if (fs.existsSync(localPath)) return true;
+
+  const peersToTry = rankedPeers().slice(0, Math.max(1, REPLICATION_FACTOR));
+  if (peersToTry.length === 0) return false;
+
+  const attempts = await Promise.all(
+    peersToTry.map((peer) => fetchChunkFromPeer({ chunksDir, chunkHash: chunk.hash, peer, verify: hashBuffer }))
+  );
+
+  for (const result of attempts) {
+    recordPeerResult(result.peerId, result.ok, result.latencyMs);
+  }
+
+  return attempts.some((result) => result.ok);
+}
+
 async function ensureChunksAvailable(chunks: ChunkInfo[]) {
   const missing = chunks.filter((chunk) => !fs.existsSync(getChunkPath(chunksDir, chunk.hash)));
   if (missing.length === 0) return true;
 
-  const results = await Promise.all(
-    missing.map(async (chunk) => {
-      for (const peer of rankedPeers()) {
-        const result = await fetchChunkFromPeer({
-          chunksDir,
-          chunkHash: chunk.hash,
-          peer,
-          verify: hashBuffer,
-        });
-        recordPeerResult(result.peerId, result.ok, result.latencyMs);
-        if (result.ok) return true;
-      }
-      return false;
-    })
-  );
+  for (let i = 0; i < missing.length; i += MAX_PARALLEL_CHUNK_FETCHES) {
+    const batch = missing.slice(i, i + MAX_PARALLEL_CHUNK_FETCHES);
+    const results = await Promise.all(batch.map((chunk) => fetchOneChunkFast(chunk)));
+    if (!results.every(Boolean)) return false;
+  }
 
-  return results.every(Boolean);
+  return true;
+}
+
+async function streamChunksToResponse(res: express.Response, file: StoredFile) {
+  if (!file.chunks?.length) return false;
+
+  const orderedChunks = [...file.chunks].sort((a, b) => a.index - b.index);
+
+  for (const chunk of orderedChunks) {
+    const chunkPath = getChunkPath(chunksDir, chunk.hash);
+    if (!fs.existsSync(chunkPath)) return false;
+
+    const buffer = fs.readFileSync(chunkPath);
+    if (hashBuffer(buffer) !== chunk.hash) return false;
+
+    if (!res.write(buffer)) {
+      await new Promise<void>((resolve) => res.once("drain", resolve));
+    }
+  }
+
+  res.end();
+  return true;
 }
 
 async function repairReplication() {
@@ -569,14 +599,15 @@ async function startServer() {
         return res.status(503).json({ error: "File chunks are not available on the network" });
       }
 
-      const rebuilt = rebuildFileFromLocalChunks({ chunksDir, chunks: file.chunks });
-      if (!rebuilt) {
-        return res.status(503).json({ error: "File chunks are not available locally" });
-      }
-
       res.setHeader("Content-Disposition", `attachment; filename=\"${file.name.replace(/\"/g, "")}\"`);
       res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
-      return res.send(rebuilt);
+      res.setHeader("Content-Length", String(file.size));
+
+      const streamed = await streamChunksToResponse(res, file);
+      if (!streamed && !res.headersSent) {
+        return res.status(503).json({ error: "File chunks are not available locally" });
+      }
+      return;
     }
 
     const filePath = path.join(uploadsDir, file.path);
