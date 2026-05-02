@@ -12,6 +12,7 @@ import {
   hashBuffer,
 } from "./chunking";
 import { sendChunkToPeer, fetchChunkFromPeer } from "./chunkNetwork";
+import { rateLimit, requireApiKey } from "./security";
 
 const NODE_ID = process.env.P2P_NODE_ID || "node-local";
 const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
@@ -21,6 +22,7 @@ const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
 const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 4 * 1024 * 1024);
 const MAX_PARALLEL_CHUNK_FETCHES = Number(process.env.P2P_MAX_PARALLEL_CHUNK_FETCHES || 8);
+const MAX_UPLOAD_BYTES = Number(process.env.P2P_MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024);
 
 type PeerInfo = {
   peerId: string;
@@ -63,8 +65,8 @@ const chunkStorage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
-const chunkUpload = multer({ storage: chunkStorage });
+const upload = multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
+const chunkUpload = multer({ storage: chunkStorage, limits: { fileSize: CHUNK_SIZE_BYTES + 1024 } });
 
 type StoredFile = {
   id: string;
@@ -392,7 +394,9 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  app.use(express.json());
+  app.use(express.json({ limit: "1mb" }));
+  app.use(rateLimit);
+  app.use(requireApiKey);
 
   app.get("/api/health", (_req, res) => {
     res.json({
