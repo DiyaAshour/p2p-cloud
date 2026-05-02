@@ -6,6 +6,13 @@ import { fileURLToPath } from "url";
 import multer from "multer";
 import crypto from "node:crypto";
 
+const NODE_ID = process.env.P2P_NODE_ID || "node-local";
+const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
+const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
+const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
+
+let peers: any[] = [];
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -15,9 +22,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadsDir);
-  },
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
   filename: (_req, file, cb) => {
     const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
     const uniquePrefix = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -36,10 +41,13 @@ type StoredFile = {
   path: string;
   isEncrypted: boolean;
   mimeType?: string;
+  ownerNodeId: string;
+  replicas: string[];
 };
 
 const dbPath = path.resolve(__dirname, "..", "files_db.json");
 let filesDb: StoredFile[] = [];
+
 if (fs.existsSync(dbPath)) {
   try {
     filesDb = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
@@ -52,11 +60,55 @@ function saveDb() {
   fs.writeFileSync(dbPath, JSON.stringify(filesDb, null, 2));
 }
 
+async function registerNode() {
+  if (!BOOTSTRAP_URL) return;
+
+  try {
+    const response = await fetch(`${BOOTSTRAP_URL}/register`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        peerId: NODE_ID,
+        url: PUBLIC_URL,
+      }),
+    });
+
+    const data = await response.json();
+    peers = data.peers || [];
+    console.log("connected peers:", peers.length);
+  } catch (error) {
+    console.log("bootstrap register failed");
+  }
+}
+
+async function replicate(filePath: string, fileName: string) {
+  for (const peer of peers.slice(0, REPLICATION_FACTOR - 1)) {
+    try {
+      const form = new FormData();
+      form.append("file", new Blob([fs.readFileSync(filePath)]), fileName);
+
+      await fetch(`${peer.url}/api/p2p/store`, {
+        method: "POST",
+        body: form,
+      });
+
+      console.log("replicated to", peer.peerId);
+    } catch {
+      console.log("replication failed", peer.peerId);
+    }
+  }
+}
+
 function calculateStats() {
   const totalBytes = filesDb.reduce((sum, file) => sum + file.size, 0);
   const encryptedFiles = filesDb.filter((file) => file.isEncrypted).length;
 
   return {
+    nodeId: NODE_ID,
+    publicUrl: PUBLIC_URL,
+    peers: peers.length,
     totalFiles: filesDb.length,
     encryptedFiles,
     publicFiles: filesDb.length - encryptedFiles,
@@ -74,18 +126,37 @@ async function startServer() {
   app.get("/api/health", (_req, res) => {
     res.json({
       ok: true,
-      product: "P2P Cloud MVP",
-      mode: "local-first vault",
+      product: "P2P Cloud",
+      mode: "http-p2p-node",
       stats: calculateStats(),
     });
   });
 
-  app.post("/api/upload", upload.single("file"), (req, res) => {
+  app.post("/api/bootstrap/register", async (_req, res) => {
+    await registerNode();
+    res.json({ ok: true, peers });
+  });
+
+  app.post("/api/p2p/store", upload.single("file"), (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "no file" });
+    }
+
+    console.log("received replica:", req.file.originalname);
+
+    res.json({
+      ok: true,
+      file: req.file.originalname,
+    });
+  });
+
+  app.post("/api/upload", upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
     const hash = req.body.hash || crypto.randomBytes(12).toString("hex");
+
     const fileInfo: StoredFile = {
       id: hash,
       name: req.file.originalname,
@@ -95,10 +166,14 @@ async function startServer() {
       path: req.file.filename,
       isEncrypted: req.body.isEncrypted === "true",
       mimeType: req.file.mimetype,
+      ownerNodeId: NODE_ID,
+      replicas: [NODE_ID],
     };
 
     filesDb.push(fileInfo);
     saveDb();
+
+    await replicate(path.join(uploadsDir, req.file.filename), req.file.originalname);
 
     res.status(201).json(fileInfo);
   });
@@ -123,11 +198,13 @@ async function startServer() {
 
   app.get("/api/download/:hash", (req, res) => {
     const file = filesDb.find((entry) => entry.hash === req.params.hash);
+
     if (!file) {
       return res.status(404).json({ error: "File not found" });
     }
 
     const filePath = path.join(uploadsDir, file.path);
+
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "Stored file is missing" });
     }
@@ -137,6 +214,7 @@ async function startServer() {
 
   app.delete("/api/files/:hash", (req, res) => {
     const index = filesDb.findIndex((entry) => entry.hash === req.params.hash);
+
     if (index === -1) {
       return res.status(404).json({ error: "File not found" });
     }
@@ -145,6 +223,7 @@ async function startServer() {
     saveDb();
 
     const filePath = path.join(uploadsDir, file.path);
+
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
@@ -168,9 +247,14 @@ async function startServer() {
   });
 
   const port = process.env.PORT || 3000;
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
+
+  server.listen(port, async () => {
+    console.log(`P2P Cloud node running on http://localhost:${port}/`);
+    console.log(`Node ID: ${NODE_ID}`);
+    console.log(`Public URL: ${PUBLIC_URL}`);
     console.log(`Vault storage directory: ${uploadsDir}`);
+
+    await registerNode();
   });
 }
 
