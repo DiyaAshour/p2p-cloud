@@ -12,6 +12,16 @@ export type ChunkReplicationResult = {
   latencyMs: number;
 };
 
+const API_KEY = process.env.P2P_API_KEY || "";
+
+function peerHeaders(extra: HeadersInit = {}) {
+  return API_KEY ? { ...extra, "x-p2p-api-key": API_KEY } : extra;
+}
+
+function normalizePeerUrl(url: string) {
+  return url.replace(/\/+$/, "");
+}
+
 export async function sendChunkToPeer(options: {
   chunksDir: string;
   chunkHash: string;
@@ -28,8 +38,9 @@ export async function sendChunkToPeer(options: {
     const form = new FormData();
     form.append("chunk", new Blob([fs.readFileSync(chunkPath)]), options.chunkHash);
 
-    const response = await fetch(`${options.peer.url.replace(/\/+$/, "")}/api/p2p/chunks/${options.chunkHash}`, {
+    const response = await fetch(`${normalizePeerUrl(options.peer.url)}/api/p2p/chunks/${options.chunkHash}`, {
       method: "POST",
+      headers: peerHeaders(),
       body: form,
     });
 
@@ -56,7 +67,10 @@ export async function fetchChunkFromPeer(options: {
   const startedAt = Date.now();
 
   try {
-    const response = await fetch(`${options.peer.url.replace(/\/+$/, "")}/api/p2p/chunks/${options.chunkHash}`);
+    const response = await fetch(`${normalizePeerUrl(options.peer.url)}/api/p2p/chunks/${options.chunkHash}`, {
+      headers: peerHeaders(),
+    });
+
     if (!response.ok) {
       return { peerId: options.peer.peerId, ok: false, latencyMs: Date.now() - startedAt };
     }
