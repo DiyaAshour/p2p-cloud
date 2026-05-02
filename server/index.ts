@@ -10,6 +10,8 @@ const NODE_ID = process.env.P2P_NODE_ID || "node-local";
 const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
 const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
 const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
+const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
+const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
 
 type PeerInfo = {
   peerId: string;
@@ -85,6 +87,20 @@ function hashFile(filePath: string) {
   return hash.digest("hex");
 }
 
+function pruneStalePeers() {
+  const now = Date.now();
+  const before = peers.length;
+
+  peers = peers.filter((peer) => {
+    const lastSeen = Date.parse(peer.lastSeen || "");
+    return Number.isFinite(lastSeen) && now - lastSeen <= PEER_MAX_AGE_MS;
+  });
+
+  if (peers.length !== before) {
+    savePeers();
+  }
+}
+
 function upsertPeer(peer: any) {
   if (!peer?.peerId || !peer?.url || peer.peerId === NODE_ID) return;
 
@@ -127,28 +143,68 @@ async function registerNode() {
       upsertPeer(peer);
     }
 
+    pruneStalePeers();
     console.log("connected peers:", peers.length);
   } catch (error) {
     console.log("bootstrap register failed");
   }
 }
 
-async function replicate(filePath: string, fileName: string, hash: string) {
-  for (const peer of peers.slice(0, REPLICATION_FACTOR - 1)) {
+async function replicate(filePath: string, fileName: string, hash: string, skipPeerIds: string[] = []) {
+  const skip = new Set([NODE_ID, ...skipPeerIds]);
+  const targets = peers
+    .filter((peer) => !skip.has(peer.peerId))
+    .slice(0, Math.max(0, REPLICATION_FACTOR - skip.size));
+
+  const replicatedTo: string[] = [];
+
+  for (const peer of targets) {
     try {
       const form = new FormData();
       form.append("file", new Blob([fs.readFileSync(filePath)]), fileName);
       form.append("hash", hash);
       form.append("ownerNodeId", NODE_ID);
 
-      await fetch(`${peer.url}/api/p2p/store`, {
+      const response = await fetch(`${peer.url}/api/p2p/store`, {
         method: "POST",
         body: form,
       });
 
-      console.log("replicated to", peer.peerId);
+      if (response.ok) {
+        replicatedTo.push(peer.peerId);
+        console.log("replicated to", peer.peerId);
+      } else {
+        console.log("replication failed", peer.peerId);
+      }
     } catch {
       console.log("replication failed", peer.peerId);
+    }
+  }
+
+  return replicatedTo;
+}
+
+async function repairReplication() {
+  pruneStalePeers();
+
+  for (const file of filesDb) {
+    const filePath = path.join(uploadsDir, file.path);
+    if (!fs.existsSync(filePath)) continue;
+
+    file.replicas = Array.from(new Set(file.replicas || [NODE_ID]));
+
+    if (!file.replicas.includes(NODE_ID)) {
+      file.replicas.push(NODE_ID);
+    }
+
+    if (file.replicas.length >= REPLICATION_FACTOR) continue;
+
+    const replicatedTo = await replicate(filePath, file.name, file.hash, file.replicas);
+
+    if (replicatedTo.length > 0) {
+      file.replicas = Array.from(new Set([...file.replicas, ...replicatedTo]));
+      saveDb();
+      console.log(`repaired ${file.name}: ${file.replicas.length}/${REPLICATION_FACTOR}`);
     }
   }
 }
@@ -156,12 +212,14 @@ async function replicate(filePath: string, fileName: string, hash: string) {
 function calculateStats() {
   const totalBytes = filesDb.reduce((sum, file) => sum + file.size, 0);
   const encryptedFiles = filesDb.filter((file) => file.isEncrypted).length;
+  const underReplicatedFiles = filesDb.filter((file) => (file.replicas || []).length < REPLICATION_FACTOR).length;
 
   return {
     nodeId: NODE_ID,
     publicUrl: PUBLIC_URL,
     peers: peers.length,
     totalFiles: filesDb.length,
+    underReplicatedFiles,
     encryptedFiles,
     publicFiles: filesDb.length - encryptedFiles,
     totalBytes,
@@ -186,6 +244,16 @@ async function startServer() {
 
   app.post("/api/bootstrap/register", async (_req, res) => {
     await registerNode();
+    res.json({ ok: true, peers });
+  });
+
+  app.post("/api/repair", async (_req, res) => {
+    await repairReplication();
+    res.json({ ok: true, stats: calculateStats() });
+  });
+
+  app.post("/api/peers/prune", (_req, res) => {
+    pruneStalePeers();
     res.json({ ok: true, peers });
   });
 
@@ -254,7 +322,9 @@ async function startServer() {
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
-      await replicate(filePath, req.file.originalname, hash);
+      const replicatedTo = await replicate(filePath, req.file.originalname, hash, existing.replicas);
+      existing.replicas = Array.from(new Set([...existing.replicas, ...replicatedTo]));
+      saveDb();
       return res.json({ ...existing, duplicate: true });
     }
 
@@ -274,7 +344,9 @@ async function startServer() {
     filesDb.push(fileInfo);
     saveDb();
 
-    await replicate(filePath, req.file.originalname, hash);
+    const replicatedTo = await replicate(filePath, req.file.originalname, hash, fileInfo.replicas);
+    fileInfo.replicas = Array.from(new Set([...fileInfo.replicas, ...replicatedTo]));
+    saveDb();
 
     res.status(201).json(fileInfo);
   });
@@ -356,6 +428,13 @@ async function startServer() {
     console.log(`Vault storage directory: ${uploadsDir}`);
 
     await registerNode();
+    await repairReplication();
+
+    setInterval(() => {
+      registerNode().then(repairReplication).catch(() => {
+        console.log("repair cycle failed");
+      });
+    }, REPAIR_INTERVAL_MS).unref();
   });
 }
 
