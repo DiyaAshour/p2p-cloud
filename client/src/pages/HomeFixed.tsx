@@ -138,6 +138,16 @@ export default function HomeFixed() {
     }
   };
 
+  const formatLastSeen = (lastSeen: number) => {
+    if (!lastSeen) return 'Last seen: unknown';
+    return `Last seen: ${new Date(lastSeen).toLocaleString()}`;
+  };
+
+  const formatStorageUsed = (bytes: number) => {
+    if (!bytes) return '0 MB used';
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB used`;
+  };
+
   const quota = p2pPersistentService.getStorageQuota();
   const connectedPeers = peers;
 
@@ -399,7 +409,7 @@ export default function HomeFixed() {
                             {peer.peerId.slice(0, 20)}...
                           </p>
                           <p className="text-xs text-slate-400 mt-1">
-                            {peer.address}:{peer.port}
+                            {formatLastSeen(peer.lastSeen)} • {formatStorageUsed(peer.storageUsed)}
                           </p>
                         </div>
                         <div className="text-right">
