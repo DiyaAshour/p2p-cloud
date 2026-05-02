@@ -5,6 +5,11 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import multer from "multer";
 import crypto from "node:crypto";
+import {
+  type ChunkInfo,
+  splitFileIntoChunks,
+  rebuildFileFromLocalChunks,
+} from "./chunking";
 
 const NODE_ID = process.env.P2P_NODE_ID || "node-local";
 const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
@@ -12,6 +17,7 @@ const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
 const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
 const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
+const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 4 * 1024 * 1024);
 
 type PeerInfo = {
   peerId: string;
@@ -25,8 +31,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const uploadsDir = path.resolve(__dirname, "..", "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+const chunksDir = path.resolve(__dirname, "..", "chunks");
+
+for (const dir of [uploadsDir, chunksDir]) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
 }
 
 const storage = multer.diskStorage({
@@ -51,6 +61,9 @@ type StoredFile = {
   mimeType?: string;
   ownerNodeId: string;
   replicas: string[];
+  storageMode?: "file" | "chunks";
+  chunkSize?: number;
+  chunks?: ChunkInfo[];
 };
 
 const dbPath = path.resolve(__dirname, "..", "files_db.json");
@@ -188,6 +201,12 @@ async function repairReplication() {
   pruneStalePeers();
 
   for (const file of filesDb) {
+    if (file.storageMode === "chunks") {
+      file.replicas = Array.from(new Set(file.replicas || [NODE_ID]));
+      if (!file.replicas.includes(NODE_ID)) file.replicas.push(NODE_ID);
+      continue;
+    }
+
     const filePath = path.join(uploadsDir, file.path);
     if (!fs.existsSync(filePath)) continue;
 
@@ -213,12 +232,15 @@ function calculateStats() {
   const totalBytes = filesDb.reduce((sum, file) => sum + file.size, 0);
   const encryptedFiles = filesDb.filter((file) => file.isEncrypted).length;
   const underReplicatedFiles = filesDb.filter((file) => (file.replicas || []).length < REPLICATION_FACTOR).length;
+  const totalChunks = filesDb.reduce((sum, file) => sum + (file.chunks?.length || 0), 0);
 
   return {
     nodeId: NODE_ID,
     publicUrl: PUBLIC_URL,
     peers: peers.length,
     totalFiles: filesDb.length,
+    totalChunks,
+    chunkSizeBytes: CHUNK_SIZE_BYTES,
     underReplicatedFiles,
     encryptedFiles,
     publicFiles: filesDb.length - encryptedFiles,
@@ -237,7 +259,7 @@ async function startServer() {
     res.json({
       ok: true,
       product: "P2P Cloud",
-      mode: "http-p2p-node",
+      mode: "chunked-http-p2p-node",
       stats: calculateStats(),
     });
   });
@@ -271,6 +293,28 @@ async function startServer() {
     res.json(peers);
   });
 
+  app.get("/api/chunks/:hash", (req, res) => {
+    const chunkPath = path.join(chunksDir, req.params.hash);
+    if (!fs.existsSync(chunkPath)) {
+      return res.status(404).json({ error: "Chunk not found" });
+    }
+
+    res.sendFile(chunkPath);
+  });
+
+  app.get("/api/manifests/:hash", (req, res) => {
+    const file = filesDb.find((entry) => entry.hash === req.params.hash);
+    if (!file) return res.status(404).json({ error: "Manifest not found" });
+
+    res.json({
+      fileHash: file.hash,
+      fileName: file.name,
+      fileSize: file.size,
+      chunkSize: file.chunkSize,
+      chunks: file.chunks || [],
+    });
+  });
+
   app.post("/api/p2p/store", upload.single("file"), (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "no file" });
@@ -288,6 +332,15 @@ async function startServer() {
       return res.json({ ok: true, file: existing, duplicate: true });
     }
 
+    const manifest = splitFileIntoChunks({
+      filePath: storedPath,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      chunkSize: CHUNK_SIZE_BYTES,
+      chunksDir,
+      localNodeId: NODE_ID,
+    });
+
     const fileInfo: StoredFile = {
       id: hash,
       name: req.file.originalname,
@@ -299,6 +352,9 @@ async function startServer() {
       mimeType: req.file.mimetype,
       ownerNodeId: req.body.ownerNodeId || "remote",
       replicas: [NODE_ID],
+      storageMode: "chunks",
+      chunkSize: CHUNK_SIZE_BYTES,
+      chunks: manifest.chunks,
     };
 
     filesDb.push(fileInfo);
@@ -328,6 +384,15 @@ async function startServer() {
       return res.json({ ...existing, duplicate: true });
     }
 
+    const manifest = splitFileIntoChunks({
+      filePath,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      chunkSize: CHUNK_SIZE_BYTES,
+      chunksDir,
+      localNodeId: NODE_ID,
+    });
+
     const fileInfo: StoredFile = {
       id: hash,
       name: req.file.originalname,
@@ -339,6 +404,9 @@ async function startServer() {
       mimeType: req.file.mimetype,
       ownerNodeId: NODE_ID,
       replicas: [NODE_ID],
+      storageMode: "chunks",
+      chunkSize: CHUNK_SIZE_BYTES,
+      chunks: manifest.chunks,
     };
 
     filesDb.push(fileInfo);
@@ -374,6 +442,17 @@ async function startServer() {
 
     if (!file) {
       return res.status(404).json({ error: "File not found" });
+    }
+
+    if (file.storageMode === "chunks" && file.chunks?.length) {
+      const rebuilt = rebuildFileFromLocalChunks({ chunksDir, chunks: file.chunks });
+      if (!rebuilt) {
+        return res.status(503).json({ error: "File chunks are not available locally" });
+      }
+
+      res.setHeader("Content-Disposition", `attachment; filename=\"${file.name.replace(/\"/g, "")}\"`);
+      res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
+      return res.send(rebuilt);
     }
 
     const filePath = path.join(uploadsDir, file.path);
@@ -426,6 +505,7 @@ async function startServer() {
     console.log(`Node ID: ${NODE_ID}`);
     console.log(`Public URL: ${PUBLIC_URL}`);
     console.log(`Vault storage directory: ${uploadsDir}`);
+    console.log(`Chunk storage directory: ${chunksDir}`);
 
     await registerNode();
     await repairReplication();
