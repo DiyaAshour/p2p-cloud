@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { web3Service } from '@/services/web3Service';
+import { web3Service, type WalletConnector } from '@/services/web3Service';
 
 export interface WalletState {
   address: string | null;
@@ -8,6 +8,7 @@ export interface WalletState {
   chainId: number | null;
   isLoading: boolean;
   error: string | null;
+  connector: WalletConnector | null;
 }
 
 export function useWallet() {
@@ -18,17 +19,19 @@ export function useWallet() {
     chainId: null,
     isLoading: false,
     error: null,
+    connector: null,
   });
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (connector: WalletConnector = 'metamask') => {
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
-      const walletState = await web3Service.connectWallet();
+      const walletState = await web3Service.connectWallet(connector);
       setState({
         address: walletState.address,
         balance: walletState.balance,
         isConnected: walletState.isConnected,
         chainId: walletState.chainId,
+        connector: walletState.connector,
         isLoading: false,
         error: null,
       });
@@ -42,13 +45,14 @@ export function useWallet() {
     }
   }, []);
 
-  const disconnect = useCallback(() => {
-    web3Service.disconnectWallet();
+  const disconnect = useCallback(async () => {
+    await web3Service.disconnectWallet();
     setState({
       address: null,
       balance: '0',
       isConnected: false,
       chainId: null,
+      connector: null,
       isLoading: false,
       error: null,
     });
@@ -64,7 +68,6 @@ export function useWallet() {
   }, []);
 
   useEffect(() => {
-    // Check if wallet is already connected
     const checkConnection = async () => {
       if (typeof window !== 'undefined' && window.ethereum) {
         try {
@@ -72,7 +75,7 @@ export function useWallet() {
             method: 'eth_accounts',
           });
           if (accounts.length > 0) {
-            await connect();
+            await connect('metamask');
           }
         } catch (error) {
           console.error('Failed to check wallet connection:', error);
