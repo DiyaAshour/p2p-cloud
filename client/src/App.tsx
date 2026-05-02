@@ -5,16 +5,15 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
+import Dashboard from "./pages/Dashboard";
 
 function Router() {
-  // في Electron، المسارات قد تبدأ بـ index.html أو تكون فارغة
-  // سنقوم بتبسيط الـ Router ليعرض الصفحة الرئيسية دائماً كبداية
   return (
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/index.html" component={Home} />
+      <Route path="/dashboard" component={Dashboard} />
       <Route path="/404" component={NotFound} />
-      {/* Fallback to Home for Electron compatibility */}
       <Route component={Home} />
     </Switch>
   );
@@ -23,9 +22,7 @@ function Router() {
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider
-        defaultTheme="dark"
-      >
+      <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
           <Toaster />
           <Router />
