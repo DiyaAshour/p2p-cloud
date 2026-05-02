@@ -9,7 +9,10 @@ import {
   type ChunkInfo,
   splitFileIntoChunks,
   rebuildFileFromLocalChunks,
+  getChunkPath,
+  hashBuffer,
 } from "./chunking";
+import { sendChunkToPeer, fetchChunkFromPeer } from "./chunkNetwork";
 
 const NODE_ID = process.env.P2P_NODE_ID || "node-local";
 const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
@@ -23,6 +26,9 @@ type PeerInfo = {
   peerId: string;
   url: string;
   lastSeen: string;
+  successCount?: number;
+  failureCount?: number;
+  latencyMs?: number;
 };
 
 let peers: PeerInfo[] = [];
@@ -48,7 +54,17 @@ const storage = multer.diskStorage({
   },
 });
 
+const chunkStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: (_req, file, cb) => {
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const uniquePrefix = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    cb(null, `${uniquePrefix}-${safeName}`);
+  },
+});
+
 const upload = multer({ storage });
+const chunkUpload = multer({ storage: chunkStorage });
 
 type StoredFile = {
   id: string;
@@ -100,6 +116,30 @@ function hashFile(filePath: string) {
   return hash.digest("hex");
 }
 
+function scorePeer(peer: PeerInfo) {
+  const success = peer.successCount || 0;
+  const failure = peer.failureCount || 0;
+  const latency = peer.latencyMs || 1_000;
+  return success * 100 - failure * 200 - latency;
+}
+
+function rankedPeers(skipPeerIds: string[] = []) {
+  const skip = new Set([NODE_ID, ...skipPeerIds]);
+  return [...peers]
+    .filter((peer) => !skip.has(peer.peerId))
+    .sort((a, b) => scorePeer(b) - scorePeer(a));
+}
+
+function recordPeerResult(peerId: string, ok: boolean, latencyMs: number) {
+  const peer = peers.find((entry) => entry.peerId === peerId);
+  if (!peer) return;
+  peer.lastSeen = new Date().toISOString();
+  peer.successCount = (peer.successCount || 0) + (ok ? 1 : 0);
+  peer.failureCount = (peer.failureCount || 0) + (ok ? 0 : 1);
+  peer.latencyMs = latencyMs;
+  savePeers();
+}
+
 function pruneStalePeers() {
   const now = Date.now();
   const before = peers.length;
@@ -128,6 +168,8 @@ function upsertPeer(peer: any) {
       peerId: peer.peerId,
       url: normalizedUrl,
       lastSeen: new Date().toISOString(),
+      successCount: 0,
+      failureCount: 0,
     });
   }
 
@@ -164,15 +206,12 @@ async function registerNode() {
 }
 
 async function replicate(filePath: string, fileName: string, hash: string, skipPeerIds: string[] = []) {
-  const skip = new Set([NODE_ID, ...skipPeerIds]);
-  const targets = peers
-    .filter((peer) => !skip.has(peer.peerId))
-    .slice(0, Math.max(0, REPLICATION_FACTOR - skip.size));
-
+  const targets = rankedPeers(skipPeerIds).slice(0, Math.max(0, REPLICATION_FACTOR - 1));
   const replicatedTo: string[] = [];
 
   for (const peer of targets) {
     try {
+      const started = Date.now();
       const form = new FormData();
       form.append("file", new Blob([fs.readFileSync(filePath)]), fileName);
       form.append("hash", hash);
@@ -183,6 +222,8 @@ async function replicate(filePath: string, fileName: string, hash: string, skipP
         body: form,
       });
 
+      recordPeerResult(peer.peerId, response.ok, Date.now() - started);
+
       if (response.ok) {
         replicatedTo.push(peer.peerId);
         console.log("replicated to", peer.peerId);
@@ -190,6 +231,7 @@ async function replicate(filePath: string, fileName: string, hash: string, skipP
         console.log("replication failed", peer.peerId);
       }
     } catch {
+      recordPeerResult(peer.peerId, false, 0);
       console.log("replication failed", peer.peerId);
     }
   }
@@ -197,13 +239,56 @@ async function replicate(filePath: string, fileName: string, hash: string, skipP
   return replicatedTo;
 }
 
+async function replicateChunks(chunks: ChunkInfo[]) {
+  for (const chunk of chunks) {
+    const targets = rankedPeers(chunk.replicas || []).slice(
+      0,
+      Math.max(0, REPLICATION_FACTOR - (chunk.replicas || []).length)
+    );
+
+    const results = await Promise.all(
+      targets.map((peer) => sendChunkToPeer({ chunksDir, chunkHash: chunk.hash, peer }))
+    );
+
+    for (const result of results) {
+      recordPeerResult(result.peerId, result.ok, result.latencyMs);
+      if (result.ok && !chunk.replicas.includes(result.peerId)) {
+        chunk.replicas.push(result.peerId);
+      }
+    }
+  }
+}
+
+async function ensureChunksAvailable(chunks: ChunkInfo[]) {
+  const missing = chunks.filter((chunk) => !fs.existsSync(getChunkPath(chunksDir, chunk.hash)));
+  if (missing.length === 0) return true;
+
+  const results = await Promise.all(
+    missing.map(async (chunk) => {
+      for (const peer of rankedPeers()) {
+        const result = await fetchChunkFromPeer({
+          chunksDir,
+          chunkHash: chunk.hash,
+          peer,
+          verify: hashBuffer,
+        });
+        recordPeerResult(result.peerId, result.ok, result.latencyMs);
+        if (result.ok) return true;
+      }
+      return false;
+    })
+  );
+
+  return results.every(Boolean);
+}
+
 async function repairReplication() {
   pruneStalePeers();
 
   for (const file of filesDb) {
-    if (file.storageMode === "chunks") {
-      file.replicas = Array.from(new Set(file.replicas || [NODE_ID]));
-      if (!file.replicas.includes(NODE_ID)) file.replicas.push(NODE_ID);
+    if (file.storageMode === "chunks" && file.chunks?.length) {
+      await replicateChunks(file.chunks);
+      saveDb();
       continue;
     }
 
@@ -231,7 +316,12 @@ async function repairReplication() {
 function calculateStats() {
   const totalBytes = filesDb.reduce((sum, file) => sum + file.size, 0);
   const encryptedFiles = filesDb.filter((file) => file.isEncrypted).length;
-  const underReplicatedFiles = filesDb.filter((file) => (file.replicas || []).length < REPLICATION_FACTOR).length;
+  const underReplicatedFiles = filesDb.filter((file) => {
+    if (file.storageMode === "chunks" && file.chunks?.length) {
+      return file.chunks.some((chunk) => (chunk.replicas || []).length < REPLICATION_FACTOR);
+    }
+    return (file.replicas || []).length < REPLICATION_FACTOR;
+  }).length;
   const totalChunks = filesDb.reduce((sum, file) => sum + (file.chunks?.length || 0), 0);
 
   return {
@@ -259,7 +349,7 @@ async function startServer() {
     res.json({
       ok: true,
       product: "P2P Cloud",
-      mode: "chunked-http-p2p-node",
+      mode: "distributed-chunk-http-p2p-node",
       stats: calculateStats(),
     });
   });
@@ -294,11 +384,36 @@ async function startServer() {
   });
 
   app.get("/api/chunks/:hash", (req, res) => {
-    const chunkPath = path.join(chunksDir, req.params.hash);
+    const chunkPath = getChunkPath(chunksDir, req.params.hash);
     if (!fs.existsSync(chunkPath)) {
       return res.status(404).json({ error: "Chunk not found" });
     }
 
+    res.sendFile(chunkPath);
+  });
+
+  app.post("/api/p2p/chunks/:hash", chunkUpload.single("chunk"), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "no chunk" });
+
+    const actualHash = hashFile(req.file.path);
+    if (actualHash !== req.params.hash) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: "chunk hash mismatch" });
+    }
+
+    const finalPath = getChunkPath(chunksDir, actualHash);
+    if (!fs.existsSync(finalPath)) {
+      fs.renameSync(req.file.path, finalPath);
+    } else {
+      fs.unlinkSync(req.file.path);
+    }
+
+    res.status(201).json({ ok: true, hash: actualHash, nodeId: NODE_ID });
+  });
+
+  app.get("/api/p2p/chunks/:hash", (req, res) => {
+    const chunkPath = getChunkPath(chunksDir, req.params.hash);
+    if (!fs.existsSync(chunkPath)) return res.status(404).json({ error: "chunk not found" });
     res.sendFile(chunkPath);
   });
 
@@ -315,7 +430,7 @@ async function startServer() {
     });
   });
 
-  app.post("/api/p2p/store", upload.single("file"), (req, res) => {
+  app.post("/api/p2p/store", upload.single("file"), async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "no file" });
     }
@@ -359,6 +474,8 @@ async function startServer() {
 
     filesDb.push(fileInfo);
     saveDb();
+    await replicateChunks(fileInfo.chunks || []);
+    saveDb();
 
     console.log("received replica:", req.file.originalname);
 
@@ -378,8 +495,12 @@ async function startServer() {
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
-      const replicatedTo = await replicate(filePath, req.file.originalname, hash, existing.replicas);
-      existing.replicas = Array.from(new Set([...existing.replicas, ...replicatedTo]));
+      if (existing.storageMode === "chunks" && existing.chunks?.length) {
+        await replicateChunks(existing.chunks);
+      } else {
+        const replicatedTo = await replicate(filePath, req.file.originalname, hash, existing.replicas);
+        existing.replicas = Array.from(new Set([...existing.replicas, ...replicatedTo]));
+      }
       saveDb();
       return res.json({ ...existing, duplicate: true });
     }
@@ -411,9 +532,7 @@ async function startServer() {
 
     filesDb.push(fileInfo);
     saveDb();
-
-    const replicatedTo = await replicate(filePath, req.file.originalname, hash, fileInfo.replicas);
-    fileInfo.replicas = Array.from(new Set([...fileInfo.replicas, ...replicatedTo]));
+    await replicateChunks(fileInfo.chunks || []);
     saveDb();
 
     res.status(201).json(fileInfo);
@@ -437,7 +556,7 @@ async function startServer() {
     res.json(calculateStats());
   });
 
-  app.get("/api/download/:hash", (req, res) => {
+  app.get("/api/download/:hash", async (req, res) => {
     const file = filesDb.find((entry) => entry.hash === req.params.hash);
 
     if (!file) {
@@ -445,6 +564,11 @@ async function startServer() {
     }
 
     if (file.storageMode === "chunks" && file.chunks?.length) {
+      const available = await ensureChunksAvailable(file.chunks);
+      if (!available) {
+        return res.status(503).json({ error: "File chunks are not available on the network" });
+      }
+
       const rebuilt = rebuildFileFromLocalChunks({ chunksDir, chunks: file.chunks });
       if (!rebuilt) {
         return res.status(503).json({ error: "File chunks are not available locally" });
