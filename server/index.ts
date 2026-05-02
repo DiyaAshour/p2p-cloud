@@ -142,11 +142,34 @@ async function startServer() {
       return res.status(400).json({ error: "no file" });
     }
 
+    const hash = req.body.hash || crypto.randomBytes(12).toString("hex");
+    const existing = filesDb.find((entry) => entry.hash === hash);
+
+    if (existing) {
+      return res.json({ ok: true, file: existing, duplicate: true });
+    }
+
+    const fileInfo: StoredFile = {
+      id: hash,
+      name: req.file.originalname,
+      size: req.file.size,
+      hash,
+      uploadedAt: new Date().toISOString(),
+      path: req.file.filename,
+      isEncrypted: req.body.isEncrypted === "true",
+      mimeType: req.file.mimetype,
+      ownerNodeId: req.body.ownerNodeId || "remote",
+      replicas: [NODE_ID],
+    };
+
+    filesDb.push(fileInfo);
+    saveDb();
+
     console.log("received replica:", req.file.originalname);
 
-    res.json({
+    res.status(201).json({
       ok: true,
-      file: req.file.originalname,
+      file: fileInfo,
     });
   });
 
