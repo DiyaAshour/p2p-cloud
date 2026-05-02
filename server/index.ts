@@ -17,12 +17,13 @@ import { rateLimit, requireApiKey } from "./security";
 const NODE_ID = process.env.P2P_NODE_ID || "node-local";
 const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
 const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
-const REPLICATION_FACTOR = Number(process.env.P2P_REPLICATION_FACTOR || 3);
+const TARGET_REPLICAS = Math.max(1, Number(process.env.P2P_REPLICATION_FACTOR || 3));
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
 const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 4 * 1024 * 1024);
 const MAX_PARALLEL_CHUNK_FETCHES = Number(process.env.P2P_MAX_PARALLEL_CHUNK_FETCHES || 8);
 const MAX_UPLOAD_BYTES = Number(process.env.P2P_MAX_UPLOAD_BYTES || 2 * 1024 * 1024 * 1024);
+const API_KEY = process.env.P2P_API_KEY || "";
 
 type PeerInfo = {
   peerId: string;
@@ -33,17 +34,138 @@ type PeerInfo = {
   latencyMs?: number;
 };
 
+type StoredFile = {
+  id: string;
+  name: string;
+  size: number;
+  hash: string;
+  uploadedAt: string;
+  path: string;
+  isEncrypted: boolean;
+  mimeType?: string;
+  ownerNodeId: string;
+  replicas: string[];
+  storageMode?: "file" | "chunks";
+  chunkSize?: number;
+  chunks?: ChunkInfo[];
+};
+
 let peers: PeerInfo[] = [];
+let filesDb: StoredFile[] = [];
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const uploadsDir = path.resolve(__dirname, "..", "uploads");
 const chunksDir = path.resolve(__dirname, "..", "chunks");
+const dbPath = path.resolve(__dirname, "..", "files_db.json");
+const peersDbPath = path.resolve(__dirname, "..", "peers_db.json");
 
 for (const dir of [uploadsDir, chunksDir]) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function loadJsonFile<T>(filePath: string, fallback: T): T {
+  if (!fs.existsSync(filePath)) return fallback;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    return fallback;
+  }
+}
+
+filesDb = loadJsonFile<StoredFile[]>(dbPath, []);
+peers = loadJsonFile<PeerInfo[]>(peersDbPath, []);
+
+function saveDb() {
+  fs.writeFileSync(dbPath, JSON.stringify(filesDb, null, 2));
+}
+
+function savePeers() {
+  fs.writeFileSync(peersDbPath, JSON.stringify(peers, null, 2));
+}
+
+function apiHeaders(extra: HeadersInit = {}) {
+  return API_KEY ? { ...extra, "x-p2p-api-key": API_KEY } : extra;
+}
+
+function hashFile(filePath: string) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex");
+}
+
+function scorePeer(peer: PeerInfo) {
+  const success = peer.successCount || 0;
+  const failure = peer.failureCount || 0;
+  const latency = peer.latencyMs || 1_000;
+  return success * 100 - failure * 200 - latency;
+}
+
+function rankedPeers(skipPeerIds: string[] = []) {
+  const skip = new Set([NODE_ID, ...skipPeerIds]);
+  return [...peers]
+    .filter((peer) => peer.peerId && peer.url && !skip.has(peer.peerId))
+    .sort((a, b) => scorePeer(b) - scorePeer(a));
+}
+
+function peersByIds(peerIds: string[] = []) {
+  const wanted = new Set(peerIds.filter((id) => id !== NODE_ID));
+  return rankedPeers().filter((peer) => wanted.has(peer.peerId));
+}
+
+function uniqueReplicas(replicas: string[] = []) {
+  return Array.from(new Set([NODE_ID, ...replicas.filter(Boolean)]));
+}
+
+function recordPeerResult(peerId: string, ok: boolean, latencyMs: number) {
+  const peer = peers.find((entry) => entry.peerId === peerId);
+  if (!peer) return;
+  peer.lastSeen = new Date().toISOString();
+  peer.successCount = (peer.successCount || 0) + (ok ? 1 : 0);
+  peer.failureCount = (peer.failureCount || 0) + (ok ? 0 : 1);
+  peer.latencyMs = latencyMs;
+  savePeers();
+}
+
+function pruneStalePeers() {
+  const now = Date.now();
+  const before = peers.length;
+  peers = peers.filter((peer) => {
+    const lastSeen = Date.parse(peer.lastSeen || "");
+    return Number.isFinite(lastSeen) && now - lastSeen <= PEER_MAX_AGE_MS;
+  });
+  if (peers.length !== before) savePeers();
+}
+
+function upsertPeer(peer: any) {
+  if (!peer?.peerId || !peer?.url || peer.peerId === NODE_ID) return;
+  const normalizedUrl = String(peer.url).replace(/\/+$/, "");
+  const existing = peers.find((entry) => entry.peerId === peer.peerId);
+
+  if (existing) {
+    existing.url = normalizedUrl;
+    existing.lastSeen = new Date().toISOString();
+  } else {
+    peers.push({
+      peerId: peer.peerId,
+      url: normalizedUrl,
+      lastSeen: new Date().toISOString(),
+      successCount: 0,
+      failureCount: 0,
+    });
+  }
+  savePeers();
+}
+
+function deleteLocalFile(filePath: string) {
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+}
+
+function deleteLocalChunks(chunks: ChunkInfo[] = []) {
+  const hashes = new Set(chunks.map((chunk) => chunk.hash));
+  for (const chunkHash of hashes) {
+    const stillReferenced = filesDb.some((file) => file.chunks?.some((chunk) => chunk.hash === chunkHash));
+    if (!stillReferenced) deleteLocalFile(getChunkPath(chunksDir, chunkHash));
   }
 }
 
@@ -68,170 +190,38 @@ const chunkStorage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
 const chunkUpload = multer({ storage: chunkStorage, limits: { fileSize: CHUNK_SIZE_BYTES + 1024 } });
 
-type StoredFile = {
-  id: string;
-  name: string;
-  size: number;
-  hash: string;
-  uploadedAt: string;
-  path: string;
-  isEncrypted: boolean;
-  mimeType?: string;
-  ownerNodeId: string;
-  replicas: string[];
-  storageMode?: "file" | "chunks";
-  chunkSize?: number;
-  chunks?: ChunkInfo[];
-};
-
-const dbPath = path.resolve(__dirname, "..", "files_db.json");
-const peersDbPath = path.resolve(__dirname, "..", "peers_db.json");
-let filesDb: StoredFile[] = [];
-
-if (fs.existsSync(dbPath)) {
-  try {
-    filesDb = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-  } catch {
-    filesDb = [];
-  }
-}
-
-if (fs.existsSync(peersDbPath)) {
-  try {
-    peers = JSON.parse(fs.readFileSync(peersDbPath, "utf-8"));
-  } catch {
-    peers = [];
-  }
-}
-
-function saveDb() {
-  fs.writeFileSync(dbPath, JSON.stringify(filesDb, null, 2));
-}
-
-function savePeers() {
-  fs.writeFileSync(peersDbPath, JSON.stringify(peers, null, 2));
-}
-
-function hashFile(filePath: string) {
-  const hash = crypto.createHash("sha256");
-  hash.update(fs.readFileSync(filePath));
-  return hash.digest("hex");
-}
-
-function scorePeer(peer: PeerInfo) {
-  const success = peer.successCount || 0;
-  const failure = peer.failureCount || 0;
-  const latency = peer.latencyMs || 1_000;
-  return success * 100 - failure * 200 - latency;
-}
-
-function rankedPeers(skipPeerIds: string[] = []) {
-  const skip = new Set([NODE_ID, ...skipPeerIds]);
-  return [...peers]
-    .filter((peer) => !skip.has(peer.peerId))
-    .sort((a, b) => scorePeer(b) - scorePeer(a));
-}
-
-function recordPeerResult(peerId: string, ok: boolean, latencyMs: number) {
-  const peer = peers.find((entry) => entry.peerId === peerId);
-  if (!peer) return;
-  peer.lastSeen = new Date().toISOString();
-  peer.successCount = (peer.successCount || 0) + (ok ? 1 : 0);
-  peer.failureCount = (peer.failureCount || 0) + (ok ? 0 : 1);
-  peer.latencyMs = latencyMs;
-  savePeers();
-}
-
-function pruneStalePeers() {
-  const now = Date.now();
-  const before = peers.length;
-
-  peers = peers.filter((peer) => {
-    const lastSeen = Date.parse(peer.lastSeen || "");
-    return Number.isFinite(lastSeen) && now - lastSeen <= PEER_MAX_AGE_MS;
-  });
-
-  if (peers.length !== before) {
-    savePeers();
-  }
-}
-
-function upsertPeer(peer: any) {
-  if (!peer?.peerId || !peer?.url || peer.peerId === NODE_ID) return;
-
-  const existing = peers.find((entry) => entry.peerId === peer.peerId);
-  const normalizedUrl = String(peer.url).replace(/\/+$/, "");
-
-  if (existing) {
-    existing.url = normalizedUrl;
-    existing.lastSeen = new Date().toISOString();
-  } else {
-    peers.push({
-      peerId: peer.peerId,
-      url: normalizedUrl,
-      lastSeen: new Date().toISOString(),
-      successCount: 0,
-      failureCount: 0,
-    });
-  }
-
-  savePeers();
-}
-
-function deleteLocalFile(filePath: string) {
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
-}
-
-function deleteLocalChunks(chunks: ChunkInfo[] = []) {
-  const hashes = new Set(chunks.map((chunk) => chunk.hash));
-
-  for (const chunkHash of hashes) {
-    const stillReferenced = filesDb.some((file) => {
-      return file.chunks?.some((chunk) => chunk.hash === chunkHash);
-    });
-
-    if (!stillReferenced) {
-      deleteLocalFile(getChunkPath(chunksDir, chunkHash));
-    }
-  }
-}
-
 async function registerNode() {
   if (!BOOTSTRAP_URL) return;
-
   try {
     const response = await fetch(`${BOOTSTRAP_URL}/register`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         peerId: NODE_ID,
         url: PUBLIC_URL,
+        metadata: {
+          targetReplicas: TARGET_REPLICAS,
+          chunkSizeBytes: CHUNK_SIZE_BYTES,
+          fileCount: filesDb.length,
+        },
       }),
     });
-
     const data = await response.json();
     const discoveredPeers = Array.isArray(data.peers) ? data.peers : [];
-
-    for (const peer of discoveredPeers) {
-      upsertPeer(peer);
-    }
-
+    for (const peer of discoveredPeers) upsertPeer(peer);
     pruneStalePeers();
     console.log("connected peers:", peers.length);
-  } catch (error) {
+  } catch {
     console.log("bootstrap register failed");
   }
 }
 
 async function replicate(filePath: string, fileName: string, hash: string, skipPeerIds: string[] = []) {
-  const targets = rankedPeers(skipPeerIds).slice(0, Math.max(0, REPLICATION_FACTOR - 1));
+  const targets = rankedPeers(skipPeerIds);
   const replicatedTo: string[] = [];
 
   for (const peer of targets) {
+    if ([NODE_ID, ...skipPeerIds, ...replicatedTo].length >= TARGET_REPLICAS) break;
     try {
       const started = Date.now();
       const form = new FormData();
@@ -239,64 +229,68 @@ async function replicate(filePath: string, fileName: string, hash: string, skipP
       form.append("hash", hash);
       form.append("ownerNodeId", NODE_ID);
 
-      const response = await fetch(`${peer.url}/api/p2p/store`, {
+      const response = await fetch(`${peer.url.replace(/\/+$/, "")}/api/p2p/store`, {
         method: "POST",
+        headers: apiHeaders(),
         body: form,
       });
 
       recordPeerResult(peer.peerId, response.ok, Date.now() - started);
-
-      if (response.ok) {
-        replicatedTo.push(peer.peerId);
-        console.log("replicated to", peer.peerId);
-      } else {
-        console.log("replication failed", peer.peerId);
-      }
+      if (response.ok) replicatedTo.push(peer.peerId);
     } catch {
       recordPeerResult(peer.peerId, false, 0);
-      console.log("replication failed", peer.peerId);
     }
   }
 
   return replicatedTo;
 }
 
-async function replicateChunks(chunks: ChunkInfo[]) {
-  for (const chunk of chunks) {
-    const targets = rankedPeers(chunk.replicas || []).slice(
-      0,
-      Math.max(0, REPLICATION_FACTOR - (chunk.replicas || []).length)
-    );
+async function replicateChunkToTarget(chunk: ChunkInfo, peer: PeerInfo) {
+  const result = await sendChunkToPeer({ chunksDir, chunkHash: chunk.hash, peer });
+  recordPeerResult(result.peerId, result.ok, result.latencyMs);
+  if (result.ok && !chunk.replicas.includes(result.peerId)) chunk.replicas.push(result.peerId);
+  return result.ok;
+}
 
-    const results = await Promise.all(
-      targets.map((peer) => sendChunkToPeer({ chunksDir, chunkHash: chunk.hash, peer }))
-    );
-
-    for (const result of results) {
-      recordPeerResult(result.peerId, result.ok, result.latencyMs);
-      if (result.ok && !chunk.replicas.includes(result.peerId)) {
-        chunk.replicas.push(result.peerId);
-      }
-    }
+async function replicateOneChunk(chunk: ChunkInfo) {
+  chunk.replicas = uniqueReplicas(chunk.replicas);
+  const localChunkPath = getChunkPath(chunksDir, chunk.hash);
+  if (!fs.existsSync(localChunkPath)) {
+    const recovered = await fetchOneChunkFast(chunk);
+    if (!recovered) return false;
   }
+
+  for (const peer of rankedPeers(chunk.replicas)) {
+    if (chunk.replicas.length >= TARGET_REPLICAS) break;
+    await replicateChunkToTarget(chunk, peer);
+  }
+
+  chunk.replicas = uniqueReplicas(chunk.replicas);
+  return chunk.replicas.length >= Math.min(TARGET_REPLICAS, peers.length + 1);
+}
+
+async function replicateChunks(chunks: ChunkInfo[]) {
+  for (const chunk of chunks) await replicateOneChunk(chunk);
 }
 
 async function fetchOneChunkFast(chunk: ChunkInfo) {
   const localPath = getChunkPath(chunksDir, chunk.hash);
-  if (fs.existsSync(localPath)) return true;
+  if (fs.existsSync(localPath) && hashFile(localPath) === chunk.hash) return true;
 
-  const peersToTry = rankedPeers().slice(0, Math.max(1, REPLICATION_FACTOR));
-  if (peersToTry.length === 0) return false;
+  const preferred = peersByIds(chunk.replicas || []);
+  const fallback = rankedPeers(preferred.map((peer) => peer.peerId));
+  const peersToTry = [...preferred, ...fallback];
 
-  const attempts = await Promise.all(
-    peersToTry.map((peer) => fetchChunkFromPeer({ chunksDir, chunkHash: chunk.hash, peer, verify: hashBuffer }))
-  );
-
-  for (const result of attempts) {
+  for (const peer of peersToTry) {
+    const result = await fetchChunkFromPeer({ chunksDir, chunkHash: chunk.hash, peer, verify: hashBuffer });
     recordPeerResult(result.peerId, result.ok, result.latencyMs);
+    if (result.ok) {
+      if (!chunk.replicas.includes(peer.peerId)) chunk.replicas.push(peer.peerId);
+      return true;
+    }
   }
 
-  return attempts.some((result) => result.ok);
+  return false;
 }
 
 async function ensureChunksAvailable(chunks: ChunkInfo[]) {
@@ -309,24 +303,20 @@ async function ensureChunksAvailable(chunks: ChunkInfo[]) {
     if (!results.every(Boolean)) return false;
   }
 
+  saveDb();
   return true;
 }
 
 async function streamChunksToResponse(res: express.Response, file: StoredFile) {
   if (!file.chunks?.length) return false;
-
   const orderedChunks = [...file.chunks].sort((a, b) => a.index - b.index);
 
   for (const chunk of orderedChunks) {
     const chunkPath = getChunkPath(chunksDir, chunk.hash);
     if (!fs.existsSync(chunkPath)) return false;
-
     const buffer = fs.readFileSync(chunkPath);
     if (hashBuffer(buffer) !== chunk.hash) return false;
-
-    if (!res.write(buffer)) {
-      await new Promise<void>((resolve) => res.once("drain", resolve));
-    }
+    if (!res.write(buffer)) await new Promise<void>((resolve) => res.once("drain", resolve));
   }
 
   res.end();
@@ -346,20 +336,11 @@ async function repairReplication() {
     const filePath = path.join(uploadsDir, file.path);
     if (!fs.existsSync(filePath)) continue;
 
-    file.replicas = Array.from(new Set(file.replicas || [NODE_ID]));
-
-    if (!file.replicas.includes(NODE_ID)) {
-      file.replicas.push(NODE_ID);
-    }
-
-    if (file.replicas.length >= REPLICATION_FACTOR) continue;
-
-    const replicatedTo = await replicate(filePath, file.name, file.hash, file.replicas);
-
-    if (replicatedTo.length > 0) {
-      file.replicas = Array.from(new Set([...file.replicas, ...replicatedTo]));
+    file.replicas = uniqueReplicas(file.replicas);
+    if (file.replicas.length < TARGET_REPLICAS) {
+      const replicatedTo = await replicate(filePath, file.name, file.hash, file.replicas);
+      file.replicas = uniqueReplicas([...file.replicas, ...replicatedTo]);
       saveDb();
-      console.log(`repaired ${file.name}: ${file.replicas.length}/${REPLICATION_FACTOR}`);
     }
   }
 }
@@ -367,26 +348,60 @@ async function repairReplication() {
 function calculateStats() {
   const totalBytes = filesDb.reduce((sum, file) => sum + file.size, 0);
   const encryptedFiles = filesDb.filter((file) => file.isEncrypted).length;
+  const totalChunks = filesDb.reduce((sum, file) => sum + (file.chunks?.length || 0), 0);
+  const underReplicatedChunks = filesDb.reduce((sum, file) => {
+    if (!file.chunks?.length) return sum;
+    return sum + file.chunks.filter((chunk) => uniqueReplicas(chunk.replicas).length < TARGET_REPLICAS).length;
+  }, 0);
   const underReplicatedFiles = filesDb.filter((file) => {
     if (file.storageMode === "chunks" && file.chunks?.length) {
-      return file.chunks.some((chunk) => (chunk.replicas || []).length < REPLICATION_FACTOR);
+      return file.chunks.some((chunk) => uniqueReplicas(chunk.replicas).length < TARGET_REPLICAS);
     }
-    return (file.replicas || []).length < REPLICATION_FACTOR;
+    return uniqueReplicas(file.replicas).length < TARGET_REPLICAS;
   }).length;
-  const totalChunks = filesDb.reduce((sum, file) => sum + (file.chunks?.length || 0), 0);
 
   return {
     nodeId: NODE_ID,
     publicUrl: PUBLIC_URL,
+    targetReplicas: TARGET_REPLICAS,
     peers: peers.length,
     totalFiles: filesDb.length,
     totalChunks,
+    underReplicatedChunks,
     chunkSizeBytes: CHUNK_SIZE_BYTES,
     underReplicatedFiles,
     encryptedFiles,
     publicFiles: filesDb.length - encryptedFiles,
     totalBytes,
     totalMB: Number((totalBytes / 1024 / 1024).toFixed(2)),
+  };
+}
+
+function createStoredFile(req: express.Request, hash: string, ownerNodeId: string): StoredFile {
+  const filePath = path.join(uploadsDir, req.file!.filename);
+  const manifest = splitFileIntoChunks({
+    filePath,
+    fileName: req.file!.originalname,
+    fileSize: req.file!.size,
+    chunkSize: CHUNK_SIZE_BYTES,
+    chunksDir,
+    localNodeId: NODE_ID,
+  });
+
+  return {
+    id: hash,
+    name: req.file!.originalname,
+    size: req.file!.size,
+    hash,
+    uploadedAt: new Date().toISOString(),
+    path: req.file!.filename,
+    isEncrypted: req.body.isEncrypted === "true",
+    mimeType: req.file!.mimetype,
+    ownerNodeId,
+    replicas: [NODE_ID],
+    storageMode: "chunks",
+    chunkSize: CHUNK_SIZE_BYTES,
+    chunks: manifest.chunks.map((chunk) => ({ ...chunk, replicas: uniqueReplicas(chunk.replicas) })),
   };
 }
 
@@ -399,12 +414,7 @@ async function startServer() {
   app.use(requireApiKey);
 
   app.get("/api/health", (_req, res) => {
-    res.json({
-      ok: true,
-      product: "P2P Cloud",
-      mode: "distributed-chunk-http-p2p-node",
-      stats: calculateStats(),
-    });
+    res.json({ ok: true, product: "P2P Cloud", mode: "resilient-distributed-chunk-node", stats: calculateStats() });
   });
 
   app.post("/api/bootstrap/register", async (_req, res) => {
@@ -424,43 +434,29 @@ async function startServer() {
 
   app.post("/api/peers", (req, res) => {
     const { peerId, url } = req.body || {};
-    if (!peerId || !url) {
-      return res.status(400).json({ error: "peerId and url required" });
-    }
-
+    if (!peerId || !url) return res.status(400).json({ error: "peerId and url required" });
     upsertPeer({ peerId, url });
     res.status(201).json({ ok: true, peers });
   });
 
-  app.get("/api/peers", (_req, res) => {
-    res.json(peers);
-  });
+  app.get("/api/peers", (_req, res) => res.json(peers));
 
   app.get("/api/chunks/:hash", (req, res) => {
     const chunkPath = getChunkPath(chunksDir, req.params.hash);
-    if (!fs.existsSync(chunkPath)) {
-      return res.status(404).json({ error: "Chunk not found" });
-    }
-
+    if (!fs.existsSync(chunkPath)) return res.status(404).json({ error: "Chunk not found" });
     res.sendFile(chunkPath);
   });
 
   app.post("/api/p2p/chunks/:hash", chunkUpload.single("chunk"), (req, res) => {
     if (!req.file) return res.status(400).json({ error: "no chunk" });
-
     const actualHash = hashFile(req.file.path);
     if (actualHash !== req.params.hash) {
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: "chunk hash mismatch" });
     }
-
     const finalPath = getChunkPath(chunksDir, actualHash);
-    if (!fs.existsSync(finalPath)) {
-      fs.renameSync(req.file.path, finalPath);
-    } else {
-      fs.unlinkSync(req.file.path);
-    }
-
+    if (!fs.existsSync(finalPath)) fs.renameSync(req.file.path, finalPath);
+    else fs.unlinkSync(req.file.path);
     res.status(201).json({ ok: true, hash: actualHash, nodeId: NODE_ID });
   });
 
@@ -473,226 +469,107 @@ async function startServer() {
   app.get("/api/manifests/:hash", (req, res) => {
     const file = filesDb.find((entry) => entry.hash === req.params.hash);
     if (!file) return res.status(404).json({ error: "Manifest not found" });
-
-    res.json({
-      fileHash: file.hash,
-      fileName: file.name,
-      fileSize: file.size,
-      chunkSize: file.chunkSize,
-      chunks: file.chunks || [],
-    });
+    res.json({ fileHash: file.hash, fileName: file.name, fileSize: file.size, chunkSize: file.chunkSize, chunks: file.chunks || [] });
   });
 
   app.post("/api/p2p/store", upload.single("file"), async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: "no file" });
-    }
-
+    if (!req.file) return res.status(400).json({ error: "no file" });
     const storedPath = path.join(uploadsDir, req.file.filename);
     const hash = req.body.hash || hashFile(storedPath);
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
-      if (!existing.replicas.includes(NODE_ID)) {
-        existing.replicas.push(NODE_ID);
-        saveDb();
-      }
+      existing.replicas = uniqueReplicas(existing.replicas);
+      if (existing.storageMode === "chunks" && existing.chunks?.length) await replicateChunks(existing.chunks);
+      saveDb();
       return res.json({ ok: true, file: existing, duplicate: true });
     }
 
-    const manifest = splitFileIntoChunks({
-      filePath: storedPath,
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-      chunkSize: CHUNK_SIZE_BYTES,
-      chunksDir,
-      localNodeId: NODE_ID,
-    });
-
-    const fileInfo: StoredFile = {
-      id: hash,
-      name: req.file.originalname,
-      size: req.file.size,
-      hash,
-      uploadedAt: new Date().toISOString(),
-      path: req.file.filename,
-      isEncrypted: req.body.isEncrypted === "true",
-      mimeType: req.file.mimetype,
-      ownerNodeId: req.body.ownerNodeId || "remote",
-      replicas: [NODE_ID],
-      storageMode: "chunks",
-      chunkSize: CHUNK_SIZE_BYTES,
-      chunks: manifest.chunks,
-    };
-
+    const fileInfo = createStoredFile(req, hash, req.body.ownerNodeId || "remote");
     filesDb.push(fileInfo);
     saveDb();
     await replicateChunks(fileInfo.chunks || []);
     saveDb();
-
-    console.log("received replica:", req.file.originalname);
-
-    res.status(201).json({
-      ok: true,
-      file: fileInfo,
-    });
+    res.status(201).json({ ok: true, file: fileInfo });
   });
 
   app.post("/api/upload", upload.single("file"), async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
-    }
-
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
     const filePath = path.join(uploadsDir, req.file.filename);
     const hash = req.body.hash || hashFile(filePath);
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
-      if (existing.storageMode === "chunks" && existing.chunks?.length) {
-        await replicateChunks(existing.chunks);
-      } else {
-        const replicatedTo = await replicate(filePath, req.file.originalname, hash, existing.replicas);
-        existing.replicas = Array.from(new Set([...existing.replicas, ...replicatedTo]));
-      }
+      if (existing.storageMode === "chunks" && existing.chunks?.length) await replicateChunks(existing.chunks);
+      else existing.replicas = uniqueReplicas([...existing.replicas, ...(await replicate(filePath, req.file.originalname, hash, existing.replicas))]);
       saveDb();
       return res.json({ ...existing, duplicate: true });
     }
 
-    const manifest = splitFileIntoChunks({
-      filePath,
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-      chunkSize: CHUNK_SIZE_BYTES,
-      chunksDir,
-      localNodeId: NODE_ID,
-    });
-
-    const fileInfo: StoredFile = {
-      id: hash,
-      name: req.file.originalname,
-      size: req.file.size,
-      hash,
-      uploadedAt: new Date().toISOString(),
-      path: req.file.filename,
-      isEncrypted: req.body.isEncrypted === "true",
-      mimeType: req.file.mimetype,
-      ownerNodeId: NODE_ID,
-      replicas: [NODE_ID],
-      storageMode: "chunks",
-      chunkSize: CHUNK_SIZE_BYTES,
-      chunks: manifest.chunks,
-    };
-
+    const fileInfo = createStoredFile(req, hash, NODE_ID);
     filesDb.push(fileInfo);
     saveDb();
     await replicateChunks(fileInfo.chunks || []);
     saveDb();
-
     res.status(201).json(fileInfo);
   });
 
   app.get("/api/files", (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
-
-    if (!query) {
-      return res.json(filesDb);
-    }
-
-    const results = filesDb.filter((file) => {
-      return file.name.toLowerCase().includes(query) || file.hash.toLowerCase().includes(query);
-    });
-
-    res.json(results);
+    if (!query) return res.json(filesDb);
+    res.json(filesDb.filter((file) => file.name.toLowerCase().includes(query) || file.hash.toLowerCase().includes(query)));
   });
 
-  app.get("/api/stats", (_req, res) => {
-    res.json(calculateStats());
-  });
+  app.get("/api/stats", (_req, res) => res.json(calculateStats()));
 
   app.get("/api/download/:hash", async (req, res) => {
     const file = filesDb.find((entry) => entry.hash === req.params.hash);
-
-    if (!file) {
-      return res.status(404).json({ error: "File not found" });
-    }
+    if (!file) return res.status(404).json({ error: "File not found" });
 
     if (file.storageMode === "chunks" && file.chunks?.length) {
       const available = await ensureChunksAvailable(file.chunks);
-      if (!available) {
-        return res.status(503).json({ error: "File chunks are not available on the network" });
-      }
-
+      if (!available) return res.status(503).json({ error: "File chunks are not available on the network" });
       res.setHeader("Content-Disposition", `attachment; filename=\"${file.name.replace(/\"/g, "")}\"`);
       res.setHeader("Content-Type", file.mimeType || "application/octet-stream");
       res.setHeader("Content-Length", String(file.size));
-
       const streamed = await streamChunksToResponse(res, file);
-      if (!streamed && !res.headersSent) {
-        return res.status(503).json({ error: "File chunks are not available locally" });
-      }
+      if (!streamed && !res.headersSent) return res.status(503).json({ error: "File chunks are not available locally" });
       return;
     }
 
     const filePath = path.join(uploadsDir, file.path);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: "Stored file is missing" });
-    }
-
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Stored file is missing" });
     res.download(filePath, file.name);
   });
 
   app.delete("/api/files/:hash", (req, res) => {
     const index = filesDb.findIndex((entry) => entry.hash === req.params.hash);
-
-    if (index === -1) {
-      return res.status(404).json({ error: "File not found" });
-    }
-
+    if (index === -1) return res.status(404).json({ error: "File not found" });
     const [file] = filesDb.splice(index, 1);
     saveDb();
-
     deleteLocalFile(path.join(uploadsDir, file.path));
-
-    if (file.storageMode === "chunks") {
-      deleteLocalChunks(file.chunks || []);
-    }
-
+    if (file.storageMode === "chunks") deleteLocalChunks(file.chunks || []);
     res.json({ success: true, removed: file.hash });
   });
 
-  const staticPath =
-    process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public")
-      : path.resolve(__dirname, "..", "dist", "public");
-
+  const staticPath = process.env.NODE_ENV === "production" ? path.resolve(__dirname, "public") : path.resolve(__dirname, "..", "dist", "public");
   app.use(express.static(staticPath));
-
   app.get("*", (req, res) => {
-    if (req.path.startsWith("/api")) {
-      return res.status(404).json({ error: "API route not found" });
-    }
-
+    if (req.path.startsWith("/api")) return res.status(404).json({ error: "API route not found" });
     res.sendFile(path.join(staticPath, "index.html"));
   });
 
   const port = process.env.PORT || 3000;
-
   server.listen(port, async () => {
     console.log(`P2P Cloud node running on http://localhost:${port}/`);
     console.log(`Node ID: ${NODE_ID}`);
     console.log(`Public URL: ${PUBLIC_URL}`);
+    console.log(`Target replicas: ${TARGET_REPLICAS}`);
     console.log(`Vault storage directory: ${uploadsDir}`);
     console.log(`Chunk storage directory: ${chunksDir}`);
-
     await registerNode();
     await repairReplication();
-
-    setInterval(() => {
-      registerNode().then(repairReplication).catch(() => {
-        console.log("repair cycle failed");
-      });
-    }, REPAIR_INTERVAL_MS).unref();
+    setInterval(() => registerNode().then(repairReplication).catch(() => console.log("repair cycle failed")), REPAIR_INTERVAL_MS).unref();
   });
 }
 
