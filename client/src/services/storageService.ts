@@ -1,5 +1,4 @@
 import CryptoJS from 'crypto-js';
-import { p2pFetch, p2pJson } from '@/lib/p2pApi';
 
 export interface FileMetadata {
   id: string;
@@ -27,12 +26,31 @@ export interface VaultStats {
   totalMB: number;
 }
 
+type ElectronFileRecord = {
+  id?: string;
+  name: string;
+  size: number;
+  hash: string;
+  uploadedAt: string | number;
+  isEncrypted: boolean;
+  path?: string;
+  mimeType?: string;
+};
+
+function getElectronBridge() {
+  const bridge = window.electron?.ipcRenderer || window.electron;
+  if (!bridge?.invoke) {
+    throw new Error('Electron P2P node is not available. Run the app with pnpm electron:dev, not in a normal browser tab.');
+  }
+  return bridge;
+}
+
 class StorageService {
   private storageQuota: StorageQuota = {
-    totalGB: 10,
+    totalGB: 5,
     usedGB: 0,
-    availableGB: 10,
-    costPerMonth: 10,
+    availableGB: 5,
+    costPerMonth: 0,
   };
 
   async addFile(
@@ -54,32 +72,24 @@ class StorageService {
       fileData = new Blob([buffer], { type: file.type || 'application/octet-stream' });
     }
 
-    const formData = new FormData();
-    formData.append('file', fileData, file.name);
-    formData.append('isEncrypted', String(isEncrypted));
-    formData.append('hash', Math.random().toString(36).substring(7));
-
-    const response = await p2pFetch('/api/upload', {
-      method: 'POST',
-      body: formData,
+    const uploadBuffer = await fileData.arrayBuffer();
+    const result = await getElectronBridge().invoke('p2p:upload', {
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      isEncrypted,
+      bytes: Array.from(new Uint8Array(uploadBuffer)),
     });
 
-    const result = await response.json();
-    return {
-      id: result.hash,
-      name: result.name,
-      size: result.size,
-      hash: result.hash,
-      uploadedAt: new Date(result.uploadedAt).getTime(),
-      isEncrypted: result.isEncrypted,
-      path: result.path,
-      mimeType: result.mimeType || file.type,
-    };
+    return this.normalizeFile(result.file || result);
   }
 
   async getFile(metadata: FileMetadata, decryptionKey?: string): Promise<File | null> {
-    const response = await p2pFetch(`/api/download/${encodeURIComponent(metadata.hash)}`);
-    let blob: Blob = await response.blob();
+    const result = await getElectronBridge().invoke('p2p:download', { hash: metadata.hash });
+    if (!result?.bytes) return null;
+
+    let blob: Blob = new Blob([new Uint8Array(result.bytes)], {
+      type: metadata.isEncrypted ? 'text/plain' : metadata.mimeType || 'application/octet-stream',
+    });
 
     if (metadata.isEncrypted) {
       if (!decryptionKey) {
@@ -105,49 +115,37 @@ class StorageService {
 
   async listFiles(): Promise<FileMetadata[]> {
     try {
-      const data = await p2pJson<any[]>('/api/files');
-      return data.map((f: any) => ({
-        id: f.hash,
-        name: f.name,
-        size: f.size,
-        hash: f.hash,
-        uploadedAt: new Date(f.uploadedAt).getTime(),
-        isEncrypted: f.isEncrypted,
-        path: f.path,
-        mimeType: f.mimeType,
-      }));
+      const result = await getElectronBridge().invoke('p2p:listFiles');
+      const files = Array.isArray(result) ? result : result?.files || [];
+      return files.map((file: ElectronFileRecord) => this.normalizeFile(file));
     } catch {
       return [];
     }
   }
 
   async deleteFile(fileHash: string): Promise<void> {
-    await p2pJson(`/api/files/${encodeURIComponent(fileHash)}`, {
-      method: 'DELETE',
-    });
+    await getElectronBridge().invoke('p2p:delete', { hash: fileHash });
   }
 
   async searchFiles(query: string): Promise<FileMetadata[]> {
-    try {
-      const data = await p2pJson<any[]>(`/api/files?q=${encodeURIComponent(query)}`);
-      return data.map((f: any) => ({
-        id: f.hash,
-        name: f.name,
-        size: f.size,
-        hash: f.hash,
-        uploadedAt: new Date(f.uploadedAt).getTime(),
-        isEncrypted: f.isEncrypted,
-        path: f.path,
-        mimeType: f.mimeType,
-      }));
-    } catch {
-      return [];
-    }
+    const files = await this.listFiles();
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return files;
+    return files.filter((file) =>
+      file.name.toLowerCase().includes(normalizedQuery) || file.hash.toLowerCase().includes(normalizedQuery)
+    );
   }
 
   async getStats(): Promise<VaultStats> {
     try {
-      return await p2pJson<VaultStats>('/api/stats');
+      const stats = await getElectronBridge().invoke('p2p:stats');
+      return {
+        totalFiles: stats.totalFiles || 0,
+        encryptedFiles: stats.encryptedFiles || 0,
+        publicFiles: stats.publicFiles || 0,
+        totalBytes: stats.totalBytes || 0,
+        totalMB: stats.totalMB || 0,
+      };
     } catch {
       return {
         totalFiles: 0,
@@ -161,6 +159,19 @@ class StorageService {
 
   getStorageQuota(): StorageQuota {
     return this.storageQuota;
+  }
+
+  private normalizeFile(file: ElectronFileRecord): FileMetadata {
+    return {
+      id: file.id || file.hash,
+      name: file.name,
+      size: file.size,
+      hash: file.hash,
+      uploadedAt: typeof file.uploadedAt === 'number' ? file.uploadedAt : new Date(file.uploadedAt).getTime(),
+      isEncrypted: file.isEncrypted,
+      path: file.path,
+      mimeType: file.mimeType,
+    };
   }
 
   private readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
