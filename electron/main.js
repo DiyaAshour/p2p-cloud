@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startP2PTransport } from './p2p-transport.js';
 
@@ -8,87 +9,109 @@ const __dirname = path.dirname(__filename);
 
 let mainWindow = null;
 let transportNode = null;
+let manifests = [];
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 980,
-    minHeight: 680,
-    backgroundColor: '#09090b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
     },
   });
 
-  const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
-
-  if (process.env.NODE_ENV === 'production') {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
-  } else {
-    mainWindow.loadURL(devUrl);
-  }
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000');
 }
 
-function ensureTransport(options = {}) {
+function ensureTransport() {
   if (!transportNode) {
-    transportNode = startP2PTransport(options);
+    transportNode = startP2PTransport({});
   }
   return transportNode;
 }
 
-ipcMain.handle('p2p:start', async (_event, options = {}) => {
-  const node = ensureTransport(options);
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host };
-});
-
-ipcMain.handle('p2p:status', async () => {
-  const node = ensureTransport({});
-  return {
-    ok: true,
-    peerId: node.peerId,
-    port: node.port,
-    host: node.host,
-    peers: Array.from(node.peerInfo.values()),
-  };
-});
-
-ipcMain.handle('system:open-external', async (_event, url) => {
-  if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
-    throw new Error('Only http/https URLs can be opened');
+function splitIntoChunks(buffer, chunkSize = 1024 * 1024) {
+  const chunks = [];
+  for (let i = 0; i < buffer.length; i += chunkSize) {
+    const slice = buffer.slice(i, i + chunkSize);
+    const hash = crypto.createHash('sha256').update(slice).digest('hex');
+    chunks.push({ hash, data: slice.toString('base64'), index: chunks.length });
   }
-  await shell.openExternal(url);
+  return chunks;
+}
+
+ipcMain.handle('p2p:upload', async (_event, payload) => {
+  const node = ensureTransport();
+
+  const { name, bytes, isEncrypted, mimeType } = payload;
+  const buffer = Buffer.from(bytes);
+
+  const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+  const chunks = splitIntoChunks(buffer);
+
+  if (!node.connectedPeerIds().length) {
+    throw new Error('No P2P peers connected');
+  }
+
+  for (const chunk of chunks) {
+    node.putChunkOnNetwork({ hash: chunk.hash, data: chunk.data });
+  }
+
+  const manifest = {
+    name,
+    size: buffer.length,
+    hash: fileHash,
+    uploadedAt: new Date().toISOString(),
+    isEncrypted,
+    mimeType,
+    chunks: chunks.map((c) => ({ hash: c.hash, index: c.index })),
+  };
+
+  manifests.push(manifest);
+
+  return { file: manifest };
+});
+
+ipcMain.handle('p2p:listFiles', async () => {
+  return manifests;
+});
+
+ipcMain.handle('p2p:download', async (_event, { hash }) => {
+  const node = ensureTransport();
+  const manifest = manifests.find((m) => m.hash === hash);
+  if (!manifest) return null;
+
+  const buffers = [];
+
+  for (const chunkMeta of manifest.chunks.sort((a, b) => a.index - b.index)) {
+    const chunk = await node.fetchChunkFromNetwork(chunkMeta.hash);
+    buffers.push(Buffer.from(chunk.data, 'base64'));
+  }
+
+  const fileBuffer = Buffer.concat(buffers);
+  return { bytes: Array.from(fileBuffer) };
+});
+
+ipcMain.handle('p2p:delete', async (_event, { hash }) => {
+  manifests = manifests.filter((m) => m.hash !== hash);
   return { ok: true };
 });
 
+ipcMain.handle('p2p:stats', async () => {
+  const totalBytes = manifests.reduce((s, f) => s + f.size, 0);
+  const encryptedFiles = manifests.filter((f) => f.isEncrypted).length;
+
+  return {
+    totalFiles: manifests.length,
+    encryptedFiles,
+    publicFiles: manifests.length - encryptedFiles,
+    totalBytes,
+    totalMB: totalBytes / 1024 / 1024,
+  };
+});
+
 app.whenReady().then(() => {
-  ensureTransport({});
+  ensureTransport();
   createMainWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
-  });
-}).catch((error) => {
-  console.error('Electron failed:', error);
-  app.exit(1);
-});
-
-app.on('before-quit', () => {
-  if (transportNode) transportNode.stop();
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
 });
