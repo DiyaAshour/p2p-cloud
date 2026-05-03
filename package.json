@@ -11,6 +11,7 @@
     "build:electron": "vite build && electron-builder",
     "electron:build": "pnpm build && electron-builder",
     "start": "electron .",
+    "repair:electron": "node node_modules/electron/install.js",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run"
@@ -54,6 +55,12 @@
   },
   "main": "electron/main.js",
   "homepage": "./",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
   "build": {
     "appId": "com.p2pstorage.app",
     "productName": "P2P Storage Browser",
