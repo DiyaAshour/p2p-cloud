@@ -12,6 +12,9 @@ const __dirname = path.dirname(__filename);
 const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
 const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
+const BOOTSTRAP_URL = String(process.env.P2P_BOOTSTRAP_URL || '').replace(/\/$/, '');
+const PUBLIC_P2P_URL = String(process.env.P2P_PUBLIC_URL || '').trim();
+const BOOTSTRAP_INTERVAL_MS = Number(process.env.P2P_BOOTSTRAP_INTERVAL_MS || 30_000);
 
 let mainWindow = null;
 let transportNode = null;
@@ -20,6 +23,8 @@ let proofQueue = [];
 let dataDir = null;
 let manifestsPath = null;
 let proofsPath = null;
+let lastBootstrapResult = null;
+let bootstrapTimer = null;
 
 function loadJsonArray(filePath) {
   try {
@@ -106,6 +111,90 @@ function currentStorageBytes() {
   return manifests.reduce((sum, file) => sum + Number(file.size || 0), 0);
 }
 
+function nodePublicUrl(node) {
+  return PUBLIC_P2P_URL || `ws://127.0.0.1:${node.port}`;
+}
+
+async function autoBootstrap({ force = false } = {}) {
+  const node = ensureTransport({});
+
+  if (!BOOTSTRAP_URL) {
+    lastBootstrapResult = {
+      ok: false,
+      configured: false,
+      message: 'P2P_BOOTSTRAP_URL is not configured',
+      at: new Date().toISOString(),
+    };
+    return lastBootstrapResult;
+  }
+
+  try {
+    const response = await fetch(`${BOOTSTRAP_URL}/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        peerId: node.peerId,
+        url: nodePublicUrl(node),
+        metadata: {
+          app: 'p2p-cloud',
+          port: node.port,
+          targetReplicas: TARGET_REPLICAS,
+          files: manifests.length,
+          totalBytes: currentStorageBytes(),
+          forced: force,
+        },
+      }),
+    });
+
+    if (!response.ok) throw new Error(`bootstrap register failed: ${response.status}`);
+
+    const payload = await response.json();
+    const discoveredPeers = Array.isArray(payload.peers) ? payload.peers : [];
+    const connected = [];
+    const failed = [];
+
+    for (const peer of discoveredPeers) {
+      if (!peer?.peerId || !peer?.url || peer.peerId === node.peerId) continue;
+      try {
+        const result = node.connectPeer({ peerId: peer.peerId, url: peer.url });
+        connected.push(result);
+      } catch (error) {
+        failed.push({ peerId: peer.peerId, url: peer.url, error: error.message });
+      }
+    }
+
+    lastBootstrapResult = {
+      ok: true,
+      configured: true,
+      bootstrapUrl: BOOTSTRAP_URL,
+      registeredAs: nodePublicUrl(node),
+      discoveredPeers: discoveredPeers.length,
+      connected,
+      failed,
+      at: new Date().toISOString(),
+    };
+    return lastBootstrapResult;
+  } catch (error) {
+    lastBootstrapResult = {
+      ok: false,
+      configured: true,
+      bootstrapUrl: BOOTSTRAP_URL,
+      error: error.message,
+      at: new Date().toISOString(),
+    };
+    return lastBootstrapResult;
+  }
+}
+
+function startBootstrapLoop() {
+  if (bootstrapTimer || !BOOTSTRAP_URL) return;
+  autoBootstrap({ force: true }).catch(() => {});
+  bootstrapTimer = setInterval(() => {
+    autoBootstrap().catch(() => {});
+  }, BOOTSTRAP_INTERVAL_MS);
+  bootstrapTimer.unref?.();
+}
+
 function getNetworkSummary() {
   const node = ensureTransport({});
   const totalBytes = currentStorageBytes();
@@ -122,7 +211,7 @@ function getNetworkSummary() {
     peerId: node.peerId,
     port: node.port,
     host: node.host,
-    listenUrl: `ws://127.0.0.1:${node.port}`,
+    listenUrl: nodePublicUrl(node),
     peers: Array.from(node.peerInfo.values()),
     connectedPeerIds: connectedPeers,
     connectedPeers: connectedPeers.length,
@@ -138,6 +227,8 @@ function getNetworkSummary() {
     queuedProofs: proofQueue.length,
     freeQuotaBytes: FREE_QUOTA_BYTES,
     freeQuotaRemainingBytes: Math.max(0, FREE_QUOTA_BYTES - totalBytes),
+    bootstrapUrl: BOOTSTRAP_URL || null,
+    bootstrap: lastBootstrapResult,
     readyForRealUpload: connectedPeers.length > 0,
   };
 }
@@ -167,11 +258,13 @@ function buildProofPayload({ dealId, rootHash, challengeIndex }) {
 
 ipcMain.handle('p2p:start', async (_event, options = {}) => {
   ensureTransport(options);
+  startBootstrapLoop();
   return getNetworkSummary();
 });
 
 ipcMain.handle('p2p:status', async () => getNetworkSummary());
 ipcMain.handle('p2p:networkSummary', async () => getNetworkSummary());
+ipcMain.handle('p2p:bootstrapNow', async () => autoBootstrap({ force: true }));
 
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => {
   const node = ensureTransport({});
@@ -195,7 +288,7 @@ ipcMain.handle('p2p:upload', async (_event, payload) => {
   }
 
   if (!node.connectedPeerIds().length) {
-    throw new Error('No P2P peers connected. Open Network tab and connect a real peer first.');
+    throw new Error('No P2P peers connected. Bootstrap discovery or manual peer connection is required first.');
   }
 
   if (currentStorageBytes() + buffer.length > FREE_QUOTA_BYTES && !payload.planId) {
@@ -342,6 +435,7 @@ app.whenReady().then(() => {
   proofQueue = loadJsonArray(proofsPath);
 
   ensureTransport({});
+  startBootstrapLoop();
   createMainWindow();
 
   app.on('activate', () => {
@@ -354,6 +448,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   persistState();
+  if (bootstrapTimer) clearInterval(bootstrapTimer);
   if (transportNode) transportNode.stop();
 });
 
