@@ -14,11 +14,12 @@ import {
 import { sendChunkToPeer, fetchChunkFromPeer } from "./chunkNetwork";
 import { rateLimit, requireApiKey } from "./security";
 
+const AWS_PEER_URL = "http://54.166.171.208:3000";
 const DEFAULT_PORT = process.env.NODE_ENV === "production" ? 3000 : 3001;
 const API_PORT = Number(process.env.PORT || DEFAULT_PORT);
-const NODE_ID = process.env.P2P_NODE_ID || "node-local";
-const PUBLIC_URL = process.env.P2P_PUBLIC_URL || `http://127.0.0.1:${API_PORT}`;
-const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
+const PUBLIC_URL = normalizeUrl(process.env.P2P_PUBLIC_URL || `http://127.0.0.1:${API_PORT}`);
+const NODE_ID = process.env.P2P_NODE_ID || `node-${crypto.createHash("sha1").update(`${PUBLIC_URL}-${process.cwd()}`).digest("hex").slice(0, 10)}`;
+const BOOTSTRAP_URL = normalizeUrl(process.env.P2P_BOOTSTRAP_URL || process.env.P2P_AWS_PEER_URL || AWS_PEER_URL);
 const TARGET_REPLICAS = Math.max(1, Number(process.env.P2P_REPLICATION_FACTOR || 3));
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
 const PEER_MAX_AGE_MS = Number(process.env.P2P_PEER_MAX_AGE_MS || 5 * 60_000);
@@ -66,6 +67,22 @@ for (const dir of [uploadsDir, chunksDir]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function normalizeUrl(url = "") {
+  return String(url).trim().replace(/\/+$/, "");
+}
+
+function peerIdForUrl(url: string) {
+  return `peer-${crypto.createHash("sha1").update(normalizeUrl(url)).digest("hex").slice(0, 10)}`;
+}
+
+function bootstrapRegisterUrl(baseUrl: string) {
+  const base = normalizeUrl(baseUrl);
+  if (!base) return "";
+  if (base.endsWith("/api/bootstrap/register")) return base;
+  if (base.endsWith("/api/bootstrap")) return `${base}/register`;
+  return `${base}/api/bootstrap/register`;
+}
+
 function asyncRoute(
   handler: (
     req: express.Request,
@@ -82,6 +99,17 @@ function runInBackground(label: string, job: () => Promise<void>) {
   void job().catch((error) => {
     console.error(`${label} failed:`, error);
   });
+}
+
+function corsMiddleware(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const origin = req.headers.origin;
+  res.setHeader("Access-Control-Allow-Origin", typeof origin === "string" ? origin : "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,x-p2p-api-key");
+
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
 }
 
 function loadJsonFile<T>(filePath: string, fallback: T): T {
@@ -159,10 +187,14 @@ function pruneStalePeers() {
 
 function upsertPeer(peer: any) {
   if (!peer?.peerId || !peer?.url || peer.peerId === NODE_ID) return;
-  const normalizedUrl = String(peer.url).replace(/\/+$/, "");
-  const existing = peers.find((entry) => entry.peerId === peer.peerId);
+
+  const normalizedUrl = normalizeUrl(peer.url);
+  if (!normalizedUrl || normalizedUrl === PUBLIC_URL) return;
+
+  const existing = peers.find((entry) => entry.peerId === peer.peerId || normalizeUrl(entry.url) === normalizedUrl);
 
   if (existing) {
+    existing.peerId = peer.peerId;
     existing.url = normalizedUrl;
     existing.lastSeen = new Date().toISOString();
   } else {
@@ -211,9 +243,13 @@ const upload = multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
 const chunkUpload = multer({ storage: chunkStorage, limits: { fileSize: CHUNK_SIZE_BYTES + 1024 } });
 
 async function registerNode() {
-  if (!BOOTSTRAP_URL) return;
+  const registerUrl = bootstrapRegisterUrl(BOOTSTRAP_URL);
+  if (!registerUrl) return;
+
+  upsertPeer({ peerId: peerIdForUrl(BOOTSTRAP_URL), url: BOOTSTRAP_URL });
+
   try {
-    const response = await fetch(`${BOOTSTRAP_URL}/register`, {
+    const response = await fetch(registerUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -226,13 +262,18 @@ async function registerNode() {
         },
       }),
     });
+
+    if (!response.ok) throw new Error(`bootstrap returned ${response.status}`);
+
     const data = await response.json();
+    if (data.self) upsertPeer(data.self);
+
     const discoveredPeers = Array.isArray(data.peers) ? data.peers : [];
     for (const peer of discoveredPeers) upsertPeer(peer);
     pruneStalePeers();
     console.log("connected peers:", peers.length);
-  } catch {
-    console.log("bootstrap register failed");
+  } catch (error) {
+    console.log("bootstrap register failed", error instanceof Error ? error.message : "");
   }
 }
 
@@ -249,7 +290,7 @@ async function replicate(filePath: string, fileName: string, hash: string, skipP
       form.append("hash", hash);
       form.append("ownerNodeId", NODE_ID);
 
-      const response = await fetch(`${peer.url.replace(/\/+$/, "")}/api/p2p/store`, {
+      const response = await fetch(`${normalizeUrl(peer.url)}/api/p2p/store`, {
         method: "POST",
         headers: apiHeaders(),
         body: form,
@@ -410,6 +451,7 @@ function calculateStats() {
   return {
     nodeId: NODE_ID,
     publicUrl: PUBLIC_URL,
+    bootstrapUrl: BOOTSTRAP_URL,
     targetReplicas: TARGET_REPLICAS,
     peers: peers.length,
     totalFiles: filesDb.length,
@@ -456,6 +498,7 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
+  app.use(corsMiddleware);
   app.use(express.json({ limit: "1mb" }));
   app.use(rateLimit);
   app.use(requireApiKey);
@@ -464,10 +507,16 @@ async function startServer() {
     res.json({ ok: true, product: "P2P Cloud", mode: "resilient-distributed-chunk-node", stats: calculateStats() });
   });
 
-  app.post("/api/bootstrap/register", asyncRoute(async (_req, res) => {
-    await registerNode();
-    res.json({ ok: true, peers });
-  }));
+  app.post("/api/bootstrap/register", (req, res) => {
+    const { peerId, url } = req.body || {};
+    if (peerId && url) upsertPeer({ peerId, url });
+    pruneStalePeers();
+    res.json({
+      ok: true,
+      self: { peerId: NODE_ID, url: PUBLIC_URL, lastSeen: new Date().toISOString() },
+      peers,
+    });
+  });
 
   app.post("/api/repair", asyncRoute(async (_req, res) => {
     await repairReplication();
@@ -619,6 +668,7 @@ async function startServer() {
     console.log(`P2P Cloud node running on http://localhost:${API_PORT}/`);
     console.log(`Node ID: ${NODE_ID}`);
     console.log(`Public URL: ${PUBLIC_URL}`);
+    console.log(`Bootstrap URL: ${BOOTSTRAP_URL}`);
     console.log(`Target replicas: ${TARGET_REPLICAS}`);
     console.log(`Vault storage directory: ${uploadsDir}`);
     console.log(`Chunk storage directory: ${chunksDir}`);
