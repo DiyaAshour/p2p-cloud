@@ -14,8 +14,10 @@ import {
 import { sendChunkToPeer, fetchChunkFromPeer } from "./chunkNetwork";
 import { rateLimit, requireApiKey } from "./security";
 
+const DEFAULT_PORT = process.env.NODE_ENV === "production" ? 3000 : 3001;
+const API_PORT = Number(process.env.PORT || DEFAULT_PORT);
 const NODE_ID = process.env.P2P_NODE_ID || "node-local";
-const PUBLIC_URL = process.env.P2P_PUBLIC_URL || "http://127.0.0.1:3000";
+const PUBLIC_URL = process.env.P2P_PUBLIC_URL || `http://127.0.0.1:${API_PORT}`;
 const BOOTSTRAP_URL = process.env.P2P_BOOTSTRAP_URL || "";
 const TARGET_REPLICAS = Math.max(1, Number(process.env.P2P_REPLICATION_FACTOR || 3));
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30_000);
@@ -62,6 +64,24 @@ const peersDbPath = path.resolve(__dirname, "..", "peers_db.json");
 
 for (const dir of [uploadsDir, chunksDir]) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function asyncRoute(
+  handler: (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => Promise<unknown> | unknown
+): express.RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
+function runInBackground(label: string, job: () => Promise<void>) {
+  void job().catch((error) => {
+    console.error(`${label} failed:`, error);
+  });
 }
 
 function loadJsonFile<T>(filePath: string, fallback: T): T {
@@ -273,6 +293,33 @@ async function replicateChunks(chunks: ChunkInfo[]) {
   for (const chunk of chunks) await replicateOneChunk(chunk);
 }
 
+async function replicateStoredFile(file: StoredFile, filePathOverride?: string) {
+  if (file.storageMode === "chunks" && file.chunks?.length) {
+    await replicateChunks(file.chunks);
+    saveDb();
+    return;
+  }
+
+  const filePath = filePathOverride || path.join(uploadsDir, file.path);
+  if (!fs.existsSync(filePath)) return;
+
+  file.replicas = uniqueReplicas([
+    ...file.replicas,
+    ...(await replicate(filePath, file.name, file.hash, file.replicas)),
+  ]);
+  saveDb();
+}
+
+function scheduleStoredFileReplication(file: StoredFile, tempPath?: string) {
+  runInBackground(`replication for ${file.hash}`, async () => {
+    try {
+      await replicateStoredFile(file, tempPath);
+    } finally {
+      if (tempPath && path.basename(tempPath) !== file.path) deleteLocalFile(tempPath);
+    }
+  });
+}
+
 async function fetchOneChunkFast(chunk: ChunkInfo) {
   const localPath = getChunkPath(chunksDir, chunk.hash);
   if (fs.existsSync(localPath) && hashFile(localPath) === chunk.hash) return true;
@@ -417,15 +464,15 @@ async function startServer() {
     res.json({ ok: true, product: "P2P Cloud", mode: "resilient-distributed-chunk-node", stats: calculateStats() });
   });
 
-  app.post("/api/bootstrap/register", async (_req, res) => {
+  app.post("/api/bootstrap/register", asyncRoute(async (_req, res) => {
     await registerNode();
     res.json({ ok: true, peers });
-  });
+  }));
 
-  app.post("/api/repair", async (_req, res) => {
+  app.post("/api/repair", asyncRoute(async (_req, res) => {
     await repairReplication();
     res.json({ ok: true, stats: calculateStats() });
-  });
+  }));
 
   app.post("/api/peers/prune", (_req, res) => {
     pruneStalePeers();
@@ -472,7 +519,7 @@ async function startServer() {
     res.json({ fileHash: file.hash, fileName: file.name, fileSize: file.size, chunkSize: file.chunkSize, chunks: file.chunks || [] });
   });
 
-  app.post("/api/p2p/store", upload.single("file"), async (req, res) => {
+  app.post("/api/p2p/store", upload.single("file"), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "no file" });
     const storedPath = path.join(uploadsDir, req.file.filename);
     const hash = req.body.hash || hashFile(storedPath);
@@ -480,39 +527,37 @@ async function startServer() {
 
     if (existing) {
       existing.replicas = uniqueReplicas(existing.replicas);
-      if (existing.storageMode === "chunks" && existing.chunks?.length) await replicateChunks(existing.chunks);
       saveDb();
+      scheduleStoredFileReplication(existing, storedPath);
       return res.json({ ok: true, file: existing, duplicate: true });
     }
 
     const fileInfo = createStoredFile(req, hash, req.body.ownerNodeId || "remote");
     filesDb.push(fileInfo);
     saveDb();
-    await replicateChunks(fileInfo.chunks || []);
-    saveDb();
+    scheduleStoredFileReplication(fileInfo);
     res.status(201).json({ ok: true, file: fileInfo });
-  });
+  }));
 
-  app.post("/api/upload", upload.single("file"), async (req, res) => {
+  app.post("/api/upload", upload.single("file"), asyncRoute(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
     const filePath = path.join(uploadsDir, req.file.filename);
     const hash = req.body.hash || hashFile(filePath);
     const existing = filesDb.find((entry) => entry.hash === hash);
 
     if (existing) {
-      if (existing.storageMode === "chunks" && existing.chunks?.length) await replicateChunks(existing.chunks);
-      else existing.replicas = uniqueReplicas([...existing.replicas, ...(await replicate(filePath, req.file.originalname, hash, existing.replicas))]);
+      existing.replicas = uniqueReplicas(existing.replicas);
       saveDb();
+      scheduleStoredFileReplication(existing, filePath);
       return res.json({ ...existing, duplicate: true });
     }
 
     const fileInfo = createStoredFile(req, hash, NODE_ID);
     filesDb.push(fileInfo);
     saveDb();
-    await replicateChunks(fileInfo.chunks || []);
-    saveDb();
+    scheduleStoredFileReplication(fileInfo);
     res.status(201).json(fileInfo);
-  });
+  }));
 
   app.get("/api/files", (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
@@ -522,7 +567,7 @@ async function startServer() {
 
   app.get("/api/stats", (_req, res) => res.json(calculateStats()));
 
-  app.get("/api/download/:hash", async (req, res) => {
+  app.get("/api/download/:hash", asyncRoute(async (req, res) => {
     const file = filesDb.find((entry) => entry.hash === req.params.hash);
     if (!file) return res.status(404).json({ error: "File not found" });
 
@@ -540,7 +585,7 @@ async function startServer() {
     const filePath = path.join(uploadsDir, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Stored file is missing" });
     res.download(filePath, file.name);
-  });
+  }));
 
   app.delete("/api/files/:hash", (req, res) => {
     const index = filesDb.findIndex((entry) => entry.hash === req.params.hash);
@@ -552,6 +597,17 @@ async function startServer() {
     res.json({ success: true, removed: file.hash });
   });
 
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(error);
+
+    const isMulterError = error instanceof multer.MulterError;
+    const status = isMulterError ? (error.code === "LIMIT_FILE_SIZE" ? 413 : 400) : 500;
+    const message = error instanceof Error ? error.message : "Unexpected server error";
+
+    console.error("API error:", error);
+    res.status(status).json({ error: message });
+  });
+
   const staticPath = process.env.NODE_ENV === "production" ? path.resolve(__dirname, "public") : path.resolve(__dirname, "..", "dist", "public");
   app.use(express.static(staticPath));
   app.get("*", (req, res) => {
@@ -559,17 +615,25 @@ async function startServer() {
     res.sendFile(path.join(staticPath, "index.html"));
   });
 
-  const port = process.env.PORT || 3000;
-  server.listen(port, async () => {
-    console.log(`P2P Cloud node running on http://localhost:${port}/`);
+  server.listen(API_PORT, () => {
+    console.log(`P2P Cloud node running on http://localhost:${API_PORT}/`);
     console.log(`Node ID: ${NODE_ID}`);
     console.log(`Public URL: ${PUBLIC_URL}`);
     console.log(`Target replicas: ${TARGET_REPLICAS}`);
     console.log(`Vault storage directory: ${uploadsDir}`);
     console.log(`Chunk storage directory: ${chunksDir}`);
-    await registerNode();
-    await repairReplication();
-    setInterval(() => registerNode().then(repairReplication).catch(() => console.log("repair cycle failed")), REPAIR_INTERVAL_MS).unref();
+
+    runInBackground("startup registration and repair", async () => {
+      await registerNode();
+      await repairReplication();
+    });
+
+    setInterval(() => {
+      runInBackground("repair cycle", async () => {
+        await registerNode();
+        await repairReplication();
+      });
+    }, REPAIR_INTERVAL_MS).unref();
   });
 }
 
