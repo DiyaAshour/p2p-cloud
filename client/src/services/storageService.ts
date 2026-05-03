@@ -1,4 +1,5 @@
 import CryptoJS from 'crypto-js';
+import { p2pFetch, p2pJson } from '@/lib/p2pApi';
 
 export interface FileMetadata {
   id: string;
@@ -27,7 +28,6 @@ export interface VaultStats {
 }
 
 class StorageService {
-  private baseUrl = 'http://127.0.0.1:3000/api';
   private storageQuota: StorageQuota = {
     totalGB: 10,
     usedGB: 0,
@@ -59,14 +59,10 @@ class StorageService {
     formData.append('isEncrypted', String(isEncrypted));
     formData.append('hash', Math.random().toString(36).substring(7));
 
-    const response = await fetch(`${this.baseUrl}/upload`, {
+    const response = await p2pFetch('/api/upload', {
       method: 'POST',
       body: formData,
     });
-
-    if (!response.ok) {
-      throw new Error(`Upload failed: ${response.statusText}`);
-    }
 
     const result = await response.json();
     return {
@@ -82,11 +78,7 @@ class StorageService {
   }
 
   async getFile(metadata: FileMetadata, decryptionKey?: string): Promise<File | null> {
-    const response = await fetch(`${this.baseUrl}/download/${metadata.hash}`);
-    if (!response.ok) {
-      throw new Error(`Download failed: ${response.statusText}`);
-    }
-
+    const response = await p2pFetch(`/api/download/${encodeURIComponent(metadata.hash)}`);
     let blob: Blob = await response.blob();
 
     if (metadata.isEncrypted) {
@@ -112,50 +104,51 @@ class StorageService {
   }
 
   async listFiles(): Promise<FileMetadata[]> {
-    const response = await fetch(`${this.baseUrl}/files`);
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.map((f: any) => ({
-      id: f.hash,
-      name: f.name,
-      size: f.size,
-      hash: f.hash,
-      uploadedAt: new Date(f.uploadedAt).getTime(),
-      isEncrypted: f.isEncrypted,
-      path: f.path,
-      mimeType: f.mimeType,
-    }));
-  }
-
-  async deleteFile(fileHash: string): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/files/${fileHash}`, {
-      method: 'DELETE',
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to delete file');
+    try {
+      const data = await p2pJson<any[]>('/api/files');
+      return data.map((f: any) => ({
+        id: f.hash,
+        name: f.name,
+        size: f.size,
+        hash: f.hash,
+        uploadedAt: new Date(f.uploadedAt).getTime(),
+        isEncrypted: f.isEncrypted,
+        path: f.path,
+        mimeType: f.mimeType,
+      }));
+    } catch {
+      return [];
     }
   }
 
+  async deleteFile(fileHash: string): Promise<void> {
+    await p2pJson(`/api/files/${encodeURIComponent(fileHash)}`, {
+      method: 'DELETE',
+    });
+  }
+
   async searchFiles(query: string): Promise<FileMetadata[]> {
-    const response = await fetch(`${this.baseUrl}/files?q=${encodeURIComponent(query)}`);
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.map((f: any) => ({
-      id: f.hash,
-      name: f.name,
-      size: f.size,
-      hash: f.hash,
-      uploadedAt: new Date(f.uploadedAt).getTime(),
-      isEncrypted: f.isEncrypted,
-      path: f.path,
-      mimeType: f.mimeType,
-    }));
+    try {
+      const data = await p2pJson<any[]>(`/api/files?q=${encodeURIComponent(query)}`);
+      return data.map((f: any) => ({
+        id: f.hash,
+        name: f.name,
+        size: f.size,
+        hash: f.hash,
+        uploadedAt: new Date(f.uploadedAt).getTime(),
+        isEncrypted: f.isEncrypted,
+        path: f.path,
+        mimeType: f.mimeType,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   async getStats(): Promise<VaultStats> {
-    const response = await fetch(`${this.baseUrl}/stats`);
-    if (!response.ok) {
+    try {
+      return await p2pJson<VaultStats>('/api/stats');
+    } catch {
       return {
         totalFiles: 0,
         encryptedFiles: 0,
@@ -164,8 +157,6 @@ class StorageService {
         totalMB: 0,
       };
     }
-
-    return response.json();
   }
 
   getStorageQuota(): StorageQuota {
