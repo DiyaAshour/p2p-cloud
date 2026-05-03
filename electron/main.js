@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startP2PTransport } from './p2p-transport.js';
 import { buildMerkleTree, getMerkleProof, verifyMerkleProof } from './merkle-engine.js';
@@ -10,11 +11,37 @@ const __dirname = path.dirname(__filename);
 
 const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
+const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 
 let mainWindow = null;
 let transportNode = null;
 let manifests = [];
 let proofQueue = [];
+let dataDir = null;
+let manifestsPath = null;
+let proofsPath = null;
+
+function loadJsonArray(filePath) {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn(`[p2p-storage] failed to load ${filePath}:`, error.message);
+    return [];
+  }
+}
+
+function writeJsonArray(filePath, value) {
+  if (!filePath) return;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function persistState() {
+  writeJsonArray(manifestsPath, manifests);
+  writeJsonArray(proofsPath, proofQueue);
+}
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -75,6 +102,46 @@ function findManifestByRoot(rootHash) {
   return manifests.find((manifest) => String(manifest.rootHash).toLowerCase() === String(rootHash).toLowerCase());
 }
 
+function currentStorageBytes() {
+  return manifests.reduce((sum, file) => sum + Number(file.size || 0), 0);
+}
+
+function getNetworkSummary() {
+  const node = ensureTransport({});
+  const totalBytes = currentStorageBytes();
+  const encryptedFiles = manifests.filter((file) => file.isEncrypted).length;
+  const totalChunks = manifests.reduce((sum, file) => sum + Number(file.chunks?.length || 0), 0);
+  const underReplicatedChunks = manifests.reduce((sum, file) => {
+    return sum + (file.chunks || []).filter((chunk) => node.healthyReplicaIds(chunk.hash).length < TARGET_REPLICAS).length;
+  }, 0);
+
+  const connectedPeers = node.connectedPeerIds();
+
+  return {
+    ok: true,
+    peerId: node.peerId,
+    port: node.port,
+    host: node.host,
+    listenUrl: `ws://127.0.0.1:${node.port}`,
+    peers: Array.from(node.peerInfo.values()),
+    connectedPeerIds: connectedPeers,
+    connectedPeers: connectedPeers.length,
+    targetReplicas: TARGET_REPLICAS,
+    files: manifests.length,
+    totalFiles: manifests.length,
+    encryptedFiles,
+    publicFiles: manifests.length - encryptedFiles,
+    totalBytes,
+    totalMB: totalBytes / 1024 / 1024,
+    totalChunks,
+    underReplicatedChunks,
+    queuedProofs: proofQueue.length,
+    freeQuotaBytes: FREE_QUOTA_BYTES,
+    freeQuotaRemainingBytes: Math.max(0, FREE_QUOTA_BYTES - totalBytes),
+    readyForRealUpload: connectedPeers.length > 0,
+  };
+}
+
 function buildProofPayload({ dealId, rootHash, challengeIndex }) {
   const manifest = findManifestByRoot(rootHash);
   if (!manifest) throw new Error(`manifest not found for root ${rootHash}`);
@@ -99,35 +166,46 @@ function buildProofPayload({ dealId, rootHash, challengeIndex }) {
 }
 
 ipcMain.handle('p2p:start', async (_event, options = {}) => {
-  const node = ensureTransport(options);
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host };
+  ensureTransport(options);
+  return getNetworkSummary();
 });
 
-ipcMain.handle('p2p:status', async () => {
+ipcMain.handle('p2p:status', async () => getNetworkSummary());
+ipcMain.handle('p2p:networkSummary', async () => getNetworkSummary());
+
+ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => {
   const node = ensureTransport({});
-  return {
-    ok: true,
-    peerId: node.peerId,
-    port: node.port,
-    host: node.host,
-    peers: Array.from(node.peerInfo.values()),
-    targetReplicas: TARGET_REPLICAS,
-    files: manifests.length,
-    queuedProofs: proofQueue.length,
-  };
+  const peerId = String(payload.peerId || '').trim();
+  const url = String(payload.url || '').trim();
+
+  if (!peerId) throw new Error('peerId is required');
+  if (!/^wss?:\/\//i.test(url)) throw new Error('peer URL must start with ws:// or wss://');
+
+  const result = node.connectPeer({ peerId, url });
+  return { ...result, summary: getNetworkSummary() };
 });
 
 ipcMain.handle('p2p:upload', async (_event, payload) => {
   const node = ensureTransport({});
   const buffer = Buffer.from(payload.bytes);
+  const walletAddress = String(payload.walletAddress || '').trim();
+
+  if (!walletAddress) {
+    throw new Error('Wallet connection is required before uploading to the real P2P network');
+  }
+
+  if (!node.connectedPeerIds().length) {
+    throw new Error('No P2P peers connected. Open Network tab and connect a real peer first.');
+  }
+
+  if (currentStorageBytes() + buffer.length > FREE_QUOTA_BYTES && !payload.planId) {
+    throw new Error('Free quota is 5GB. Connect a paid storage plan before uploading more data.');
+  }
+
   const chunks = splitIntoChunks(buffer);
   const leaves = chunks.map((chunk) => chunk.hash);
   const tree = buildMerkleTree(leaves);
   const fileHash = hashBufferHex(buffer);
-
-  if (!node.connectedPeerIds().length) {
-    throw new Error('No P2P peers connected');
-  }
 
   const manifest = {
     name: payload.name,
@@ -140,6 +218,7 @@ ipcMain.handle('p2p:upload', async (_event, payload) => {
     mimeType: payload.mimeType || 'application/octet-stream',
     chunkSize: CHUNK_SIZE_BYTES,
     targetReplicas: TARGET_REPLICAS,
+    ownerWallet: walletAddress,
     chunks: [],
   };
 
@@ -162,8 +241,9 @@ ipcMain.handle('p2p:upload', async (_event, payload) => {
 
   manifests = manifests.filter((entry) => entry.rootHash !== manifest.rootHash);
   manifests.push(manifest);
+  persistState();
 
-  return { file: manifest, rootHash: manifest.rootHash, totalChunks: manifest.totalChunks };
+  return { file: manifest, rootHash: manifest.rootHash, totalChunks: manifest.totalChunks, summary: getNetworkSummary() };
 });
 
 ipcMain.handle('p2p:listFiles', async () => manifests);
@@ -203,12 +283,14 @@ ipcMain.handle('p2p:prepareProof', async (_event, challenge) => {
   const payload = buildProofPayload(challenge);
   proofQueue = proofQueue.filter((item) => !(item.dealId === payload.dealId && item.chunkIndex === payload.chunkIndex));
   proofQueue.push({ ...payload, createdAt: new Date().toISOString(), status: 'ready' });
+  persistState();
   return payload;
 });
 
 ipcMain.handle('p2p:queueChallenge', async (_event, challenge) => {
   const payload = buildProofPayload(challenge);
   proofQueue.push({ ...payload, createdAt: new Date().toISOString(), status: 'ready' });
+  persistState();
   return { ok: true, proof: payload };
 });
 
@@ -216,31 +298,33 @@ ipcMain.handle('p2p:proofQueue', async () => proofQueue);
 
 ipcMain.handle('p2p:delete', async (_event, { rootHash, hash }) => {
   manifests = manifests.filter((item) => item.rootHash !== rootHash && item.hash !== hash);
-  return { ok: true };
+  persistState();
+  return { ok: true, summary: getNetworkSummary() };
 });
 
-ipcMain.handle('p2p:stats', async () => {
+ipcMain.handle('p2p:repair', async () => {
   const node = ensureTransport({});
-  const totalBytes = manifests.reduce((sum, file) => sum + file.size, 0);
-  const encryptedFiles = manifests.filter((file) => file.isEncrypted).length;
-  const totalChunks = manifests.reduce((sum, file) => sum + file.chunks.length, 0);
-  const underReplicatedChunks = manifests.reduce((sum, file) => {
-    return sum + file.chunks.filter((chunk) => node.healthyReplicaIds(chunk.hash).length < TARGET_REPLICAS).length;
-  }, 0);
+  const report = [];
 
-  return {
-    totalFiles: manifests.length,
-    encryptedFiles,
-    publicFiles: manifests.length - encryptedFiles,
-    totalBytes,
-    totalMB: totalBytes / 1024 / 1024,
-    totalChunks,
-    underReplicatedChunks,
-    targetReplicas: TARGET_REPLICAS,
-    connectedPeers: node.connectedPeerIds().length,
-    queuedProofs: proofQueue.length,
-  };
+  for (const file of manifests) {
+    for (const chunk of file.chunks || []) {
+      const healthyReplicas = node.healthyReplicaIds(chunk.hash);
+      report.push({
+        file: file.name,
+        rootHash: file.rootHash,
+        chunkIndex: chunk.index,
+        chunkHash: chunk.hash,
+        healthyReplicas,
+        targetReplicas: TARGET_REPLICAS,
+        underReplicated: healthyReplicas.length < TARGET_REPLICAS,
+      });
+    }
+  }
+
+  return { ok: true, report, summary: getNetworkSummary() };
 });
+
+ipcMain.handle('p2p:stats', async () => getNetworkSummary());
 
 ipcMain.handle('system:open-external', async (_event, url) => {
   if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
@@ -251,6 +335,12 @@ ipcMain.handle('system:open-external', async (_event, url) => {
 });
 
 app.whenReady().then(() => {
+  dataDir = path.join(app.getPath('userData'), 'p2p-storage');
+  manifestsPath = path.join(dataDir, 'manifests.json');
+  proofsPath = path.join(dataDir, 'proof-queue.json');
+  manifests = loadJsonArray(manifestsPath);
+  proofQueue = loadJsonArray(proofsPath);
+
   ensureTransport({});
   createMainWindow();
 
@@ -263,6 +353,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  persistState();
   if (transportNode) transportNode.stop();
 });
 
