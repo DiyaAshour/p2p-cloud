@@ -13,6 +13,7 @@ const allowedChannels = new Set([
   'p2p:connectPeer',
   'p2p:repair',
   'p2p:prepareProof',
+  'electron:openDevTools',
 ]);
 
 function assertAllowedChannel(channel) {
