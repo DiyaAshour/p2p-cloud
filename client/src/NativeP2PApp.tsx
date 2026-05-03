@@ -23,6 +23,8 @@ type P2PChannel =
 
 type ElectronBridge = {
   invoke: <T>(channel: P2PChannel, payload?: unknown) => Promise<T>;
+  isElectron?: boolean;
+  platform?: string;
 };
 
 type P2PFile = {
@@ -85,11 +87,28 @@ declare global {
   }
 }
 
-function electron(): ElectronBridge {
-  if (!window.electron?.invoke) {
-    throw new Error("Electron required. No browser mode allowed.");
-  }
-  return window.electron;
+function getElectronBridge(): ElectronBridge | null {
+  return typeof window !== "undefined" && typeof window.electron?.invoke === "function" ? window.electron : null;
+}
+
+function ElectronRequiredScreen() {
+  return (
+    <div className="min-h-screen bg-zinc-950 p-6 text-zinc-50">
+      <Card className="mx-auto mt-16 max-w-2xl rounded-md border-red-900 bg-zinc-900">
+        <CardHeader>
+          <CardTitle>Electron preload bridge is missing</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm text-zinc-300">
+          <p>This app is running, but the React UI cannot see window.electron.invoke.</p>
+          <p>Run it from the project root with:</p>
+          <pre className="overflow-auto rounded bg-zinc-950 p-3 text-xs">pnpm run electron:dev</pre>
+          <p>If you already did that, stop it completely, pull the latest code, and restart:</p>
+          <pre className="overflow-auto rounded bg-zinc-950 p-3 text-xs">git pull{"\n"}pnpm run electron:dev</pre>
+          <p>In the Electron DevTools console, window.electron must show an object with invoke and isElectron.</p>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
 function formatBytes(bytes = 0) {
@@ -110,7 +129,7 @@ function errorMessage(error: unknown) {
 }
 
 export default function NativeP2PApp() {
-  const bridge = electron();
+  const bridge = getElectronBridge();
   const [summary, setSummary] = useState<P2PSummary | null>(null);
   const [files, setFiles] = useState<P2PFile[]>([]);
   const [repairReport, setRepairReport] = useState<RepairResult["report"]>([]);
@@ -120,6 +139,8 @@ export default function NativeP2PApp() {
   const [peerUrl, setPeerUrl] = useState("");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
+
+  if (!bridge) return <ElectronRequiredScreen />;
 
   const visibleFiles = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -249,28 +270,16 @@ export default function NativeP2PApp() {
       <main className="container space-y-6 py-6">
         <section className="grid gap-3 md:grid-cols-4">
           <Card className="rounded-md border-zinc-800 bg-zinc-900">
-            <CardContent className="pt-6">
-              <p className="text-sm text-zinc-400">Files</p>
-              <p className="text-3xl font-semibold">{summary?.totalFiles ?? 0}</p>
-            </CardContent>
+            <CardContent className="pt-6"><p className="text-sm text-zinc-400">Files</p><p className="text-3xl font-semibold">{summary?.totalFiles ?? 0}</p></CardContent>
           </Card>
           <Card className="rounded-md border-zinc-800 bg-zinc-900">
-            <CardContent className="pt-6">
-              <p className="text-sm text-zinc-400">Storage</p>
-              <p className="text-3xl font-semibold">{formatBytes(summary?.totalBytes ?? 0)}</p>
-            </CardContent>
+            <CardContent className="pt-6"><p className="text-sm text-zinc-400">Storage</p><p className="text-3xl font-semibold">{formatBytes(summary?.totalBytes ?? 0)}</p></CardContent>
           </Card>
           <Card className="rounded-md border-zinc-800 bg-zinc-900">
-            <CardContent className="pt-6">
-              <p className="text-sm text-zinc-400">Peers</p>
-              <p className="text-3xl font-semibold">{summary?.connectedPeers ?? 0}</p>
-            </CardContent>
+            <CardContent className="pt-6"><p className="text-sm text-zinc-400">Peers</p><p className="text-3xl font-semibold">{summary?.connectedPeers ?? 0}</p></CardContent>
           </Card>
           <Card className="rounded-md border-zinc-800 bg-zinc-900">
-            <CardContent className="pt-6">
-              <p className="text-sm text-zinc-400">Under Replicated</p>
-              <p className="text-3xl font-semibold">{summary?.underReplicatedChunks ?? 0}</p>
-            </CardContent>
+            <CardContent className="pt-6"><p className="text-sm text-zinc-400">Under Replicated</p><p className="text-3xl font-semibold">{summary?.underReplicatedChunks ?? 0}</p></CardContent>
           </Card>
         </section>
 
@@ -285,10 +294,7 @@ export default function NativeP2PApp() {
           <TabsContent value="files" className="space-y-4">
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by name, file hash, or root" />
-              <Button variant="outline" onClick={() => void runBusy(refreshAll)} disabled={busy}>
-                <Search className="size-4" />
-                Search
-              </Button>
+              <Button variant="outline" onClick={() => void runBusy(refreshAll)} disabled={busy}><Search className="size-4" />Search</Button>
             </div>
 
             <div className="grid gap-3">
@@ -296,58 +302,30 @@ export default function NativeP2PApp() {
                 <Card key={file.hash} className="rounded-md border-zinc-800 bg-zinc-900">
                   <CardContent className="grid gap-4 pt-6 lg:grid-cols-[1fr_auto] lg:items-center">
                     <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <FileCheck2 className="size-4 text-emerald-300" />
-                        <h2 className="truncate text-base font-semibold">{file.name}</h2>
-                        {file.isEncrypted && <Badge variant="secondary">Private</Badge>}
-                      </div>
+                      <div className="flex flex-wrap items-center gap-2"><FileCheck2 className="size-4 text-emerald-300" /><h2 className="truncate text-base font-semibold">{file.name}</h2>{file.isEncrypted && <Badge variant="secondary">Private</Badge>}</div>
                       <p className="mt-2 break-all text-xs text-zinc-500">file {file.hash}</p>
                       <p className="mt-1 break-all text-xs text-cyan-300">root {file.rootHash}</p>
-                      <p className="mt-1 text-sm text-zinc-400">
-                        {formatBytes(file.size)} · {file.totalChunks} chunk(s) · {formatDate(file.uploadedAt)}
-                      </p>
+                      <p className="mt-1 text-sm text-zinc-400">{formatBytes(file.size)} · {file.totalChunks} chunk(s) · {formatDate(file.uploadedAt)}</p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button variant="outline" size="sm" onClick={() => prepareProof(file)} disabled={busy}>
-                        <ShieldCheck className="size-4" />
-                        Proof
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => downloadFile(file)} disabled={busy}>
-                        <Download className="size-4" />
-                        Download
-                      </Button>
-                      <Button variant="destructive" size="sm" onClick={() => deleteFile(file)} disabled={busy}>
-                        <Trash2 className="size-4" />
-                        Delete
-                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => prepareProof(file)} disabled={busy}><ShieldCheck className="size-4" />Proof</Button>
+                      <Button variant="outline" size="sm" onClick={() => downloadFile(file)} disabled={busy}><Download className="size-4" />Download</Button>
+                      <Button variant="destructive" size="sm" onClick={() => deleteFile(file)} disabled={busy}><Trash2 className="size-4" />Delete</Button>
                     </div>
                   </CardContent>
                 </Card>
               ))}
-
-              {visibleFiles.length === 0 && (
-                <Card className="rounded-md border-zinc-800 bg-zinc-900">
-                  <CardContent className="py-10 text-center text-sm text-zinc-400">No files stored on this node.</CardContent>
-                </Card>
-              )}
+              {visibleFiles.length === 0 && <Card className="rounded-md border-zinc-800 bg-zinc-900"><CardContent className="py-10 text-center text-sm text-zinc-400">No files stored on this node.</CardContent></Card>}
             </div>
           </TabsContent>
 
           <TabsContent value="upload">
             <Card className="rounded-md border-zinc-800 bg-zinc-900">
-              <CardHeader>
-                <CardTitle>Store Files</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Store Files</CardTitle></CardHeader>
               <CardContent className="space-y-4">
                 <Input type="file" multiple onChange={handleFileSelect} />
-                <div className="flex items-center gap-2">
-                  <Checkbox id="private-file" checked={isEncrypted} onCheckedChange={(value) => setIsEncrypted(Boolean(value))} />
-                  <Label htmlFor="private-file">Mark as private</Label>
-                </div>
-                <Button onClick={uploadFiles} disabled={busy || selectedFiles.length === 0}>
-                  <Upload className="size-4" />
-                  Upload {selectedFiles.length > 0 ? selectedFiles.length : ""}
-                </Button>
+                <div className="flex items-center gap-2"><Checkbox id="private-file" checked={isEncrypted} onCheckedChange={(value) => setIsEncrypted(Boolean(value))} /><Label htmlFor="private-file">Mark as private</Label></div>
+                <Button onClick={uploadFiles} disabled={busy || selectedFiles.length === 0}><Upload className="size-4" />Upload {selectedFiles.length > 0 ? selectedFiles.length : ""}</Button>
               </CardContent>
             </Card>
           </TabsContent>
@@ -355,34 +333,19 @@ export default function NativeP2PApp() {
           <TabsContent value="network">
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
               <Card className="rounded-md border-zinc-800 bg-zinc-900">
-                <CardHeader>
-                  <CardTitle>Peers</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle>Peers</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
-                  {(summary?.peers || []).map((peer) => (
-                    <div key={peer.peerId} className="rounded-md border border-zinc-800 p-3">
-                      <p className="break-all text-sm font-medium">{peer.peerId}</p>
-                      <p className="break-all text-xs text-zinc-400">{peer.url || "Direct socket"}</p>
-                      <Badge className="mt-2" variant={peer.status === "connected" ? "default" : "secondary"}>
-                        {peer.status || "known"}
-                      </Badge>
-                    </div>
-                  ))}
+                  {(summary?.peers || []).map((peer) => <div key={peer.peerId} className="rounded-md border border-zinc-800 p-3"><p className="break-all text-sm font-medium">{peer.peerId}</p><p className="break-all text-xs text-zinc-400">{peer.url || "Direct socket"}</p><Badge className="mt-2" variant={peer.status === "connected" ? "default" : "secondary"}>{peer.status || "known"}</Badge></div>)}
                   {(summary?.peers || []).length === 0 && <p className="text-sm text-zinc-400">No peers connected.</p>}
                 </CardContent>
               </Card>
 
               <Card className="rounded-md border-zinc-800 bg-zinc-900">
-                <CardHeader>
-                  <CardTitle>Connect Peer</CardTitle>
-                </CardHeader>
+                <CardHeader><CardTitle>Connect Peer</CardTitle></CardHeader>
                 <CardContent className="space-y-3">
                   <Input value={peerId} onChange={(event) => setPeerId(event.target.value)} placeholder="Peer id" />
                   <Input value={peerUrl} onChange={(event) => setPeerUrl(event.target.value)} placeholder="ws://127.0.0.1:8788" />
-                  <Button onClick={connectPeer} disabled={busy || !peerId || !peerUrl}>
-                    <Link2 className="size-4" />
-                    Connect
-                  </Button>
+                  <Button onClick={connectPeer} disabled={busy || !peerId || !peerUrl}><Link2 className="size-4" />Connect</Button>
                 </CardContent>
               </Card>
             </div>
@@ -390,22 +353,10 @@ export default function NativeP2PApp() {
 
           <TabsContent value="repair">
             <Card className="rounded-md border-zinc-800 bg-zinc-900">
-              <CardHeader>
-                <CardTitle>Replica Health</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle>Replica Health</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                <Button onClick={repair} disabled={busy}>
-                  <Activity className="size-4" />
-                  Scan
-                </Button>
-                {repairReport.map((item) => (
-                  <div key={`${item.file}-${item.chunkIndex}`} className="rounded-md border border-zinc-800 p-3">
-                    <p className="text-sm font-medium">{item.file} chunk #{item.chunkIndex}</p>
-                    <p className="text-xs text-zinc-400">
-                      {item.healthyReplicas.length}/{item.targetReplicas} replicas
-                    </p>
-                  </div>
-                ))}
+                <Button onClick={repair} disabled={busy}><Activity className="size-4" />Scan</Button>
+                {repairReport.map((item) => <div key={`${item.file}-${item.chunkIndex}`} className="rounded-md border border-zinc-800 p-3"><p className="text-sm font-medium">{item.file} chunk #{item.chunkIndex}</p><p className="text-xs text-zinc-400">{item.healthyReplicas.length}/{item.targetReplicas} replicas</p></div>)}
                 {repairReport.length === 0 && <p className="text-sm text-zinc-400">No scan results yet.</p>}
               </CardContent>
             </Card>
