@@ -15,6 +15,7 @@ const PROJECT_ROOT = process.cwd();
 const LOG_DIR = path.join(PROJECT_ROOT, ".manus-logs");
 const MAX_LOG_SIZE_BYTES = 1 * 1024 * 1024; // 1MB per log file
 const TRIM_TARGET_BYTES = Math.floor(MAX_LOG_SIZE_BYTES * 0.6); // Trim to 60% to avoid constant re-trimming
+const API_PROXY_TARGET = process.env.VITE_P2P_API_BASE_URL || process.env.P2P_API_BASE_URL || "http://127.0.0.1:3001";
 
 type LogSource = "browserConsole" | "networkRequests" | "sessionReplay";
 
@@ -180,6 +181,13 @@ export default defineConfig({
       "localhost",
       "127.0.0.1",
     ],
+    proxy: {
+      "/api": {
+        target: API_PROXY_TARGET,
+        changeOrigin: true,
+        secure: false,
+      },
+    },
     fs: {
       strict: true,
       deny: ["**/.*"],
