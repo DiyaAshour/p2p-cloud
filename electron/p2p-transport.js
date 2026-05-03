@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 
 const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
 const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
+const CHUNK_REQUEST_TIMEOUT_MS = Number(process.env.P2P_CHUNK_REQUEST_TIMEOUT_MS || 15000);
 
 export class P2PTransportNode {
   constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST } = {}) {
@@ -14,6 +15,7 @@ export class P2PTransportNode {
     this.peerSockets = new Map();
     this.peerInfo = new Map();
     this.localChunks = new Map();
+    this.pendingChunkRequests = new Map();
   }
 
   start() {
@@ -74,10 +76,21 @@ export class P2PTransportNode {
 
   stop() {
     if (this.heartbeat) clearInterval(this.heartbeat);
+    for (const pending of this.pendingChunkRequests.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('P2P node stopped'));
+    }
+    this.pendingChunkRequests.clear();
     for (const socket of this.peerSockets.values()) socket.close();
     for (const socket of this.uiClients.values()) socket.close();
     this.server?.close();
     this.server = null;
+  }
+
+  connectedPeerIds() {
+    return Array.from(this.peerSockets.entries())
+      .filter(([, socket]) => socket.readyState === WebSocket.OPEN)
+      .map(([peerId]) => peerId);
   }
 
   connectPeer({ peerId, url }) {
@@ -115,6 +128,56 @@ export class P2PTransportNode {
     });
 
     return { peerId, status: 'connecting', url };
+  }
+
+  putChunkOnNetwork(chunk, replicaPeerIds = this.connectedPeerIds()) {
+    if (!chunk?.hash) throw new Error('chunk.hash is required');
+    if (!replicaPeerIds.length) throw new Error('No connected P2P peers available');
+
+    for (const peerId of replicaPeerIds) {
+      const socket = this.peerSockets.get(peerId);
+      if (socket?.readyState !== WebSocket.OPEN) continue;
+      this.send(socket, {
+        id: crypto.randomUUID(),
+        type: 'chunk:put',
+        fromPeerId: this.peerId,
+        toPeerId: peerId,
+        createdAt: Date.now(),
+        payload: { chunk },
+      });
+    }
+
+    return { ok: true, replicas: replicaPeerIds };
+  }
+
+  fetchChunkFromNetwork(chunkHash) {
+    const localChunk = this.localChunks.get(chunkHash);
+    if (localChunk) return Promise.resolve(localChunk);
+
+    const peers = this.connectedPeerIds();
+    if (!peers.length) return Promise.reject(new Error('No connected P2P peers available'));
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingChunkRequests.delete(chunkHash);
+        reject(new Error(`Chunk not found on the network: ${chunkHash}`));
+      }, CHUNK_REQUEST_TIMEOUT_MS);
+
+      this.pendingChunkRequests.set(chunkHash, { resolve, reject, timeout });
+
+      for (const peerId of peers) {
+        const socket = this.peerSockets.get(peerId);
+        if (socket?.readyState !== WebSocket.OPEN) continue;
+        this.send(socket, {
+          id: crypto.randomUUID(),
+          type: 'chunk:get',
+          fromPeerId: this.peerId,
+          toPeerId: peerId,
+          createdAt: Date.now(),
+          payload: { chunkHash },
+        });
+      }
+    });
   }
 
   handleSocketMessage(socket, raw) {
@@ -165,8 +228,8 @@ export class P2PTransportNode {
       const chunk = message.payload?.chunk;
       if (chunk?.hash) {
         this.localChunks.set(chunk.hash, chunk);
+        this.broadcastToUi({ type: 'chunk:stored', chunkHash: chunk.hash, fromPeerId: message.fromPeerId });
       }
-      this.forwardOrDeliver(socket, message);
       return;
     }
 
@@ -180,10 +243,7 @@ export class P2PTransportNode {
           fromPeerId: this.peerId,
           toPeerId: message.fromPeerId,
           createdAt: Date.now(),
-          payload: {
-            manifestHash: message.payload?.manifestHash,
-            chunk,
-          },
+          payload: { chunk },
         });
         return;
       }
@@ -191,7 +251,20 @@ export class P2PTransportNode {
       return;
     }
 
-    if (message.type === 'chunk:found' || message.type === 'manifest:broadcast' || message.type === 'network:broadcast') {
+    if (message.type === 'chunk:found') {
+      const chunk = message.payload?.chunk;
+      const pending = chunk?.hash ? this.pendingChunkRequests.get(chunk.hash) : null;
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.pendingChunkRequests.delete(chunk.hash);
+        pending.resolve(chunk);
+        return;
+      }
+      this.forwardOrDeliver(socket, message);
+      return;
+    }
+
+    if (message.type === 'manifest:broadcast' || message.type === 'network:broadcast') {
       this.forwardOrDeliver(socket, message);
       return;
     }
