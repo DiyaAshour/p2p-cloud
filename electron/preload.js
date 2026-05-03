@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+console.log('[preload] loaded');
+
 const allowedChannels = new Set([
   'p2p:start',
   'p2p:listFiles',
@@ -19,11 +21,14 @@ function assertAllowedChannel(channel) {
   }
 }
 
-contextBridge.exposeInMainWorld('electron', {
+const electronBridge = {
   invoke: (channel, payload) => {
     assertAllowedChannel(channel);
     return ipcRenderer.invoke(channel, payload);
   },
   isElectron: true,
   platform: process.platform,
-});
+};
+
+contextBridge.exposeInMainWorld('__P2P_PRELOAD_LOADED__', true);
+contextBridge.exposeInMainWorld('electron', electronBridge);
