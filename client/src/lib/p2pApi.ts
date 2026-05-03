@@ -1,5 +1,6 @@
 const API_KEY = import.meta.env.VITE_P2P_API_KEY || '';
 const ENV_API_BASE = (import.meta.env.VITE_P2P_API_BASE_URL || import.meta.env.VITE_API_BASE_URL || '').trim();
+const AWS_PEER_API_BASE = 'http://54.166.171.208:3000';
 
 let resolvedApiBase: string | null = null;
 
@@ -24,6 +25,7 @@ function candidateApiBases() {
   bases.push('http://localhost:3001');
   bases.push('http://127.0.0.1:3000');
   bases.push('http://localhost:3000');
+  bases.push(AWS_PEER_API_BASE);
 
   return unique(bases);
 }
