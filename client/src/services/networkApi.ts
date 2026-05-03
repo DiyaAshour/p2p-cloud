@@ -1,3 +1,5 @@
+import { p2pJson } from '@/lib/p2pApi';
+
 export type NetworkStats = {
   nodeId?: string;
   publicUrl?: string;
@@ -25,24 +27,16 @@ export type NetworkFile = {
   chunks?: Array<{ index: number; hash: string; size: number; replicas: string[] }>;
 };
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url} failed`);
-  return response.json();
-}
-
 export async function loadNetworkDashboard() {
   const [stats, peers, files] = await Promise.all([
-    getJson<NetworkStats>("/api/stats"),
-    getJson<NetworkPeer[]>("/api/peers"),
-    getJson<NetworkFile[]>("/api/files"),
+    p2pJson<NetworkStats>('/api/stats'),
+    p2pJson<NetworkPeer[]>('/api/peers'),
+    p2pJson<NetworkFile[]>('/api/files'),
   ]);
 
   return { stats, peers, files };
 }
 
 export async function runNetworkRepair() {
-  const response = await fetch("/api/repair", { method: "POST" });
-  if (!response.ok) throw new Error("repair failed");
-  return response.json();
+  return p2pJson('/api/repair', { method: 'POST' });
 }
