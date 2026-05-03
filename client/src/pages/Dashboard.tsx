@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useWallet } from '@/hooks/useWallet';
+import { p2pFetch, p2pJson, resetP2PApiBase } from '@/lib/p2pApi';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -53,12 +54,6 @@ type ApiStats = {
   totalMB: number;
 };
 
-const API_KEY = import.meta.env.VITE_P2P_API_KEY || '';
-
-function apiHeaders(extra: HeadersInit = {}) {
-  return API_KEY ? { ...extra, 'x-p2p-api-key': API_KEY } : extra;
-}
-
 function formatBytes(bytes = 0) {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
@@ -71,6 +66,10 @@ function formatDate(value?: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return 'unknown';
   return date.toLocaleString();
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unknown error';
 }
 
 export default function Dashboard() {
@@ -87,35 +86,21 @@ export default function Dashboard() {
     refreshAll();
   }, []);
 
-  const requestJson = async <T,>(url: string, options: RequestInit = {}): Promise<T> => {
-    const response = await fetch(url, {
-      ...options,
-      headers: apiHeaders(options.headers || {}),
-    });
-
-    if (!response.ok) {
-      const message = await response.text().catch(() => 'Request failed');
-      throw new Error(message || `Request failed with ${response.status}`);
-    }
-
-    return response.json();
-  };
-
   const loadFiles = async (query = searchQuery) => {
     const url = query.trim() ? `/api/files?q=${encodeURIComponent(query.trim())}` : '/api/files';
-    const fileList = await requestJson<ApiFileMetadata[]>(url);
+    const fileList = await p2pJson<ApiFileMetadata[]>(url);
     setFiles(fileList);
     return fileList;
   };
 
   const loadPeers = async () => {
-    const peerList = await requestJson<ApiPeerInfo[]>('/api/peers');
+    const peerList = await p2pJson<ApiPeerInfo[]>('/api/peers');
     setPeers(peerList);
     return peerList;
   };
 
   const loadStats = async () => {
-    const nextStats = await requestJson<ApiStats>('/api/stats');
+    const nextStats = await p2pJson<ApiStats>('/api/stats');
     setStats(nextStats);
     return nextStats;
   };
@@ -126,7 +111,8 @@ export default function Dashboard() {
       await Promise.all([loadFiles(), loadPeers(), loadStats()]);
     } catch (error) {
       console.error('Refresh failed:', error);
-      toast.error('Failed to load backend data');
+      resetP2PApiBase();
+      toast.error('Failed to load backend data: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
@@ -151,15 +137,13 @@ export default function Dashboard() {
         formData.append('file', file);
         formData.append('isEncrypted', String(isEncrypted));
 
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          headers: apiHeaders(),
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const message = await response.text().catch(() => 'Upload failed');
-          throw new Error(message || `Upload failed for ${file.name}`);
+        try {
+          await p2pFetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+          });
+        } catch (error) {
+          throw new Error(`${file.name}: ${errorMessage(error)}`);
         }
       }
 
@@ -168,7 +152,8 @@ export default function Dashboard() {
       await refreshAll();
     } catch (error) {
       console.error('Upload error:', error);
-      toast.error('Failed to upload files: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      resetP2PApiBase();
+      toast.error('Failed to upload files: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
@@ -181,7 +166,8 @@ export default function Dashboard() {
       toast.success(`Found ${results.length} file(s)`);
     } catch (error) {
       console.error('Search error:', error);
-      toast.error('Search failed');
+      resetP2PApiBase();
+      toast.error('Search failed: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
@@ -190,15 +176,7 @@ export default function Dashboard() {
   const handleDownload = async (fileHash: string, fileName: string) => {
     setIsLoading(true);
     try {
-      const response = await fetch(`/api/download/${encodeURIComponent(fileHash)}`, {
-        headers: apiHeaders(),
-      });
-
-      if (!response.ok) {
-        const message = await response.text().catch(() => 'Download failed');
-        throw new Error(message || 'Download failed');
-      }
-
+      const response = await p2pFetch(`/api/download/${encodeURIComponent(fileHash)}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -212,7 +190,8 @@ export default function Dashboard() {
       toast.success(`${fileName} downloaded from backend`);
     } catch (error) {
       console.error('Download error:', error);
-      toast.error('Failed to download file: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      resetP2PApiBase();
+      toast.error('Failed to download file: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
@@ -221,12 +200,13 @@ export default function Dashboard() {
   const handleDelete = async (fileHash: string, fileName: string) => {
     setIsLoading(true);
     try {
-      await requestJson(`/api/files/${encodeURIComponent(fileHash)}`, { method: 'DELETE' });
+      await p2pJson(`/api/files/${encodeURIComponent(fileHash)}`, { method: 'DELETE' });
       toast.success(`${fileName} deleted from backend`);
       await refreshAll();
     } catch (error) {
       console.error('Delete error:', error);
-      toast.error('Failed to delete file');
+      resetP2PApiBase();
+      toast.error('Failed to delete file: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
@@ -235,12 +215,13 @@ export default function Dashboard() {
   const handleRepair = async () => {
     setIsLoading(true);
     try {
-      await requestJson('/api/repair', { method: 'POST' });
+      await p2pJson('/api/repair', { method: 'POST' });
       toast.success('Repair cycle completed');
       await refreshAll();
     } catch (error) {
       console.error('Repair error:', error);
-      toast.error('Repair failed');
+      resetP2PApiBase();
+      toast.error('Repair failed: ' + errorMessage(error));
     } finally {
       setIsLoading(false);
     }
