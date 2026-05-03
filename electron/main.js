@@ -9,12 +9,17 @@ const __dirname = path.dirname(__filename);
 
 const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
 const REPAIR_INTERVAL_MS = Number(process.env.P2P_REPAIR_INTERVAL_MS || 30000);
+const BOOTSTRAP_INTERVAL_MS = Number(process.env.P2P_BOOTSTRAP_INTERVAL_MS || 30000);
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
+const BOOTSTRAP_URL = (process.env.P2P_BOOTSTRAP_URL || '').replace(/\/+$/, '');
+const PUBLIC_WS_URL = (process.env.P2P_PUBLIC_WS_URL || '').replace(/\/+$/, '');
 
 let mainWindow = null;
 let transportNode = null;
 let repairTimer = null;
+let bootstrapTimer = null;
 let repairRunning = false;
+let bootstrapRunning = false;
 let manifests = [];
 
 function createMainWindow() {
@@ -55,6 +60,56 @@ function ensureTransport(options = {}) {
     transportNode = startP2PTransport(options);
   }
   return transportNode;
+}
+
+function nodePublicUrl(node) {
+  if (PUBLIC_WS_URL) return PUBLIC_WS_URL;
+  return `ws://127.0.0.1:${node.port}`;
+}
+
+async function bootstrapDiscover() {
+  if (!BOOTSTRAP_URL || bootstrapRunning) return { ok: false, skipped: true };
+  bootstrapRunning = true;
+
+  try {
+    const node = ensureTransport({});
+    const response = await fetch(`${BOOTSTRAP_URL}/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        peerId: node.peerId,
+        url: nodePublicUrl(node),
+      }),
+    });
+
+    if (!response.ok) throw new Error(`bootstrap returned ${response.status}`);
+    const data = await response.json();
+    const peers = Array.isArray(data.peers) ? data.peers : [];
+
+    let connected = 0;
+    for (const peer of peers) {
+      if (!peer?.peerId || !peer?.url || peer.peerId === node.peerId) continue;
+      try {
+        node.connectPeer({ peerId: peer.peerId, url: peer.url });
+        connected += 1;
+      } catch (error) {
+        console.warn('[bootstrap] connect failed', peer.peerId, error instanceof Error ? error.message : error);
+      }
+    }
+
+    return { ok: true, discovered: peers.length, attemptedConnections: connected };
+  } finally {
+    bootstrapRunning = false;
+  }
+}
+
+function startBootstrapLoop() {
+  if (bootstrapTimer || !BOOTSTRAP_URL) return;
+  bootstrapDiscover().catch((error) => console.warn('[bootstrap] initial failed', error instanceof Error ? error.message : error));
+  bootstrapTimer = setInterval(() => {
+    bootstrapDiscover().catch((error) => console.warn('[bootstrap] cycle failed', error instanceof Error ? error.message : error));
+  }, BOOTSTRAP_INTERVAL_MS);
+  bootstrapTimer.unref?.();
 }
 
 function splitIntoChunks(buffer, chunkSize = CHUNK_SIZE_BYTES) {
@@ -136,13 +191,15 @@ function startRepairLoop() {
     });
   }, REPAIR_INTERVAL_MS);
   repairTimer.unref?.();
-}
-
+}\n
 ipcMain.handle('p2p:start', async (_event, options = {}) => {
   const node = ensureTransport(options);
+  startBootstrapLoop();
   startRepairLoop();
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, bootstrapUrl: BOOTSTRAP_URL || null };
 });
+
+ipcMain.handle('p2p:bootstrap', async () => bootstrapDiscover());
 
 ipcMain.handle('p2p:status', async () => {
   const node = ensureTransport({});
@@ -151,6 +208,8 @@ ipcMain.handle('p2p:status', async () => {
     peerId: node.peerId,
     port: node.port,
     host: node.host,
+    publicUrl: nodePublicUrl(node),
+    bootstrapUrl: BOOTSTRAP_URL || null,
     peers: Array.from(node.peerInfo.values()),
     targetReplicas: TARGET_REPLICAS,
     files: manifests.length,
@@ -266,6 +325,7 @@ ipcMain.handle('system:open-external', async (_event, url) => {
 
 app.whenReady().then(() => {
   ensureTransport({});
+  startBootstrapLoop();
   startRepairLoop();
   createMainWindow();
 
@@ -279,6 +339,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   if (repairTimer) clearInterval(repairTimer);
+  if (bootstrapTimer) clearInterval(bootstrapTimer);
   if (transportNode) transportNode.stop();
 });
 
