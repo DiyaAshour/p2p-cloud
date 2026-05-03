@@ -18,6 +18,21 @@ let dataDir = null;
 let manifestsPath = null;
 let manifests = [];
 
+function resolvePreloadPath() {
+  const candidates = [
+    path.join(__dirname, 'preload.js'),
+    path.join(process.cwd(), 'electron', 'preload.js'),
+  ];
+
+  const preloadPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!preloadPath) {
+    throw new Error(`Electron preload.js not found. Tried: ${candidates.join(', ')}`);
+  }
+
+  console.log('[electron] preload:', preloadPath);
+  return preloadPath;
+}
+
 function ensureDataDir() {
   if (dataDir && manifestsPath) return;
   dataDir = path.join(app.getPath('userData'), 'native-p2p-storage');
@@ -113,11 +128,15 @@ function createMainWindow() {
     minHeight: 680,
     backgroundColor: '#09090b',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: resolvePreloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error('[electron] preload failed:', preloadPath, error);
   });
 
   if (process.env.NODE_ENV === 'production') {
@@ -232,9 +251,7 @@ ipcMain.handle('p2p:delete', async (_event, payload = {}) => {
 });
 
 ipcMain.handle('p2p:networkSummary', async () => networkSummary());
-
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
-
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => {
   const peerId = String(payload.peerId || '').trim();
   const url = String(payload.url || '').trim();
@@ -243,7 +260,6 @@ ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => {
   const result = ensureTransport({}).connectPeer({ peerId, url });
   return { ok: true, ...result, summary: networkSummary() };
 });
-
 ipcMain.handle('p2p:repair', async () => {
   const node = ensureTransport({});
   const report = manifests.flatMap((file) => {
@@ -260,27 +276,15 @@ ipcMain.handle('p2p:repair', async () => {
       };
     });
   });
-
   return { ok: true, report, summary: networkSummary() };
 });
-
 ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => {
   const manifest = findManifest(payload);
   if (!manifest) throw new Error('File not found');
   const chunkIndex = Number(payload.chunkIndex ?? 0);
   const chunk = manifest.chunks.find((item) => item.index === chunkIndex) || manifest.chunks[0];
   if (!chunk) throw new Error('No chunks available for proof');
-
-  return {
-    ok: true,
-    proof: {
-      rootHash: manifest.rootHash,
-      chunkIndex: chunk.index,
-      leaf: chunk.hash,
-      merkleProof: chunk.proof,
-      preparedAt: new Date().toISOString(),
-    },
-  };
+  return { ok: true, proof: { rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, preparedAt: new Date().toISOString() } };
 });
 
 app.whenReady().then(() => {
