@@ -15,6 +15,7 @@ export class P2PTransportNode {
     this.peerSockets = new Map();
     this.peerInfo = new Map();
     this.localChunks = new Map();
+    this.chunkReplicas = new Map();
     this.pendingChunkRequests = new Map();
   }
 
@@ -93,6 +94,17 @@ export class P2PTransportNode {
       .map(([peerId]) => peerId);
   }
 
+  healthyReplicaIds(chunkHash) {
+    const known = this.chunkReplicas.get(chunkHash) || new Set();
+    const online = new Set(this.connectedPeerIds());
+    return Array.from(known).filter((peerId) => online.has(peerId));
+  }
+
+  selectReplicaTargets({ exclude = [], limit = 3 } = {}) {
+    const excluded = new Set(exclude);
+    return this.connectedPeerIds().filter((peerId) => !excluded.has(peerId)).slice(0, limit);
+  }
+
   connectPeer({ peerId, url }) {
     if (!peerId || !url) throw new Error('peerId and url are required');
 
@@ -132,11 +144,13 @@ export class P2PTransportNode {
 
   putChunkOnNetwork(chunk, replicaPeerIds = this.connectedPeerIds()) {
     if (!chunk?.hash) throw new Error('chunk.hash is required');
-    if (!replicaPeerIds.length) throw new Error('No connected P2P peers available');
+    const targets = replicaPeerIds.filter((peerId) => this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN);
+    if (!targets.length) throw new Error('No connected P2P peers available');
 
-    for (const peerId of replicaPeerIds) {
+    const replicaSet = this.chunkReplicas.get(chunk.hash) || new Set();
+
+    for (const peerId of targets) {
       const socket = this.peerSockets.get(peerId);
-      if (socket?.readyState !== WebSocket.OPEN) continue;
       this.send(socket, {
         id: crypto.randomUUID(),
         type: 'chunk:put',
@@ -145,16 +159,19 @@ export class P2PTransportNode {
         createdAt: Date.now(),
         payload: { chunk },
       });
+      replicaSet.add(peerId);
     }
 
-    return { ok: true, replicas: replicaPeerIds };
+    this.chunkReplicas.set(chunk.hash, replicaSet);
+    return { ok: true, replicas: Array.from(replicaSet) };
   }
 
   fetchChunkFromNetwork(chunkHash) {
     const localChunk = this.localChunks.get(chunkHash);
     if (localChunk) return Promise.resolve(localChunk);
 
-    const peers = this.connectedPeerIds();
+    const knownReplicas = this.healthyReplicaIds(chunkHash);
+    const peers = knownReplicas.length ? knownReplicas : this.connectedPeerIds();
     if (!peers.length) return Promise.reject(new Error('No connected P2P peers available'));
 
     return new Promise((resolve, reject) => {
@@ -228,7 +245,25 @@ export class P2PTransportNode {
       const chunk = message.payload?.chunk;
       if (chunk?.hash) {
         this.localChunks.set(chunk.hash, chunk);
+        this.send(socket, {
+          id: crypto.randomUUID(),
+          type: 'chunk:stored-ack',
+          fromPeerId: this.peerId,
+          toPeerId: message.fromPeerId,
+          createdAt: Date.now(),
+          payload: { chunkHash: chunk.hash },
+        });
         this.broadcastToUi({ type: 'chunk:stored', chunkHash: chunk.hash, fromPeerId: message.fromPeerId });
+      }
+      return;
+    }
+
+    if (message.type === 'chunk:stored-ack') {
+      const chunkHash = message.payload?.chunkHash;
+      if (chunkHash && message.fromPeerId) {
+        const replicaSet = this.chunkReplicas.get(chunkHash) || new Set();
+        replicaSet.add(message.fromPeerId);
+        this.chunkReplicas.set(chunkHash, replicaSet);
       }
       return;
     }
@@ -253,6 +288,11 @@ export class P2PTransportNode {
 
     if (message.type === 'chunk:found') {
       const chunk = message.payload?.chunk;
+      if (chunk?.hash && message.fromPeerId) {
+        const replicaSet = this.chunkReplicas.get(chunk.hash) || new Set();
+        replicaSet.add(message.fromPeerId);
+        this.chunkReplicas.set(chunk.hash, replicaSet);
+      }
       const pending = chunk?.hash ? this.pendingChunkRequests.get(chunk.hash) : null;
       if (pending) {
         clearTimeout(pending.timeout);
@@ -301,7 +341,7 @@ export class P2PTransportNode {
   }
 
   send(socket, message) {
-    if (socket.readyState === WebSocket.OPEN) {
+    if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(message));
     }
   }
