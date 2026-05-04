@@ -1,4 +1,7 @@
-const DEFAULT_TIMEOUT_MS = 8000;
+import http from 'node:http';
+import https from 'node:https';
+
+const DEFAULT_TIMEOUT_MS = 12000;
 const LOCAL_SYNC_URL = 'http://127.0.0.1:8790';
 const HOSTED_SYNC_URL = 'http://54.166.171.208:8790';
 
@@ -36,22 +39,46 @@ function sanitizeManifest(manifest) {
 }
 
 async function requestJson(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const body = options.body || '';
+    const client = parsed.protocol === 'https:' ? https : http;
+    const req = client.request({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: options.method || 'GET',
+      timeout: DEFAULT_TIMEOUT_MS,
       headers: {
         'content-type': 'application/json',
+        'accept': 'application/json',
+        'content-length': Buffer.byteLength(body),
         ...(options.headers || {}),
       },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
+          reject(new Error(`Manifest sync failed: ${res.statusCode} ${res.statusMessage || ''} ${raw}`.trim()));
+          return;
+        }
+        try {
+          resolve(raw ? JSON.parse(raw) : {});
+        } catch {
+          reject(new Error('Manifest sync returned invalid JSON'));
+        }
+      });
     });
-    if (!response.ok) throw new Error(`Manifest sync failed: ${response.status} ${response.statusText}`);
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
+    req.on('timeout', () => {
+      req.destroy(new Error('Manifest sync request timed out'));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
 }
 
 async function requestFirstAvailable(path, options = {}) {
