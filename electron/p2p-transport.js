@@ -6,10 +6,11 @@ const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
 const CHUNK_REQUEST_TIMEOUT_MS = Number(process.env.P2P_CHUNK_REQUEST_TIMEOUT_MS || 15000);
 
 export class P2PTransportNode {
-  constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST } = {}) {
+  constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST, publicUrl = null } = {}) {
     this.peerId = peerId || `electron-peer-${crypto.randomUUID()}`;
     this.port = port;
     this.host = host;
+    this.publicUrl = publicUrl || null;
     this.server = null;
     this.uiClients = new Set();
     this.peerSockets = new Map();
@@ -21,7 +22,7 @@ export class P2PTransportNode {
 
   start() {
     if (this.server) {
-      return { peerId: this.peerId, port: this.port, host: this.host };
+      return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl };
     }
 
     this.server = new WebSocketServer({ host: this.host, port: this.port });
@@ -57,6 +58,7 @@ export class P2PTransportNode {
         type: 'transport:ready',
         peerId: this.peerId,
         port: this.port,
+        publicUrl: this.publicUrl,
       });
     });
 
@@ -72,7 +74,8 @@ export class P2PTransportNode {
     }, 30000);
 
     console.log(`[p2p-transport] listening on ws://${this.host}:${this.port} as ${this.peerId}`);
-    return { peerId: this.peerId, port: this.port, host: this.host };
+    if (this.publicUrl) console.log(`[p2p-transport] advertising ${this.publicUrl}`);
+    return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl };
   }
 
   stop() {
@@ -107,12 +110,14 @@ export class P2PTransportNode {
 
   connectPeer({ peerId, url }) {
     if (!peerId || !url) throw new Error('peerId and url are required');
+    if (peerId === this.peerId) return { peerId, status: 'self', url };
 
     const existing = this.peerSockets.get(peerId);
     if (existing && existing.readyState === WebSocket.OPEN) {
       return { peerId, status: 'connected', url };
     }
 
+    this.peerInfo.set(peerId, { peerId, url, status: 'connecting', lastSeen: Date.now() });
     const socket = new WebSocket(url);
     socket.role = 'peer';
     socket.remotePeerId = peerId;
@@ -124,7 +129,7 @@ export class P2PTransportNode {
         type: 'peer:hello',
         fromPeerId: this.peerId,
         toPeerId: peerId,
-        payload: { peerId: this.peerId, url: `ws://127.0.0.1:${this.port}` },
+        payload: { peerId: this.peerId, url: this.publicUrl || `ws://127.0.0.1:${this.port}` },
       });
       this.broadcastToUi({ type: 'peer:connected', peerId, url });
     });
@@ -136,7 +141,8 @@ export class P2PTransportNode {
       this.broadcastToUi({ type: 'peer:disconnected', peerId });
     });
     socket.on('error', (error) => {
-      this.broadcastToUi({ type: 'peer:error', peerId, error: error.message });
+      this.peerInfo.set(peerId, { peerId, url, status: 'error', error: error.message, lastSeen: Date.now() });
+      this.broadcastToUi({ type: 'peer:error', peerId, url, error: error.message });
     });
 
     return { peerId, status: 'connecting', url };
