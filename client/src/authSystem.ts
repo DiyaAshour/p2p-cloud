@@ -84,6 +84,12 @@ export function buildGoogleOAuthUrl() {
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
+export async function copyGoogleLoginLink() {
+  const url = buildGoogleOAuthUrl();
+  await navigator.clipboard.writeText(url);
+  return url;
+}
+
 export function startGoogleLogin() {
   window.location.href = buildGoogleOAuthUrl();
 }
