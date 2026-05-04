@@ -66,7 +66,7 @@ export default function NativeP2PApp() {
     if (walletConnecting) return;
     setWalletConnecting(true);
     try {
-      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Wallet connection cancelled or timed out.")), 2000));
+      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Wallet connection cancelled or timed out.")), 30000));
       const result = await Promise.race([connectWalletWithWalletConnect(), timeout]);
       const nextWallet = await bridge.invoke<WalletState>("wallet:connect", { address: result.address });
       setWallet(nextWallet);
