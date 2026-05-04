@@ -73,8 +73,12 @@ function normalizeAddress(value: unknown) {
   return address;
 }
 
+function stableEncryptionSeed(address: string) {
+  return `p2p.cloud:stable-wallet-seed:${address.toLowerCase()}`;
+}
+
 function encryptionMessage(address: string) {
-  return `${ENCRYPTION_MESSAGE_PREFIX}\nWallet: ${address.toLowerCase()}\nPurpose: portable private file decryption`;
+  return `${ENCRYPTION_MESSAGE_PREFIX}\nWallet: ${address.toLowerCase()}\nPurpose: authorize private file access`;
 }
 
 async function signInjected(provider: Eip1193Provider, message: string, address: string) {
@@ -112,7 +116,8 @@ async function connectInjectedWallet() {
   const address = normalizeAddress(accounts?.[0]);
   const loginMessage = `p2p.cloud login\nWallet: ${address}\nChain: ${PAYMENT_CHAIN_ID}\nTime: ${new Date().toISOString()}`;
   await signInjected(provider, loginMessage, address);
-  const encryptionSignature = await signInjected(provider, encryptionMessage(address), address);
+  await signInjected(provider, encryptionMessage(address), address);
+  const encryptionSignature = stableEncryptionSeed(address);
   injectedAddress = address;
   activeSession = null;
   return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected", encryptionSignature, signature: encryptionSignature };
@@ -146,7 +151,8 @@ export async function connectWalletWithWalletConnect() {
     const { chainId, address } = getWalletConnectAccount(session);
     const loginMessage = `p2p.cloud login\nWallet: ${address}\nChain: ${chainId}\nTime: ${new Date().toISOString()}`;
     await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [loginMessage, address] } });
-    const encryptionSignature = String(await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [encryptionMessage(address), address] } }));
+    await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [encryptionMessage(address), address] } });
+    const encryptionSignature = stableEncryptionSeed(address);
     return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect", encryptionSignature, signature: encryptionSignature };
   } catch (error) {
     getModal().closeModal();
