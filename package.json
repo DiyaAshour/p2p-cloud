@@ -59,7 +59,7 @@
     "vite": "^5.0.0",
     "vitest": "^2.1.4"
   },
-  "main": "electron/main.js",
+  "main": "electron/main-wrapper.js",
   "homepage": "./",
   "pnpm": {
     "onlyBuiltDependencies": [
