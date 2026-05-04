@@ -1,6 +1,7 @@
 import { app, Menu, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -9,6 +10,60 @@ const APP_TITLE = 'p2p.cloud';
 let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
+
+function isVirtualInterfaceName(name = '') {
+  const n = String(name).toLowerCase();
+  return [
+    'hyper-v',
+    'vethernet',
+    'virtual',
+    'vmware',
+    'virtualbox',
+    'docker',
+    'wsl',
+    'loopback',
+    'bluetooth',
+    'npcap',
+    'tap',
+    'tun',
+  ].some((bad) => n.includes(bad));
+}
+
+function scoreIp(ip = '') {
+  if (ip.startsWith('192.168.')) return 100;
+  if (ip.startsWith('10.')) return 80;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return 60;
+  return 10;
+}
+
+function chooseLanAddress() {
+  const candidates = [];
+  const nets = os.networkInterfaces();
+  for (const [name, items] of Object.entries(nets)) {
+    if (isVirtualInterfaceName(name)) continue;
+    for (const net of items || []) {
+      if (!net || net.internal || net.family !== 'IPv4') continue;
+      const ip = net.address;
+      if (!ip || ip.startsWith('127.') || ip.startsWith('169.254.')) continue;
+      candidates.push({ ip, name, score: scoreIp(ip) });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]?.ip || '127.0.0.1';
+}
+
+function configureNetworkRuntime() {
+  const port = process.env.P2P_TRANSPORT_PORT || '8787';
+  if (!process.env.P2P_PUBLIC_URL && !process.env.VITE_P2P_PUBLIC_URL) {
+    const ip = chooseLanAddress();
+    process.env.P2P_PUBLIC_URL = `ws://${ip}:${port}`;
+    console.log('[runtime] selected public peer URL:', process.env.P2P_PUBLIC_URL);
+  }
+  if (!process.env.P2P_CHUNK_STORE_DIR) {
+    process.env.P2P_CHUNK_STORE_DIR = path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks');
+    console.log('[runtime] selected chunk store:', process.env.P2P_CHUNK_STORE_DIR);
+  }
+}
 
 function resolveTrayIcon() {
   const candidates = [
@@ -52,6 +107,7 @@ function createTray() {
 }
 
 app.on('ready', () => {
+  configureNetworkRuntime();
   createTray();
   try {
     app.setLoginItemSettings({
