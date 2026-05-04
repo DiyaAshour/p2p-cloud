@@ -15,7 +15,6 @@ import {
   Home,
   Image as ImageIcon,
   Link2,
-  List,
   Lock,
   RefreshCw,
   Search,
@@ -66,6 +65,7 @@ declare global { interface Window { electron?: ElectronBridge } }
 
 const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
+const DRIVE_PASSWORD_STORAGE_KEY = "p2p.cloud.drivePassword";
 
 function getElectronBridge(): ElectronBridge | null {
   return typeof window !== "undefined" && typeof window.electron?.invoke === "function" ? window.electron : null;
@@ -134,6 +134,10 @@ function pathParts(path = "") {
   return cleanPath(path).split("/").filter(Boolean);
 }
 
+function readStoredDrivePassword() {
+  try { return localStorage.getItem(DRIVE_PASSWORD_STORAGE_KEY) || ""; } catch { return ""; }
+}
+
 function ElectronRequiredScreen() {
   return (
     <div className="min-h-screen bg-zinc-950 p-6 text-zinc-50">
@@ -161,6 +165,7 @@ export default function DriveP2PApp() {
   const [previewFile, setPreviewFile] = useState<P2PFile | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [drivePassword, setDrivePassword] = useState(() => readStoredDrivePassword());
 
   if (!bridge) return <ElectronRequiredScreen />;
 
@@ -204,6 +209,13 @@ export default function DriveP2PApp() {
   const imageCount = currentFiles.filter(isImageFile).length;
   const currentCrumbs = pathParts(currentPath);
 
+  const requireDrivePassword = () => {
+    const password = drivePassword.trim();
+    if (password.length < 6) throw new Error("Drive Password required. Use at least 6 characters.");
+    try { localStorage.setItem(DRIVE_PASSWORD_STORAGE_KEY, password); } catch {}
+    return password;
+  };
+
   const runBusy = async (work: () => Promise<void>) => {
     setBusy(true);
     try { await work(); } catch (error) { toast.error(errorMessage(error)); } finally { setBusy(false); }
@@ -239,7 +251,11 @@ export default function DriveP2PApp() {
     try {
       const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Wallet connection cancelled or timed out.")), 30000));
       const result = await Promise.race([connectWalletWithWalletConnect(), timeout]);
-      const nextWallet = await bridge.invoke<WalletState>("wallet:connect", { address: result.address, encryptionSignature: result.signature });
+      const nextWallet = await bridge.invoke<WalletState>("wallet:connect", {
+        address: result.address,
+        loginMessage: result.loginMessage,
+        signature: result.signature,
+      });
       setWallet(nextWallet);
       toast.success("Wallet connected");
       await refreshAll();
@@ -260,6 +276,7 @@ export default function DriveP2PApp() {
 
   const createFolder = () => runBusy(async () => {
     if (!walletConnected) throw new Error("Connect wallet before creating folders");
+    const password = requireDrivePassword();
     const raw = window.prompt("Folder name");
     const folderName = sanitizeFolderName(raw || "");
     if (!folderName) return;
@@ -269,6 +286,7 @@ export default function DriveP2PApp() {
       name: joinPath(folderPath, FOLDER_MARKER),
       mimeType: FOLDER_MIME,
       isEncrypted: true,
+      drivePassword: password,
       bytes: new TextEncoder().encode(`folder:${folderPath}`).buffer,
     });
     toast.success(`Folder created: ${folderName}`);
@@ -279,6 +297,7 @@ export default function DriveP2PApp() {
 
   const uploadFiles = () => runBusy(async () => {
     if (!walletConnected) throw new Error("Connect wallet before uploading");
+    const password = requireDrivePassword();
     if (uploadWouldExceedQuota) throw new Error("Storage quota exceeded. Upgrade your plan.");
     if (!selectedFiles.length) throw new Error("Select at least one file");
     for (const file of selectedFiles) {
@@ -286,6 +305,7 @@ export default function DriveP2PApp() {
         name: joinPath(currentPath, file.name),
         mimeType: file.type || "application/octet-stream",
         isEncrypted: true,
+        drivePassword: password,
         bytes: await file.arrayBuffer(),
       });
     }
@@ -295,7 +315,8 @@ export default function DriveP2PApp() {
   });
 
   const downloadFile = (file: P2PFile) => runBusy(async () => {
-    const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash });
+    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };
+    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);
     const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -313,7 +334,8 @@ export default function DriveP2PApp() {
       await downloadFile(file);
       return;
     }
-    const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash });
+    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };
+    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);
     const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(blob));
@@ -401,6 +423,7 @@ export default function DriveP2PApp() {
                 <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder="Search current folder" />
               </div>
               <div className="flex flex-wrap gap-2">
+                <Input type="password" value={drivePassword} onChange={(event) => setDrivePassword(event.target.value)} placeholder="Drive Password" disabled={!walletConnected || busy} className="max-w-xs" />
                 <Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="max-w-xs" />
                 <Button onClick={uploadFiles} disabled={busy || !walletConnected || selectedFiles.length === 0 || uploadWouldExceedQuota}><Upload className="size-4" />Upload here</Button>
               </div>
@@ -409,6 +432,7 @@ export default function DriveP2PApp() {
               <div className="flex items-center justify-between text-xs text-zinc-400"><span>Storage usage</span><span>{formatBytes(wallet?.usedBytes ?? 0)} / {formatBytes(wallet?.plan?.quotaBytes ?? 0)}</span></div>
               <div className="h-2 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-zinc-50" style={{ width: `${quotaPercent}%` }} /></div>
               <p className="text-xs text-zinc-500">Selected: {selectedFiles.length} file(s), {formatBytes(selectedBytes)} · Images in this folder: {imageCount}</p>
+              {walletConnected && drivePassword.trim().length > 0 && drivePassword.trim().length < 6 && <p className="rounded border border-red-900 bg-red-950/40 p-2 text-sm text-red-200">Drive Password must be at least 6 characters.</p>}
               {uploadWouldExceedQuota && <p className="rounded border border-red-900 bg-red-950/40 p-2 text-sm text-red-200">Selected files exceed your plan. Upgrade before upload.</p>}
             </div>
           </CardHeader>
