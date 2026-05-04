@@ -20,9 +20,7 @@ let modal: WalletConnectModal | null = null;
 let activeSession: WalletSession | null = null;
 
 function getModal() {
-  if (!modal) {
-    modal = new WalletConnectModal({ projectId: PROJECT_ID, chains: [PAYMENT_CAIP_CHAIN] });
-  }
+  if (!modal) modal = new WalletConnectModal({ projectId: PROJECT_ID, chains: [PAYMENT_CAIP_CHAIN] });
   return modal;
 }
 
@@ -41,9 +39,19 @@ async function getSignClient() {
   return signClientPromise;
 }
 
+async function clearWalletConnectSessions(client: SignClient) {
+  const sessions = client.session.getAll();
+  await Promise.allSettled(sessions.map((session: any) => client.disconnect({
+    topic: session.topic,
+    reason: { code: 6000, message: "Reset p2p.cloud payment session" },
+  })));
+  activeSession = null;
+}
+
 function getAccount(session: WalletSession) {
-  const account = session.namespaces.eip155?.accounts?.[0];
-  if (!account) throw new Error("WalletConnect session did not return an EIP-155 account");
+  const accounts: string[] = session.namespaces.eip155?.accounts || [];
+  const account = accounts.find((item) => item.startsWith(`${PAYMENT_CAIP_CHAIN}:`));
+  if (!account) throw new Error(`WalletConnect session does not support ${PAYMENT_CAIP_CHAIN}. Disconnect and reconnect on Sepolia.`);
   const [, chainId, address] = account.split(":");
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error("Invalid wallet address returned by WalletConnect");
   if (String(chainId) !== PAYMENT_CHAIN_ID) throw new Error(`Wrong network. Please connect Sepolia chain ${PAYMENT_CHAIN_ID}.`);
@@ -52,6 +60,7 @@ function getAccount(session: WalletSession) {
 
 export async function connectWalletWithWalletConnect() {
   const client = await getSignClient();
+  await clearWalletConnectSessions(client);
   const { uri, approval } = await client.connect({ requiredNamespaces: REQUIRED_NAMESPACES });
   if (uri) await getModal().openModal({ uri });
 
