@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -116,6 +116,7 @@ function createMainWindow() { mainWindow = new BrowserWindow({ title: APP_TITLE,
 
 ipcMain.handle('electron:openDevTools', async () => { mainWindow?.webContents.openDevTools({ mode: 'detach' }); return { ok: true }; });
 ipcMain.handle('electron:diagnostics', async () => ({ ok: true, cwd: process.cwd(), dirname: __dirname, preloadPath: resolvePreloadPath(), rendererPath: IS_DEV ? DEV_SERVER_URL : resolveRendererIndexPath(), isPackaged: app.isPackaged, appPath: app.getAppPath() }));
+ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\/\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });
 ipcMain.handle('wallet:status', async () => walletSummary());
 ipcMain.handle('wallet:connect', async (_event, payload = {}) => { const address = String(payload.address || '').trim(); if (!isValidWallet(address)) throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.'); const sameWallet = normalizeWallet(address) === activeWallet(); walletState = { ...walletState, connected: true, verified: true, address: normalizeWallet(address), planId: sameWallet ? walletState.planId : 'free', connectedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), paidUntil: sameWallet ? walletState.paidUntil : null, subscriptionTx: sameWallet ? walletState.subscriptionTx : null }; persistWallet(); await syncPull(); if (transportNode) connectBootstrap(transportNode); runAutoRepair().catch(() => {}); return walletSummary(); });
 ipcMain.handle('wallet:disconnect', async () => { walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null }; persistWallet(); return walletSummary(); });
