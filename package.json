@@ -1,5 +1,5 @@
 {
-  "name": "p2p-storage-browser",
+  "name": "p2p-cloud",
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
@@ -66,16 +66,27 @@
   "build": {
     "appId": "cloud.p2p.app",
     "productName": "p2p.cloud",
+    "artifactName": "p2p-cloud-${version}-setup.${ext}",
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "assets/**/*",
       "node_modules/**/*"
     ],
     "directories": {
       "buildResources": "assets"
     },
     "win": {
-      "icon": "assets/icon.svg"
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "p2p.cloud",
+      "uninstallDisplayName": "p2p.cloud"
     }
   }
 }
