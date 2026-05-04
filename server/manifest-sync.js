@@ -9,6 +9,18 @@ const DEFAULT_PORT = Number(process.env.MANIFEST_SYNC_PORT || process.env.PORT |
 const DEFAULT_HOST = process.env.MANIFEST_SYNC_HOST || '0.0.0.0';
 const DEFAULT_DATA_DIR = process.env.MANIFEST_SYNC_DATA_DIR || path.join(__dirname, '..', 'sync-data');
 const MAX_BODY_BYTES = Number(process.env.MANIFEST_SYNC_MAX_BODY_BYTES || 10 * 1024 * 1024);
+const ALLOWED_ENCRYPTION_KEYS = new Set([
+  'version',
+  'algorithm',
+  'keySource',
+  'kdf',
+  'kdfIterations',
+  'salt',
+  'iv',
+  'authTag',
+  'originalHash',
+  'originalSize',
+]);
 
 function normalizeWallet(address = '') {
   return String(address || '').trim().toLowerCase();
@@ -16,6 +28,15 @@ function normalizeWallet(address = '') {
 
 function validWallet(address = '') {
   return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));
+}
+
+function sanitizeEncryptionMetadata(encryption) {
+  if (!encryption || typeof encryption !== 'object') return null;
+  const clean = {};
+  for (const key of ALLOWED_ENCRYPTION_KEYS) {
+    if (encryption[key] !== undefined && encryption[key] !== null) clean[key] = encryption[key];
+  }
+  return Object.keys(clean).length ? clean : null;
 }
 
 function createStore(dataDir) {
@@ -47,10 +68,12 @@ function sanitizeManifest(manifest = {}, wallet) {
     id: String(manifest.id || `${wallet}:${hash}`),
     name: String(manifest.name || 'file'),
     size: Number(manifest.size || 0),
+    storedSize: Number(manifest.storedSize || manifest.size || 0),
     hash,
     rootHash: String(manifest.rootHash || ''),
     uploadedAt: manifest.uploadedAt || new Date().toISOString(),
     isEncrypted: Boolean(manifest.isEncrypted),
+    encryption: sanitizeEncryptionMetadata(manifest.encryption),
     mimeType: manifest.mimeType || 'application/octet-stream',
     chunkSize: Number(manifest.chunkSize || 0),
     totalChunks: Number(manifest.totalChunks || 0),
