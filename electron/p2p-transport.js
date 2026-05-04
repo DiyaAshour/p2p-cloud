@@ -1,16 +1,19 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
 const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
 const CHUNK_REQUEST_TIMEOUT_MS = Number(process.env.P2P_CHUNK_REQUEST_TIMEOUT_MS || 15000);
 
 export class P2PTransportNode {
-  constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST, publicUrl = null } = {}) {
+  constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST, publicUrl = null, chunkStoreDir = null } = {}) {
     this.peerId = peerId || `electron-peer-${crypto.randomUUID()}`;
     this.port = port;
     this.host = host;
     this.publicUrl = publicUrl || null;
+    this.chunkStoreDir = chunkStoreDir || null;
     this.server = null;
     this.uiClients = new Set();
     this.peerSockets = new Map();
@@ -18,6 +21,44 @@ export class P2PTransportNode {
     this.localChunks = new Map();
     this.chunkReplicas = new Map();
     this.pendingChunkRequests = new Map();
+    this.ensureChunkStore();
+  }
+
+  ensureChunkStore() {
+    if (!this.chunkStoreDir) return;
+    fs.mkdirSync(this.chunkStoreDir, { recursive: true });
+  }
+
+  chunkPath(chunkHash) {
+    if (!this.chunkStoreDir || !chunkHash) return null;
+    const safe = String(chunkHash).replace(/[^a-fA-F0-9]/g, '');
+    return path.join(this.chunkStoreDir, `${safe}.json`);
+  }
+
+  storeLocalChunk(chunk) {
+    if (!chunk?.hash) throw new Error('chunk.hash is required');
+    this.localChunks.set(chunk.hash, chunk);
+    const filePath = this.chunkPath(chunk.hash);
+    if (filePath) {
+      this.ensureChunkStore();
+      fs.writeFileSync(filePath, JSON.stringify({ ...chunk, storedAt: new Date().toISOString() }), 'utf8');
+    }
+    return chunk;
+  }
+
+  getLocalChunk(chunkHash) {
+    const memoryChunk = this.localChunks.get(chunkHash);
+    if (memoryChunk) return memoryChunk;
+    const filePath = this.chunkPath(chunkHash);
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    try {
+      const chunk = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (chunk?.hash) {
+        this.localChunks.set(chunk.hash, chunk);
+        return chunk;
+      }
+    } catch {}
+    return null;
   }
 
   start() {
@@ -75,6 +116,7 @@ export class P2PTransportNode {
 
     console.log(`[p2p-transport] listening on ws://${this.host}:${this.port} as ${this.peerId}`);
     if (this.publicUrl) console.log(`[p2p-transport] advertising ${this.publicUrl}`);
+    if (this.chunkStoreDir) console.log(`[p2p-transport] chunk store ${this.chunkStoreDir}`);
     return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl };
   }
 
@@ -173,7 +215,7 @@ export class P2PTransportNode {
   }
 
   fetchChunkFromNetwork(chunkHash) {
-    const localChunk = this.localChunks.get(chunkHash);
+    const localChunk = this.getLocalChunk(chunkHash);
     if (localChunk) return Promise.resolve(localChunk);
 
     const knownReplicas = this.healthyReplicaIds(chunkHash);
@@ -250,7 +292,7 @@ export class P2PTransportNode {
     if (message.type === 'chunk:put') {
       const chunk = message.payload?.chunk;
       if (chunk?.hash) {
-        this.localChunks.set(chunk.hash, chunk);
+        this.storeLocalChunk(chunk);
         this.send(socket, {
           id: crypto.randomUUID(),
           type: 'chunk:stored-ack',
@@ -276,7 +318,7 @@ export class P2PTransportNode {
 
     if (message.type === 'chunk:get') {
       const chunkHash = message.payload?.chunkHash;
-      const chunk = this.localChunks.get(chunkHash);
+      const chunk = this.getLocalChunk(chunkHash);
       if (chunk) {
         this.send(socket, {
           id: crypto.randomUUID(),
@@ -303,6 +345,7 @@ export class P2PTransportNode {
       if (pending) {
         clearTimeout(pending.timeout);
         this.pendingChunkRequests.delete(chunk.hash);
+        this.storeLocalChunk(chunk);
         pending.resolve(chunk);
         return;
       }
