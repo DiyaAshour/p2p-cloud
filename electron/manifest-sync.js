@@ -1,8 +1,14 @@
 const DEFAULT_TIMEOUT_MS = 8000;
-const DEFAULT_SYNC_URL = 'http://54.166.171.208:8790';
+const LOCAL_SYNC_URL = 'http://127.0.0.1:8790';
+const HOSTED_SYNC_URL = 'http://54.166.171.208:8790';
 
-function getSyncUrl() {
-  return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || DEFAULT_SYNC_URL;
+function configuredSyncUrl() {
+  return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || '';
+}
+
+function candidateSyncUrls() {
+  const configured = configuredSyncUrl();
+  return [...new Set([configured, LOCAL_SYNC_URL, HOSTED_SYNC_URL].filter(Boolean))];
 }
 
 function normalizeWallet(address = '') {
@@ -48,39 +54,52 @@ async function requestJson(url, options = {}) {
   }
 }
 
+async function requestFirstAvailable(path, options = {}) {
+  const errors = [];
+  for (const baseUrl of candidateSyncUrls()) {
+    const url = `${baseUrl.replace(/\/$/, '')}${path}`;
+    try {
+      const data = await requestJson(url, options);
+      return { data, baseUrl };
+    } catch (error) {
+      errors.push(`${baseUrl}: ${error?.message || error}`);
+    }
+  }
+  throw new Error(errors.join(' | ') || 'No manifest sync endpoint available');
+}
+
 export function manifestSyncUrl() {
-  return getSyncUrl();
+  return candidateSyncUrls()[0] || '';
 }
 
 export function isManifestSyncEnabled() {
-  return Boolean(getSyncUrl());
+  return candidateSyncUrls().length > 0;
 }
 
 export async function pullWalletManifests(ownerWallet) {
-  const baseUrl = getSyncUrl();
-  if (!baseUrl) return [];
   const wallet = normalizeWallet(ownerWallet);
   if (!wallet) return [];
-  const url = `${baseUrl.replace(/\/$/, '')}/wallet/${encodeURIComponent(wallet)}/manifests`;
-  const data = await requestJson(url, { method: 'GET' });
+  const path = `/wallet/${encodeURIComponent(wallet)}/manifests`;
+  const { data, baseUrl } = await requestFirstAvailable(path, { method: 'GET' });
+  console.log('[manifest-sync] pull ok from', baseUrl);
   return Array.isArray(data?.manifests) ? data.manifests.map(sanitizeManifest) : [];
 }
 
 export async function pushWalletManifest(manifest) {
-  const baseUrl = getSyncUrl();
-  if (!baseUrl) return { ok: false, skipped: true };
   const clean = sanitizeManifest(manifest);
-  const url = `${baseUrl.replace(/\/$/, '')}/wallet/${encodeURIComponent(clean.ownerWallet)}/manifests`;
-  return await requestJson(url, {
+  const path = `/wallet/${encodeURIComponent(clean.ownerWallet)}/manifests`;
+  const { data, baseUrl } = await requestFirstAvailable(path, {
     method: 'POST',
     body: JSON.stringify({ manifest: clean }),
   });
+  console.log('[manifest-sync] push ok to', baseUrl);
+  return data;
 }
 
 export async function deleteWalletManifest(ownerWallet, hash) {
-  const baseUrl = getSyncUrl();
-  if (!baseUrl) return { ok: false, skipped: true };
   const wallet = normalizeWallet(ownerWallet);
-  const url = `${baseUrl.replace(/\/$/, '')}/wallet/${encodeURIComponent(wallet)}/manifests/${encodeURIComponent(hash)}`;
-  return await requestJson(url, { method: 'DELETE' });
+  const path = `/wallet/${encodeURIComponent(wallet)}/manifests/${encodeURIComponent(hash)}`;
+  const { data, baseUrl } = await requestFirstAvailable(path, { method: 'DELETE' });
+  console.log('[manifest-sync] delete ok from', baseUrl);
+  return data;
 }
