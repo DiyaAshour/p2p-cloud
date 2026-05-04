@@ -162,8 +162,6 @@ export default function DriveP2PApp() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [drivePassword, setDrivePassword] = useState("");
 
-  if (!bridge) return <ElectronRequiredScreen />;
-
   const walletConnected = Boolean(wallet?.connected && wallet.address);
   const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles]);
   const quotaPercent = wallet?.plan?.quotaBytes ? Math.min(100, (wallet.usedBytes / wallet.plan.quotaBytes) * 100) : 0;
@@ -186,11 +184,11 @@ export default function DriveP2PApp() {
 
   const childFolders = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const children = folderPaths
+    return folderPaths
       .filter((folderPath) => dirname(folderPath) === currentPath)
       .map((folderPath) => ({ path: folderPath, name: baseName(folderPath) }))
-      .filter((folder) => !query || folder.name.toLowerCase().includes(query));
-    return children.sort((a, b) => a.name.localeCompare(b.name));
+      .filter((folder) => !query || folder.name.toLowerCase().includes(query))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }, [folderPaths, currentPath, search]);
 
   const currentFiles = useMemo(() => {
@@ -204,18 +202,13 @@ export default function DriveP2PApp() {
   const imageCount = currentFiles.filter(isImageFile).length;
   const currentCrumbs = pathParts(currentPath);
 
-  const requireDrivePassword = () => {
-    const password = drivePassword.trim();
-    if (password.length < 6) throw new Error("Drive Password required. Use at least 6 characters.");
-    return password;
-  };
-
   const runBusy = async (work: () => Promise<void>) => {
     setBusy(true);
     try { await work(); } catch (error) { toast.error(errorMessage(error)); } finally { setBusy(false); }
   };
 
   const refreshAll = async () => {
+    if (!bridge) return;
     const [nextSummary, nextFiles, nextWallet] = await Promise.all([
       bridge.invoke<P2PSummary>("p2p:networkSummary"),
       bridge.invoke<P2PFile[]>("p2p:listFiles", { query: "" }),
@@ -227,17 +220,26 @@ export default function DriveP2PApp() {
   };
 
   useEffect(() => {
+    if (!bridge) return;
     void runBusy(async () => {
       await bridge.invoke("p2p:start");
       await refreshAll();
     });
-  }, []);
+  }, [bridge]);
 
   useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
   }, [previewUrl]);
+
+  if (!bridge) return <ElectronRequiredScreen />;
+
+  const requireDrivePassword = () => {
+    const password = drivePassword.trim();
+    if (password.length < 6) throw new Error("Drive Password required. Use at least 6 characters.");
+    return password;
+  };
 
   const connectWallet = async () => {
     if (walletConnecting) return;
