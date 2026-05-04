@@ -5,12 +5,13 @@ const PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || "821b9d64c99
 const PAYMENT_CHAIN_ID = String(import.meta.env.VITE_PAYMENT_CHAIN_ID || "11155111");
 const PAYMENT_CHAIN_HEX = `0x${Number(PAYMENT_CHAIN_ID).toString(16)}`;
 const PAYMENT_CAIP_CHAIN = `eip155:${PAYMENT_CHAIN_ID}`;
+const ETHEREUM_CAIP_CHAIN = "eip155:1";
 const TX_METHOD = `eth_${"sendTransaction"}`;
 
 const REQUIRED_NAMESPACES = {
   eip155: {
     methods: ["personal_sign", TX_METHOD],
-    chains: [PAYMENT_CAIP_CHAIN],
+    chains: [PAYMENT_CAIP_CHAIN, ETHEREUM_CAIP_CHAIN],
     events: ["accountsChanged", "chainChanged"],
   },
 };
@@ -24,12 +25,13 @@ type WalletSession = Awaited<ReturnType<SignClient["connect"]>> extends { approv
 let signClientPromise: Promise<SignClient> | null = null;
 let modal: WalletConnectModal | null = null;
 let activeSession: WalletSession | null = null;
+let activeWalletConnectChain = PAYMENT_CAIP_CHAIN;
 let injectedAddress: string | null = null;
 
 declare global { interface Window { ethereum?: Eip1193Provider } }
 
 function getModal() {
-  if (!modal) modal = new WalletConnectModal({ projectId: PROJECT_ID, chains: [PAYMENT_CAIP_CHAIN] });
+  if (!modal) modal = new WalletConnectModal({ projectId: PROJECT_ID, chains: [PAYMENT_CAIP_CHAIN, ETHEREUM_CAIP_CHAIN] });
   return modal;
 }
 
@@ -106,13 +108,15 @@ async function connectInjectedWallet() {
   return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected" };
 }
 
-function getAccount(session: WalletSession) {
+function getWalletConnectAccount(session: WalletSession) {
   const accounts: string[] = session.namespaces.eip155?.accounts || [];
-  const account = accounts.find((item) => item.startsWith(`${PAYMENT_CAIP_CHAIN}:`));
-  if (!account) throw new Error(`WalletConnect session does not support ${PAYMENT_CAIP_CHAIN}. Disconnect and reconnect on Sepolia, or use MetaMask injected wallet.`);
+  const preferred = accounts.find((item) => item.startsWith(`${PAYMENT_CAIP_CHAIN}:`));
+  const fallback = accounts[0];
+  const account = preferred || fallback;
+  if (!account) throw new Error("WalletConnect did not return any Ethereum account. Disconnect and reconnect your wallet.");
   const [, chainId, address] = account.split(":");
   const normalizedAddress = normalizeAddress(address);
-  if (String(chainId) !== PAYMENT_CHAIN_ID) throw new Error(`Wrong network. Please connect Sepolia chain ${PAYMENT_CHAIN_ID}.`);
+  activeWalletConnectChain = preferred ? PAYMENT_CAIP_CHAIN : `eip155:${chainId}`;
   return { chainId, address: normalizedAddress };
 }
 
@@ -129,9 +133,9 @@ export async function connectWalletWithWalletConnect() {
     const session = await approval();
     activeSession = session;
     getModal().closeModal();
-    const { chainId, address } = getAccount(session);
+    const { chainId, address } = getWalletConnectAccount(session);
     const message = `p2p.cloud login\nWallet: ${address}\nChain: ${chainId}\nTime: ${new Date().toISOString()}`;
-    await client.request({ topic: session.topic, chainId: `eip155:${chainId}`, request: { method: "personal_sign", params: [message, address] } });
+    await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [message, address] } });
     return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect" };
   } catch (error) {
     getModal().closeModal();
@@ -159,11 +163,11 @@ export async function requestWalletPayment(payload: { from: string; to: string; 
 
   const client = await getSignClient();
   if (!activeSession?.topic) throw new Error("Connect wallet before payment");
-  const { chainId, address } = getAccount(activeSession);
+  const { address } = getWalletConnectAccount(activeSession);
   if (address.toLowerCase() !== payload.from.toLowerCase()) throw new Error("Payment wallet does not match connected wallet");
   const result = await client.request({
     topic: activeSession.topic,
-    chainId: `eip155:${chainId}`,
+    chainId: activeWalletConnectChain,
     request: { method: TX_METHOD, params: [{ from: payload.from, to: payload.to, value: payload.value, data: payload.data || "0x" }] },
   });
   return String(result);
