@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { verifyMessage } from 'viem';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -21,6 +22,8 @@ const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
 const KDF_ALGORITHM = 'pbkdf2-sha256';
 const KDF_ITERATIONS = 310000;
+const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
+const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
 
 const PLANS = {
   free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
@@ -50,6 +53,34 @@ function publicPeerUrl(node) { return process.env.P2P_PUBLIC_URL || process.env.
 function drivePasswordFromPayload(payload = {}) { const password = String(payload.drivePassword || '').trim(); if (password.length < 6) throw new Error('Drive Password required. Use at least 6 characters.'); return password; }
 function splitIntoChunks(buffer) { const chunks = []; for (let offset = 0; offset < buffer.length; offset += CHUNK_SIZE_BYTES) { const data = buffer.slice(offset, offset + CHUNK_SIZE_BYTES); chunks.push({ index: chunks.length, size: data.length, data, hash: hashBufferHex(data) }); } return chunks; }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
+
+function parseLoginMessageTime(message = '') {
+  const match = String(message).match(/^Time:\s*(.+)$/im);
+  if (!match) throw new Error('Wallet login message is missing timestamp');
+  const time = new Date(match[1]);
+  if (Number.isNaN(time.getTime())) throw new Error('Wallet login timestamp is invalid');
+  return time;
+}
+
+async function verifyWalletLoginPayload(payload = {}, address = '') {
+  const normalizedAddress = normalizeWallet(address);
+  const message = String(payload.loginMessage || '');
+  const signature = String(payload.signature || '');
+
+  if (!message || !signature) throw new Error('Missing wallet signature. Reconnect wallet.');
+  if (!message.startsWith('p2p.cloud login\n')) throw new Error('Unsupported wallet login message');
+  if (!message.toLowerCase().includes(`wallet: ${normalizedAddress}`)) throw new Error('Wallet login message does not match connected address');
+
+  const signedAt = parseLoginMessageTime(message);
+  const age = Date.now() - signedAt.getTime();
+  if (age > WALLET_LOGIN_MAX_AGE_MS) throw new Error('Wallet login signature expired. Reconnect wallet.');
+  if (age < -WALLET_LOGIN_MAX_FUTURE_MS) throw new Error('Wallet login timestamp is too far in the future');
+
+  const valid = await verifyMessage({ address: normalizedAddress, message, signature });
+  if (!valid) throw new Error('Wallet signature verification failed');
+
+  return { message, signature, signedAt: signedAt.toISOString() };
+}
 
 function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
   const wallet = normalizeWallet(ownerWallet);
@@ -101,13 +132,13 @@ function loadWallet() {
   }
 }
 
-function persistWallet() { ensureDataDir(); const { encryptionSecret, ...safeWallet } = walletState; fs.writeFileSync(walletPath, JSON.stringify({ ...safeWallet, encryptionKeySource: ENCRYPTION_KEY_SOURCE }, null, 2), 'utf8'); }
+function persistWallet() { ensureDataDir(); const { encryptionSecret, loginSignature, ...safeWallet } = walletState; fs.writeFileSync(walletPath, JSON.stringify({ ...safeWallet, encryptionKeySource: ENCRYPTION_KEY_SOURCE }, null, 2), 'utf8'); }
 function loadManifests() { ensureDataDir(); try { const parsed = JSON.parse(fs.readFileSync(manifestsPath, 'utf8')); manifests = Array.isArray(parsed) ? parsed : []; } catch { manifests = []; } }
 function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, JSON.stringify(manifests, null, 2), 'utf8'); }
 function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
 function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest) : []; }
 function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
-function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) }; }
+function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) }; }
 function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free; if (totalStoredBytesForWallet() + nextBytes > plan.quotaBytes) throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`); }
 function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
 
@@ -149,8 +180,17 @@ ipcMain.handle('electron:openDevTools', async () => { mainWindow?.webContents.op
 ipcMain.handle('electron:diagnostics', async () => ({ ok: true, cwd: process.cwd(), dirname: __dirname, preloadPath: resolvePreloadPath(), rendererPath: IS_DEV ? DEV_SERVER_URL : resolveRendererIndexPath(), isPackaged: app.isPackaged, appPath: app.getAppPath() }));
 ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\/\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });
 ipcMain.handle('wallet:status', async () => walletSummary());
-ipcMain.handle('wallet:connect', async (_event, payload = {}) => { const address = normalizeWallet(payload.address); if (!isValidWallet(address)) throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.'); const sameWallet = address === activeWallet(); walletState = { ...walletState, connected: true, verified: true, address, planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free', connectedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); await syncPull(); return walletSummary(); });
-ipcMain.handle('wallet:disconnect', async () => { walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
+ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
+  const address = normalizeWallet(payload.address);
+  if (!isValidWallet(address)) throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.');
+  const login = await verifyWalletLoginPayload(payload, address);
+  const sameWallet = address === activeWallet();
+  walletState = { ...walletState, connected: true, verified: true, address, planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free', connectedAt: new Date().toISOString(), verifiedAt: login.signedAt, loginMessage: login.message, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+  persistWallet();
+  await syncPull();
+  return walletSummary();
+});
+ipcMain.handle('wallet:disconnect', async () => { walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
 ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); await syncPull(); return networkSummary(); });
 ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
