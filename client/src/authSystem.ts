@@ -85,5 +85,29 @@ export function buildGoogleOAuthUrl() {
 }
 
 export function startGoogleLogin() {
-  window.open(buildGoogleOAuthUrl(), "_blank", "noopener,noreferrer");
+  window.location.href = buildGoogleOAuthUrl();
+}
+
+export async function finishGoogleLoginFromUrl(url = window.location.href): Promise<AuthUser | null> {
+  const parsed = new URL(url);
+  const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
+  const params = new URLSearchParams(hash || parsed.search.slice(1));
+  const accessToken = params.get("access_token");
+  if (!accessToken) return null;
+
+  const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw new Error("Google login failed while reading profile");
+  const profile = await response.json() as { sub: string; name?: string; email?: string; picture?: string };
+  const user = saveAuthUser({
+    id: `google:${profile.sub}`,
+    provider: "google",
+    displayName: profile.name || profile.email || "Google User",
+    email: profile.email,
+    avatarUrl: profile.picture,
+    createdAt: nowIso(),
+  });
+  history.replaceState(null, document.title, parsed.origin + parsed.pathname);
+  return user;
 }
