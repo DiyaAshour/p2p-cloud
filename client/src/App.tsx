@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import DriveP2PApp from "./DriveP2PApp";
+import DriveP2PAppNoPrompt from "./DriveP2PAppNoPrompt";
 
 function App() {
   return (
@@ -10,7 +10,7 @@ function App() {
       <ThemeProvider defaultTheme="dark">
         <TooltipProvider>
           <Toaster />
-          <DriveP2PApp />
+          <DriveP2PAppNoPrompt />
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>
