@@ -5,10 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PORT = Number(process.env.MANIFEST_SYNC_PORT || process.env.PORT || 8790);
-const HOST = process.env.MANIFEST_SYNC_HOST || '0.0.0.0';
-const DATA_DIR = process.env.MANIFEST_SYNC_DATA_DIR || path.join(__dirname, '..', 'sync-data');
-const STORE_PATH = path.join(DATA_DIR, 'wallet-manifests.json');
+const DEFAULT_PORT = Number(process.env.MANIFEST_SYNC_PORT || process.env.PORT || 8790);
+const DEFAULT_HOST = process.env.MANIFEST_SYNC_HOST || '0.0.0.0';
+const DEFAULT_DATA_DIR = process.env.MANIFEST_SYNC_DATA_DIR || path.join(__dirname, '..', 'sync-data');
 const MAX_BODY_BYTES = Number(process.env.MANIFEST_SYNC_MAX_BODY_BYTES || 10 * 1024 * 1024);
 
 function normalizeWallet(address = '') {
@@ -19,24 +18,26 @@ function validWallet(address = '') {
   return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));
 }
 
-function ensureStore() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(STORE_PATH)) fs.writeFileSync(STORE_PATH, '{}', 'utf8');
-}
-
-function readStore() {
-  ensureStore();
-  try {
-    const parsed = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+function createStore(dataDir) {
+  const storePath = path.join(dataDir, 'wallet-manifests.json');
+  function ensureStore() {
+    fs.mkdirSync(dataDir, { recursive: true });
+    if (!fs.existsSync(storePath)) fs.writeFileSync(storePath, '{}', 'utf8');
   }
-}
-
-function writeStore(store) {
-  ensureStore();
-  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
+  function readStore() {
+    ensureStore();
+    try {
+      const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  function writeStore(store) {
+    ensureStore();
+    fs.writeFileSync(storePath, JSON.stringify(store, null, 2), 'utf8');
+  }
+  return { storePath, ensureStore, readStore, writeStore };
 }
 
 function sanitizeManifest(manifest = {}, wallet) {
@@ -99,54 +100,68 @@ function routeParts(reqUrl) {
   return { url, parts: url.pathname.split('/').filter(Boolean) };
 }
 
-const server = http.createServer(async (req, res) => {
-  try {
-    if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
-    const { parts } = routeParts(req.url || '/');
+export function createManifestSyncServer({ dataDir = DEFAULT_DATA_DIR } = {}) {
+  const store = createStore(dataDir);
+  const server = http.createServer(async (req, res) => {
+    try {
+      if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
+      const { parts } = routeParts(req.url || '/');
 
-    if (req.method === 'GET' && parts.length === 1 && parts[0] === 'health') {
-      return send(res, 200, { ok: true, service: 'p2p-cloud-manifest-sync', wallets: Object.keys(readStore()).length });
+      if (req.method === 'GET' && parts.length === 1 && parts[0] === 'health') {
+        return send(res, 200, { ok: true, service: 'p2p-cloud-manifest-sync', wallets: Object.keys(store.readStore()).length });
+      }
+
+      if (parts[0] !== 'wallet' || !parts[1] || parts[2] !== 'manifests') {
+        return send(res, 404, { ok: false, error: 'Not found' });
+      }
+
+      const wallet = normalizeWallet(parts[1]);
+      if (!validWallet(wallet)) return send(res, 400, { ok: false, error: 'Invalid wallet address' });
+
+      const db = store.readStore();
+      const current = Array.isArray(db[wallet]) ? db[wallet] : [];
+
+      if (req.method === 'GET' && parts.length === 3) {
+        return send(res, 200, { ok: true, wallet, manifests: current });
+      }
+
+      if (req.method === 'POST' && parts.length === 3) {
+        const body = await readBody(req);
+        const manifest = sanitizeManifest(body.manifest || body, wallet);
+        const next = current.filter((item) => item.hash !== manifest.hash);
+        next.push(manifest);
+        db[wallet] = next.sort((a, b) => String(b.uploadedAt).localeCompare(String(a.uploadedAt)));
+        store.writeStore(db);
+        return send(res, 200, { ok: true, wallet, manifest, count: db[wallet].length });
+      }
+
+      if (req.method === 'DELETE' && parts.length === 4) {
+        const hash = decodeURIComponent(parts[3]);
+        db[wallet] = current.filter((item) => item.hash !== hash);
+        store.writeStore(db);
+        return send(res, 200, { ok: true, wallet, hash, count: db[wallet].length });
+      }
+
+      return send(res, 405, { ok: false, error: 'Method not allowed' });
+    } catch (error) {
+      return send(res, 500, { ok: false, error: error?.message || 'Server error' });
     }
+  });
+  server.storePath = store.storePath;
+  server.ensureStore = store.ensureStore;
+  return server;
+}
 
-    if (parts[0] !== 'wallet' || !parts[1] || parts[2] !== 'manifests') {
-      return send(res, 404, { ok: false, error: 'Not found' });
-    }
+export function startManifestSyncServer({ port = DEFAULT_PORT, host = DEFAULT_HOST, dataDir = DEFAULT_DATA_DIR } = {}) {
+  const server = createManifestSyncServer({ dataDir });
+  server.ensureStore();
+  server.listen(port, host, () => {
+    console.log(`[manifest-sync] listening on http://${host}:${port}`);
+    console.log(`[manifest-sync] store: ${server.storePath}`);
+  });
+  return server;
+}
 
-    const wallet = normalizeWallet(parts[1]);
-    if (!validWallet(wallet)) return send(res, 400, { ok: false, error: 'Invalid wallet address' });
-
-    const store = readStore();
-    const current = Array.isArray(store[wallet]) ? store[wallet] : [];
-
-    if (req.method === 'GET' && parts.length === 3) {
-      return send(res, 200, { ok: true, wallet, manifests: current });
-    }
-
-    if (req.method === 'POST' && parts.length === 3) {
-      const body = await readBody(req);
-      const manifest = sanitizeManifest(body.manifest || body, wallet);
-      const next = current.filter((item) => item.hash !== manifest.hash);
-      next.push(manifest);
-      store[wallet] = next.sort((a, b) => String(b.uploadedAt).localeCompare(String(a.uploadedAt)));
-      writeStore(store);
-      return send(res, 200, { ok: true, wallet, manifest, count: store[wallet].length });
-    }
-
-    if (req.method === 'DELETE' && parts.length === 4) {
-      const hash = decodeURIComponent(parts[3]);
-      store[wallet] = current.filter((item) => item.hash !== hash);
-      writeStore(store);
-      return send(res, 200, { ok: true, wallet, hash, count: store[wallet].length });
-    }
-
-    return send(res, 405, { ok: false, error: 'Method not allowed' });
-  } catch (error) {
-    return send(res, 500, { ok: false, error: error?.message || 'Server error' });
-  }
-});
-
-server.listen(PORT, HOST, () => {
-  ensureStore();
-  console.log(`[manifest-sync] listening on http://${HOST}:${PORT}`);
-  console.log(`[manifest-sync] store: ${STORE_PATH}`);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  startManifestSyncServer();
+}
