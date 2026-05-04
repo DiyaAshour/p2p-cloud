@@ -11,6 +11,15 @@ let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    showMainWindow();
+  });
+}
+
 function isVirtualInterfaceName(name = '') {
   const n = String(name).toLowerCase();
   return [
@@ -141,4 +150,6 @@ app.on('before-quit', () => {
   isQuitting = true;
 });
 
-await import('./main.js');
+if (gotSingleInstanceLock) {
+  await import('./main.js');
+}
