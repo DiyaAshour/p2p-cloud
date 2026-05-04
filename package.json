@@ -7,8 +7,9 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3000",
-    "dev:electron": "concurrently \"pnpm dev\" \"powershell -NoProfile -Command Start-Sleep -Seconds 3; electron .\"",
-    "electron:dev": "concurrently \"pnpm dev\" \"powershell -NoProfile -Command Start-Sleep -Seconds 3; electron .\"",
+    "paypal:server": "node server/paypal-checkout.js",
+"dev:electron": "concurrently \"pnpm dev\" \"pnpm paypal:server\" \"powershell -NoProfile -Command Start-Sleep -Seconds 3; electron .\"",
+"electron:dev": "concurrently \"pnpm dev\" \"pnpm paypal:server\" \"powershell -NoProfile -Command Start-Sleep -Seconds 3; electron .\"",
     "build": "vite build",
     "build:electron": "vite build && electron-builder",
     "electron:build": "pnpm build && electron-builder",
