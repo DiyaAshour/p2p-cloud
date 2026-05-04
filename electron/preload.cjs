@@ -19,6 +19,7 @@ const allowedChannels = new Set([
   'wallet:setPlan',
   'electron:openDevTools',
   'electron:diagnostics',
+  'system:open-external',
 ]);
 
 function assertAllowedChannel(channel) {
