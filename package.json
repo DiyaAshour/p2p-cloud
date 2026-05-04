@@ -64,8 +64,8 @@
     ]
   },
   "build": {
-    "appId": "com.p2pstorage.app",
-    "productName": "P2P Storage Browser",
+    "appId": "cloud.p2p.app",
+    "productName": "p2p.cloud",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -73,6 +73,9 @@
     ],
     "directories": {
       "buildResources": "assets"
+    },
+    "win": {
+      "icon": "assets/icon.svg"
     }
   }
 }
