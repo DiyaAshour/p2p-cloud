@@ -237,4 +237,4 @@ ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerif
 
 app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); await syncPull(); createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
 app.on('before-quit', () => { persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
-app.on('window-all-closed', (event) => { event.preventDefault(); });
+app.on('window-all-closed', () => {});
