@@ -7,7 +7,6 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "helmet": "^8.0.0"
