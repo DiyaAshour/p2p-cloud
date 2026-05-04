@@ -1,13 +1,17 @@
-import { createPublicClient, encodeFunctionData, http, parseAbi, type Address } from "viem";
+import { createPublicClient, encodeFunctionData, http, parseAbi, fallback, type Address } from "viem";
 import { sepolia } from "viem/chains";
-import { PAYMENT_CONTRACT_ADDRESS, PAYMENT_RPC_URL, SUBSCRIPTION_ABI } from "./paymentConfig";
+import { PAYMENT_CONTRACT_ADDRESS, PAYMENT_RPC_URLS, SUBSCRIPTION_ABI } from "./paymentConfig";
 import { requestWalletPayment } from "./walletConnect";
 
 export type PlanForPayment = { id: string; contractPlanId: number; quotaBytes: number };
 export type SubscriptionState = { planId: number; paidUntil: number; quotaBytes: number; active: boolean };
 
 const ABI = parseAbi([...SUBSCRIPTION_ABI]);
-const client = createPublicClient({ chain: sepolia, transport: http(PAYMENT_RPC_URL) });
+
+const client = createPublicClient({
+  chain: sepolia,
+  transport: fallback(PAYMENT_RPC_URLS.map((url) => http(url)))
+});
 
 function getContractAddress(): Address {
   if (!/^0x[a-fA-F0-9]{40}$/.test(PAYMENT_CONTRACT_ADDRESS)) {
