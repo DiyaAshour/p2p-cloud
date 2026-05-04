@@ -1,7 +1,8 @@
 const DEFAULT_TIMEOUT_MS = 8000;
+const DEFAULT_SYNC_URL = 'http://54.166.171.208:8790';
 
 function getSyncUrl() {
-  return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || '';
+  return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || DEFAULT_SYNC_URL;
 }
 
 function normalizeWallet(address = '') {
@@ -45,6 +46,10 @@ async function requestJson(url, options = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function manifestSyncUrl() {
+  return getSyncUrl();
 }
 
 export function isManifestSyncEnabled() {
