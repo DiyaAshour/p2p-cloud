@@ -115,7 +115,7 @@ async function connectInjectedWallet() {
   const encryptionSignature = await signInjected(provider, encryptionMessage(address), address);
   injectedAddress = address;
   activeSession = null;
-  return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected", encryptionSignature };
+  return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected", encryptionSignature, signature: encryptionSignature };
 }
 
 function getWalletConnectAccount(session: WalletSession) {
@@ -147,7 +147,7 @@ export async function connectWalletWithWalletConnect() {
     const loginMessage = `p2p.cloud login\nWallet: ${address}\nChain: ${chainId}\nTime: ${new Date().toISOString()}`;
     await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [loginMessage, address] } });
     const encryptionSignature = String(await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [encryptionMessage(address), address] } }));
-    return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect", encryptionSignature };
+    return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect", encryptionSignature, signature: encryptionSignature };
   } catch (error) {
     getModal().closeModal();
     throw error;
