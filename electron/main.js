@@ -16,11 +16,11 @@ const IS_DEV = process.env.NODE_ENV !== 'production';
 const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
 
 const PLANS = {
-  free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0 },
-  tb1: { id: 'tb1', name: '1 TB', quotaBytes: 1 * 1024 ** 4, priceUsd: 1 },
-  tb3: { id: 'tb3', name: '3 TB', quotaBytes: 3 * 1024 ** 4, priceUsd: 2.5 },
-  tb7: { id: 'tb7', name: '7 TB', quotaBytes: 7 * 1024 ** 4, priceUsd: 4.99 },
-  tb10: { id: 'tb10', name: '10 TB', quotaBytes: 10 * 1024 ** 4, priceUsd: 7.99 },
+  free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
+  tb1: { id: 'tb1', name: '1 TB', quotaBytes: 1 * 1024 ** 4, priceUsd: 1, locked: true },
+  tb3: { id: 'tb3', name: '3 TB', quotaBytes: 3 * 1024 ** 4, priceUsd: 2.5, locked: true },
+  tb7: { id: 'tb7', name: '7 TB', quotaBytes: 7 * 1024 ** 4, priceUsd: 4.99, locked: true },
+  tb10: { id: 'tb10', name: '10 TB', quotaBytes: 10 * 1024 ** 4, priceUsd: 7.99, locked: true },
 };
 
 let mainWindow = null;
@@ -29,7 +29,15 @@ let dataDir = null;
 let manifestsPath = null;
 let walletPath = null;
 let manifests = [];
-let walletState = { connected: false, address: '', planId: 'free', connectedAt: null };
+let walletState = {
+  connected: false,
+  verified: false,
+  address: '',
+  planId: 'free',
+  connectedAt: null,
+  verifiedAt: null,
+  paidUntil: null,
+};
 
 function resolvePreloadPath() {
   const preloadPath = path.join(__dirname, 'preload.cjs');
@@ -53,9 +61,15 @@ function loadWallet() {
   ensureDataDir();
   try {
     const parsed = JSON.parse(fs.readFileSync(walletPath, 'utf8'));
-    walletState = { ...walletState, ...parsed, planId: PLANS[parsed?.planId] ? parsed.planId : 'free' };
+    walletState = {
+      ...walletState,
+      ...parsed,
+      planId: PLANS[parsed?.planId] ? parsed.planId : 'free',
+      verified: Boolean(parsed?.verified),
+    };
+    if (PLANS[walletState.planId]?.locked && !walletState.paidUntil) walletState.planId = 'free';
   } catch {
-    walletState = { connected: false, address: '', planId: 'free', connectedAt: null };
+    walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null };
   }
 }
 
@@ -86,16 +100,27 @@ function totalStoredBytes() {
 function walletSummary() {
   const plan = PLANS[walletState.planId] || PLANS.free;
   const usedBytes = totalStoredBytes();
-  return { ok: true, ...walletState, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) };
+  return {
+    ok: true,
+    ...walletState,
+    plan,
+    plans: Object.values(PLANS),
+    usedBytes,
+    remainingBytes: Math.max(0, plan.quotaBytes - usedBytes),
+    paymentRequired: PLANS[walletState.planId]?.locked && !walletState.paidUntil,
+  };
 }
 
 function assertWalletUploadAllowed(nextBytes = 0) {
-  if (!walletState.connected || !/^0x[a-fA-F0-9]{40}$/.test(walletState.address)) {
-    throw new Error('Wallet required. Connect a valid wallet before uploading.');
+  if (!walletState.connected || !walletState.verified || !/^0x[a-fA-F0-9]{40}$/.test(walletState.address)) {
+    throw new Error('Verified wallet required. Connect and verify a wallet before uploading.');
   }
   const plan = PLANS[walletState.planId] || PLANS.free;
+  if (plan.locked && !walletState.paidUntil) {
+    throw new Error('Payment required. Paid plans are locked until payment verification is implemented.');
+  }
   if (totalStoredBytes() + nextBytes > plan.quotaBytes) {
-    throw new Error(`Storage quota exceeded. Current plan: ${plan.name}. Upgrade your wallet plan before uploading.`);
+    throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`);
   }
 }
 
@@ -144,15 +169,16 @@ ipcMain.handle('wallet:status', async () => walletSummary());
 ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
   const address = String(payload.address || '').trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.');
-  walletState = { ...walletState, connected: true, address, connectedAt: new Date().toISOString() };
+  walletState = { ...walletState, connected: true, verified: true, address, planId: 'free', connectedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), paidUntil: null };
   persistWallet();
   return walletSummary();
 });
-ipcMain.handle('wallet:disconnect', async () => { walletState = { connected: false, address: '', planId: 'free', connectedAt: null }; persistWallet(); return walletSummary(); });
+ipcMain.handle('wallet:disconnect', async () => { walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null }; persistWallet(); return walletSummary(); });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => {
   const planId = String(payload.planId || 'free');
   if (!PLANS[planId]) throw new Error('Unknown wallet plan');
-  if (!walletState.connected) throw new Error('Connect wallet before selecting a plan');
+  if (!walletState.connected || !walletState.verified) throw new Error('Verify wallet before selecting a plan');
+  if (PLANS[planId].locked) throw new Error('Paid plans are locked until payment verification is connected.');
   walletState = { ...walletState, planId };
   persistWallet();
   return walletSummary();
