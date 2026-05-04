@@ -4,6 +4,18 @@ import https from 'node:https';
 const DEFAULT_TIMEOUT_MS = 12000;
 const LOCAL_SYNC_URL = 'http://127.0.0.1:8790';
 const HOSTED_SYNC_URL = 'http://54.166.171.208:8790';
+const ALLOWED_ENCRYPTION_KEYS = new Set([
+  'version',
+  'algorithm',
+  'keySource',
+  'kdf',
+  'kdfIterations',
+  'salt',
+  'iv',
+  'authTag',
+  'originalHash',
+  'originalSize',
+]);
 
 function configuredSyncUrl() {
   return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || '';
@@ -18,15 +30,26 @@ function normalizeWallet(address = '') {
   return String(address || '').trim().toLowerCase();
 }
 
+function sanitizeEncryptionMetadata(encryption) {
+  if (!encryption || typeof encryption !== 'object') return null;
+  const clean = {};
+  for (const key of ALLOWED_ENCRYPTION_KEYS) {
+    if (encryption[key] !== undefined && encryption[key] !== null) clean[key] = encryption[key];
+  }
+  return Object.keys(clean).length ? clean : null;
+}
+
 function sanitizeManifest(manifest) {
   return {
     id: manifest.id,
     name: manifest.name,
     size: manifest.size,
+    storedSize: manifest.storedSize,
     hash: manifest.hash,
     rootHash: manifest.rootHash,
     uploadedAt: manifest.uploadedAt,
     isEncrypted: Boolean(manifest.isEncrypted),
+    encryption: sanitizeEncryptionMetadata(manifest.encryption),
     mimeType: manifest.mimeType || 'application/octet-stream',
     chunkSize: manifest.chunkSize,
     totalChunks: manifest.totalChunks,
