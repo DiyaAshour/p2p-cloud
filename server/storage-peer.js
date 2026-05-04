@@ -16,24 +16,42 @@ const CHUNKS_DIR = path.join(DATA_DIR, 'chunks');
 const INDEX_PATH = path.join(DATA_DIR, 'chunk-index.json');
 const PEER_ID_PATH = path.join(DATA_DIR, 'peer-id.txt');
 const HEARTBEAT_MS = Number(process.env.STORAGE_PEER_HEARTBEAT_MS || 30000);
+const PUBLIC_DISPLAY_URL = 'Network route';
+const PUBLIC_ROLE = 'safety-peer';
+
+const NODE_NAMES = [
+  'Atlas Node', 'Orion Node', 'Nova Node', 'Vega Node', 'Astra Node', 'Luna Node',
+  'Cosmo Node', 'Nexus Node', 'Pulse Node', 'Echo Node', 'Vertex Node', 'Nimbus Node',
+  'Falcon Node', 'Cedar Node', 'Summit Node', 'Harbor Node'
+];
+
+function stableName(seed = '') {
+  const hash = crypto.createHash('sha256').update(seed).digest();
+  return NODE_NAMES[hash[0] % NODE_NAMES.length];
+}
 
 function ensureDirs() {
   fs.mkdirSync(CHUNKS_DIR, { recursive: true });
   if (!fs.existsSync(INDEX_PATH)) fs.writeFileSync(INDEX_PATH, '{}', 'utf8');
 }
 
+function newPeerId() {
+  return `${stableName(crypto.randomUUID()).toLowerCase().replace(/\s+/g, '-')}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
 function loadPeerId() {
   ensureDirs();
   if (fs.existsSync(PEER_ID_PATH)) {
     const existing = fs.readFileSync(PEER_ID_PATH, 'utf8').trim();
-    if (existing) return existing;
+    if (existing && !existing.startsWith('aws-storage-peer')) return existing;
   }
-  const peerId = `aws-storage-peer-${crypto.randomUUID()}`;
+  const peerId = newPeerId();
   fs.writeFileSync(PEER_ID_PATH, peerId, 'utf8');
   return peerId;
 }
 
 const PEER_ID = loadPeerId();
+const PEER_NAME = stableName(PEER_ID);
 const peers = new Map();
 let bootstrapSocket = null;
 let bootstrapTimer = null;
@@ -118,7 +136,7 @@ function handlePeerMessage(socket, raw) {
       type: 'peer:hello',
       fromPeerId: PEER_ID,
       toPeerId: message.fromPeerId,
-      payload: { peerId: PEER_ID, url: PUBLIC_URL, role: 'aws-storage-peer' },
+      payload: { peerId: PEER_ID, displayName: PEER_NAME, url: PUBLIC_DISPLAY_URL, role: PUBLIC_ROLE },
     });
     console.log('[storage-peer] connected peer', message.fromPeerId);
     return;
@@ -178,10 +196,10 @@ function handlePeerMessage(socket, raw) {
 
 function registerWithBootstrap() {
   if (bootstrapSocket?.readyState === WebSocket.OPEN) {
-    const payload = { type: 'peer:register', peerId: PEER_ID, url: PUBLIC_URL, role: 'aws-storage-peer' };
+    const payload = { type: 'peer:register', peerId: PEER_ID, url: PUBLIC_URL, role: PUBLIC_ROLE, displayName: PEER_NAME };
     bootstrapSocket.send(JSON.stringify(payload));
-    bootstrapSocket.send(JSON.stringify({ type: 'peer:heartbeat', peerId: PEER_ID, url: PUBLIC_URL, role: 'aws-storage-peer' }));
-    console.log('[storage-peer] registered with bootstrap', PUBLIC_URL);
+    bootstrapSocket.send(JSON.stringify({ type: 'peer:heartbeat', peerId: PEER_ID, url: PUBLIC_URL, role: PUBLIC_ROLE, displayName: PEER_NAME }));
+    console.log('[storage-peer] registered with bootstrap', PUBLIC_URL, 'as', PEER_NAME);
   }
 }
 
@@ -221,8 +239,9 @@ server.on('connection', (socket) => {
     type: 'transport:ready',
     peerId: PEER_ID,
     port: PORT,
-    publicUrl: PUBLIC_URL,
-    role: 'aws-storage-peer',
+    publicUrl: PUBLIC_DISPLAY_URL,
+    role: PUBLIC_ROLE,
+    displayName: PEER_NAME,
   });
 });
 
@@ -239,6 +258,7 @@ setInterval(() => {
 
 connectBootstrap();
 console.log(`[storage-peer] peerId: ${PEER_ID}`);
+console.log(`[storage-peer] displayName: ${PEER_NAME}`);
 console.log(`[storage-peer] listening on ws://${HOST}:${PORT}`);
 console.log(`[storage-peer] advertising ${PUBLIC_URL}`);
 console.log(`[storage-peer] chunks: ${CHUNKS_DIR}`);
