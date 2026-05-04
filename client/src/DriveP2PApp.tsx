@@ -65,7 +65,6 @@ declare global { interface Window { electron?: ElectronBridge } }
 
 const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
-const DRIVE_PASSWORD_STORAGE_KEY = "p2p.cloud.drivePassword";
 
 function getElectronBridge(): ElectronBridge | null {
   return typeof window !== "undefined" && typeof window.electron?.invoke === "function" ? window.electron : null;
@@ -134,10 +133,6 @@ function pathParts(path = "") {
   return cleanPath(path).split("/").filter(Boolean);
 }
 
-function readStoredDrivePassword() {
-  try { return localStorage.getItem(DRIVE_PASSWORD_STORAGE_KEY) || ""; } catch { return ""; }
-}
-
 function ElectronRequiredScreen() {
   return (
     <div className="min-h-screen bg-zinc-950 p-6 text-zinc-50">
@@ -165,7 +160,7 @@ export default function DriveP2PApp() {
   const [previewFile, setPreviewFile] = useState<P2PFile | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const [drivePassword, setDrivePassword] = useState(() => readStoredDrivePassword());
+  const [drivePassword, setDrivePassword] = useState("");
 
   if (!bridge) return <ElectronRequiredScreen />;
 
@@ -212,7 +207,6 @@ export default function DriveP2PApp() {
   const requireDrivePassword = () => {
     const password = drivePassword.trim();
     if (password.length < 6) throw new Error("Drive Password required. Use at least 6 characters.");
-    try { localStorage.setItem(DRIVE_PASSWORD_STORAGE_KEY, password); } catch {}
     return password;
   };
 
@@ -271,6 +265,7 @@ export default function DriveP2PApp() {
     setWallet(nextWallet);
     setFiles([]);
     setCurrentPath("");
+    setDrivePassword("");
     toast.success("Wallet disconnected");
   });
 
