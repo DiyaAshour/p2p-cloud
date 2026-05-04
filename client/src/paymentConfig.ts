@@ -2,7 +2,7 @@ export const TREASURY_WALLET = "0x870dc8c138634B3d9E93Dbe6ed9bee511C36D257";
 export const PAYMENT_CHAIN_ID = "11155111";
 export const PAYMENT_CHAIN_NAME = "Sepolia";
 export const PAYMENT_CONTRACT_ADDRESS = import.meta.env.VITE_PAYMENT_CONTRACT_ADDRESS || "0x96020117Afe494C5E490eCF47DE0d5bB396366e4";
-export const PAYMENT_RPC_URL = import.meta.env.VITE_PAYMENT_RPC_URL || "https://rpc.sepolia.org";
+export const PAYMENT_RPC_URL = import.meta.env.VITE_PAYMENT_RPC_URL || "https://1rpc.io/sepolia";
 
 export const PAID_STORAGE_PLANS = [
   { id: "tb1", contractPlanId: 1, name: "1 TB", quotaBytes: 1 * 1024 ** 4, label: "$1/month" },
