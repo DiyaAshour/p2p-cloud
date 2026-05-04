@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="g" x1="32" y1="28" x2="224" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.5" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="s" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#09090b"/>
+  <path filter="url(#s)" d="M128 26 218 78v100l-90 52-90-52V78l90-52Z" fill="url(#g)" opacity="0.96"/>
+  <path d="M128 55 193 92v72l-65 37-65-37V92l65-37Z" fill="#09090b" opacity="0.84"/>
+  <circle cx="128" cy="128" r="30" fill="url(#g)"/>
+  <circle cx="78" cy="98" r="12" fill="#e0f2fe"/>
+  <circle cx="178" cy="98" r="12" fill="#e0f2fe"/>
+  <circle cx="78" cy="158" r="12" fill="#e0f2fe"/>
+  <circle cx="178" cy="158" r="12" fill="#e0f2fe"/>
+  <path d="M90 105 116 120M166 105 140 120M90 151 116 136M166 151 140 136" stroke="#e0f2fe" stroke-width="8" stroke-linecap="round" opacity="0.9"/>
+  <text x="128" y="237" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="23" font-weight="800" fill="#f8fafc">p2p.cloud</text>
+</svg>
