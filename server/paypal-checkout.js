@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
 const PORT = Number(process.env.PAYPAL_SERVER_PORT || 8791);
+const HOST = process.env.PAYPAL_SERVER_HOST || '0.0.0.0';
 const CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
 const PAYPAL_ENV = process.env.PAYPAL_ENV || 'sandbox';
@@ -181,7 +182,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[paypal-checkout] listening on http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`[paypal-checkout] listening on http://${HOST}:${PORT}`);
   console.log(`[paypal-checkout] env=${PAYPAL_ENV} api=${PAYPAL_API_BASE}`);
 });
