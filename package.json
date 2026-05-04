@@ -1,6 +1,8 @@
 {
   "name": "p2p-cloud",
   "version": "1.0.0",
+  "description": "A wallet-based P2P cloud storage desktop app with encrypted chunks, peer discovery, and manifest sync.",
+  "author": "Diya Ashour",
   "type": "module",
   "license": "MIT",
   "scripts": {
@@ -12,6 +14,7 @@
     "electron:build": "pnpm build && electron-builder",
     "start": "electron .",
     "sync:manifests": "node server/manifest-sync.js",
+    "storage:peer": "node server/storage-peer.js",
     "repair:electron": "node node_modules/electron/install.js",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
