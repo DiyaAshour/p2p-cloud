@@ -81,6 +81,10 @@ function encryptionMessage(address: string) {
   return `${ENCRYPTION_MESSAGE_PREFIX}\nWallet: ${address.toLowerCase()}\nPurpose: authorize private file access`;
 }
 
+function loginMessage(address: string, chainId: string) {
+  return `p2p.cloud login\nWallet: ${address.toLowerCase()}\nChain: ${chainId}\nTime: ${new Date().toISOString()}`;
+}
+
 async function signInjected(provider: Eip1193Provider, message: string, address: string) {
   return String(await provider.request({ method: "personal_sign", params: [message, address] }));
 }
@@ -114,13 +118,13 @@ async function connectInjectedWallet() {
   await ensureInjectedSepolia(provider);
   const accounts = await provider.request({ method: "eth_requestAccounts" }) as unknown[];
   const address = normalizeAddress(accounts?.[0]);
-  const loginMessage = `p2p.cloud login\nWallet: ${address}\nChain: ${PAYMENT_CHAIN_ID}\nTime: ${new Date().toISOString()}`;
-  await signInjected(provider, loginMessage, address);
+  const message = loginMessage(address, PAYMENT_CHAIN_ID);
+  const signature = await signInjected(provider, message, address);
   await signInjected(provider, encryptionMessage(address), address);
   const encryptionSignature = stableEncryptionSeed(address);
   injectedAddress = address;
   activeSession = null;
-  return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected", encryptionSignature, signature: encryptionSignature };
+  return { address, chainId: PAYMENT_CHAIN_ID, topic: "injected", verifiedAt: new Date().toISOString(), provider: "injected", loginMessage: message, signature, encryptionSignature };
 }
 
 function getWalletConnectAccount(session: WalletSession) {
@@ -149,11 +153,11 @@ export async function connectWalletWithWalletConnect() {
     activeSession = session;
     getModal().closeModal();
     const { chainId, address } = getWalletConnectAccount(session);
-    const loginMessage = `p2p.cloud login\nWallet: ${address}\nChain: ${chainId}\nTime: ${new Date().toISOString()}`;
-    await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [loginMessage, address] } });
+    const message = loginMessage(address, chainId);
+    const signature = String(await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [message, address] } }));
     await client.request({ topic: session.topic, chainId: activeWalletConnectChain, request: { method: "personal_sign", params: [encryptionMessage(address), address] } });
     const encryptionSignature = stableEncryptionSeed(address);
-    return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect", encryptionSignature, signature: encryptionSignature };
+    return { address, chainId, topic: session.topic, verifiedAt: new Date().toISOString(), provider: "walletconnect", loginMessage: message, signature, encryptionSignature };
   } catch (error) {
     getModal().closeModal();
     throw error;
