@@ -51,7 +51,7 @@ type WalletState = { connected: boolean; address: string; plan?: Plan; plans?: P
 type P2PFile = { name: string; size: number; hash: string; rootHash: string; uploadedAt: string; isEncrypted: boolean; mimeType?: string; ownerWallet?: string };
 type Summary = { peerId: string; connectedPeers: number };
 type DownloadResult = { file: P2PFile; bytes: number[] };
-type PendingPayment = { orderId: string; approveUrl: string; planId: string; planName: string; priceUsd: number };
+type PendingPayment = { orderId: string; approveUrl: string; planId: string; appPlanId: string; planName: string; priceUsd: number };
 
 declare global {
   interface Window {
@@ -63,6 +63,13 @@ const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
 const DEFAULT_MIN_DRIVE_PASSWORD_LENGTH = 12;
 const PAYPAL_BASE_URLS = ["http://127.0.0.1:8791", "http://54.166.171.208:8791"];
+const LEGACY_PAYPAL_PLAN_IDS: Record<string, string> = {
+  tb1: "1tb",
+  tb3: "3tb",
+  tb7: "7tb",
+  tb10: "10tb",
+};
+const legacyPayPalPlanId = (planId: string) => LEGACY_PAYPAL_PLAN_IDS[planId] || planId;
 const getBridge = () => window.electron || null;
 const clean = (v = "") => v.split("/").map((x) => x.trim()).filter(Boolean).join("/");
 const join = (...p: string[]) => clean(p.join("/"));
@@ -335,11 +342,13 @@ export default function DriveP2PAppPassword() {
       toast.error("Connect wallet first");
       return;
     }
+    const paypalPlanId = legacyPayPalPlanId(plan.id);
     setPaymentBusy(true);
     try {
       const data = await postPayPal(["/paypal/create-order", "/create-order", "/paypal/create", "/create"], {
-        planId: plan.id,
-        plan: plan.id,
+        planId: paypalPlanId,
+        plan: paypalPlanId,
+        appPlanId: plan.id,
         wallet: wallet.address,
         walletAddress: wallet.address,
         amount: plan.priceUsd,
@@ -347,7 +356,7 @@ export default function DriveP2PAppPassword() {
       const approveUrl = extractApproveUrl(data);
       const orderId = extractOrderId(data);
       if (!approveUrl || !orderId) throw new Error("PayPal did not return an approval link");
-      const pending = { orderId, approveUrl, planId: plan.id, planName: plan.name, priceUsd: plan.priceUsd };
+      const pending = { orderId, approveUrl, planId: paypalPlanId, appPlanId: plan.id, planName: plan.name, priceUsd: plan.priceUsd };
       setPendingPayment(pending);
       await copyText(approveUrl);
       toast.success("PayPal link copied");
@@ -368,11 +377,12 @@ export default function DriveP2PAppPassword() {
         id: pendingPayment.orderId,
         planId: pendingPayment.planId,
         plan: pendingPayment.planId,
+        appPlanId: pendingPayment.appPlanId,
         wallet: wallet.address,
         walletAddress: wallet.address,
       });
       await electron.invoke("wallet:setPlan", {
-        planId: pendingPayment.planId,
+        planId: pendingPayment.appPlanId,
         txHash: `paypal:${pendingPayment.orderId}`,
         paidUntil: data?.paidUntil || data?.expiresAt || null,
       });
@@ -654,7 +664,7 @@ export default function DriveP2PAppPassword() {
             </div>
             <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-4">
               {paidPlans.map((plan) => (
-                <Card key={plan.id} className={`border-white/10 bg-white/[0.055] ${pendingPayment?.planId === plan.id ? "ring-2 ring-cyan-300" : ""}`}>
+                <Card key={plan.id} className={`border-white/10 bg-white/[0.055] ${pendingPayment?.appPlanId === plan.id ? "ring-2 ring-cyan-300" : ""}`}>
                   <CardContent className="space-y-4 p-5">
                     <div>
                       <p className="text-2xl font-semibold">{plan.name}</p>
