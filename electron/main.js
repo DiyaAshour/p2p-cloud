@@ -22,6 +22,7 @@ const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
 const KDF_ALGORITHM = 'pbkdf2-sha256';
 const KDF_ITERATIONS = 310000;
+const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
 const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
 
@@ -50,7 +51,8 @@ function hashBufferHex(buffer) { return crypto.createHash('sha256').update(buffe
 function firstLanAddress() { const nets = os.networkInterfaces(); for (const list of Object.values(nets)) for (const net of list || []) if (net && !net.internal && net.family === 'IPv4' && !net.address.startsWith('169.254.')) return net.address; return '127.0.0.1'; }
 function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks'); }
 function publicPeerUrl(node) { return process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || `ws://${firstLanAddress()}:${node.port}`; }
-function drivePasswordFromPayload(payload = {}) { const password = String(payload.drivePassword || '').trim(); if (password.length < 6) throw new Error('Drive Password required. Use at least 6 characters.'); return password; }
+function validateDrivePassword(drivePassword) { const password = String(drivePassword || '').trim(); if (password.length < MIN_DRIVE_PASSWORD_LENGTH) throw new Error(`Drive Password required. Use at least ${MIN_DRIVE_PASSWORD_LENGTH} characters.`); return password; }
+function drivePasswordFromPayload(payload = {}) { return validateDrivePassword(payload.drivePassword); }
 function splitIntoChunks(buffer) { const chunks = []; for (let offset = 0; offset < buffer.length; offset += CHUNK_SIZE_BYTES) { const data = buffer.slice(offset, offset + CHUNK_SIZE_BYTES); chunks.push({ index: chunks.length, size: data.length, data, hash: hashBufferHex(data) }); } return chunks; }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 
@@ -85,9 +87,9 @@ async function verifyWalletLoginPayload(payload = {}, address = '') {
 function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
   const wallet = normalizeWallet(ownerWallet);
   if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');
-  if (!drivePassword || String(drivePassword).length < 6) throw new Error('Drive Password required.');
+  const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');
-  return crypto.pbkdf2Sync(`${wallet}:${drivePassword}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
+  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function encryptPrivateBuffer(plainBuffer, ownerWallet = activeWallet(), drivePassword) {
@@ -138,7 +140,7 @@ function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, J
 function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
 function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest) : []; }
 function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
-function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) }; }
+function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) }; }
 function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free; if (totalStoredBytesForWallet() + nextBytes > plan.quotaBytes) throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`); }
 function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
 
