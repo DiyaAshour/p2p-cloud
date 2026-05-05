@@ -9,7 +9,10 @@ import {
   ArrowLeft,
   CheckCircle2,
   Cloud,
+  Copy,
+  CreditCard,
   Download,
+  ExternalLink,
   FileText,
   Folder,
   FolderPlus,
@@ -39,12 +42,16 @@ type Channel =
   | "p2p:networkSummary"
   | "wallet:status"
   | "wallet:connect"
-  | "wallet:disconnect";
+  | "wallet:disconnect"
+  | "wallet:setPlan"
+  | "system:open-external";
 type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };
-type Wallet = { connected: boolean; address: string; plan?: { name: string; quotaBytes: number }; usedBytes: number; minDrivePasswordLength?: number };
+type Plan = { id: string; name: string; quotaBytes: number; priceUsd: number; locked?: boolean };
+type WalletState = { connected: boolean; address: string; plan?: Plan; plans?: Plan[]; usedBytes: number; minDrivePasswordLength?: number };
 type P2PFile = { name: string; size: number; hash: string; rootHash: string; uploadedAt: string; isEncrypted: boolean; mimeType?: string; ownerWallet?: string };
 type Summary = { peerId: string; connectedPeers: number };
 type DownloadResult = { file: P2PFile; bytes: number[] };
+type PendingPayment = { orderId: string; approveUrl: string; planId: string; planName: string; priceUsd: number };
 
 declare global {
   interface Window {
@@ -55,6 +62,7 @@ declare global {
 const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
 const DEFAULT_MIN_DRIVE_PASSWORD_LENGTH = 12;
+const PAYPAL_BASE_URLS = ["http://127.0.0.1:8791", "http://54.166.171.208:8791"];
 const getBridge = () => window.electron || null;
 const clean = (v = "") => v.split("/").map((x) => x.trim()).filter(Boolean).join("/");
 const join = (...p: string[]) => clean(p.join("/"));
@@ -88,9 +96,60 @@ const formatDate = (value = "") => {
 const gradientCard = "border-white/10 bg-white/[0.055] shadow-2xl shadow-black/20 backdrop-blur-xl";
 const glow = "before:pointer-events-none before:absolute before:inset-0 before:rounded-[inherit] before:bg-gradient-to-br before:from-cyan-400/20 before:via-violet-500/10 before:to-emerald-400/10 before:opacity-70";
 
+function extractApproveUrl(data: any) {
+  return String(
+    data?.approveUrl ||
+    data?.approvalUrl ||
+    data?.checkoutUrl ||
+    data?.url ||
+    data?.links?.find?.((link: any) => String(link?.rel || "").toLowerCase() === "approve")?.href ||
+    ""
+  );
+}
+
+function extractOrderId(data: any) {
+  return String(data?.orderId || data?.id || data?.order?.id || "");
+}
+
+async function postPayPal(paths: string[], payload: Record<string, unknown>) {
+  let lastError = "PayPal service unavailable";
+  for (const baseUrl of PAYPAL_BASE_URLS) {
+    for (const path of paths) {
+      try {
+        const res = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+        return data;
+      } catch (e) {
+        lastError = err(e);
+      }
+    }
+  }
+  throw new Error(lastError);
+}
+
+async function copyText(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+}
+
 export default function DriveP2PAppPassword() {
   const electron = getBridge();
-  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [wallet, setWallet] = useState<WalletState | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [files, setFiles] = useState<P2PFile[]>([]);
   const [path, setPath] = useState("");
@@ -100,6 +159,9 @@ export default function DriveP2PAppPassword() {
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [preview, setPreview] = useState<{ file: P2PFile; url: string } | null>(null);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
 
   if (!electron) {
     return (
@@ -141,7 +203,8 @@ export default function DriveP2PAppPassword() {
   const quota = wallet?.plan?.quotaBytes || 0;
   const used = wallet?.usedBytes || 0;
   const pct = quota ? Math.min(100, (used / quota) * 100) : 0;
-  const peerState = summary?.connectedPeers ? "Live mesh" : "Local node";
+  const peerState = summary?.connectedPeers ? "Mesh online" : "Local node";
+  const paidPlans = (wallet?.plans || []).filter((plan) => plan.id !== "free");
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -157,7 +220,7 @@ export default function DriveP2PAppPassword() {
     const [s, f, w] = await Promise.all([
       electron.invoke<Summary>("p2p:networkSummary"),
       electron.invoke<P2PFile[]>("p2p:listFiles", { query: "" }),
-      electron.invoke<Wallet>("wallet:status"),
+      electron.invoke<WalletState>("wallet:status"),
     ]);
     setSummary(s);
     setFiles(Array.isArray(f) ? f : []);
@@ -178,7 +241,7 @@ export default function DriveP2PAppPassword() {
     setConnecting(true);
     try {
       const r = await connectWalletWithWalletConnect();
-      const w = await electron.invoke<Wallet>("wallet:connect", { address: r.address, loginMessage: r.loginMessage, signature: r.signature });
+      const w = await electron.invoke<WalletState>("wallet:connect", { address: r.address, loginMessage: r.loginMessage, signature: r.signature });
       setWallet(w);
       await refresh();
       toast.success("Wallet connected");
@@ -189,7 +252,7 @@ export default function DriveP2PAppPassword() {
     }
   };
   const disconnect = () => run(async () => {
-    setWallet(await electron.invoke<Wallet>("wallet:disconnect"));
+    setWallet(await electron.invoke<WalletState>("wallet:disconnect"));
     setFiles([]);
     setPath("");
   });
@@ -267,6 +330,63 @@ export default function DriveP2PAppPassword() {
     await refresh();
   });
 
+  const startPayPalPayment = async (plan: Plan) => {
+    if (!connected || !wallet?.address) {
+      toast.error("Connect wallet first");
+      return;
+    }
+    setPaymentBusy(true);
+    try {
+      const data = await postPayPal(["/paypal/create-order", "/create-order", "/paypal/create", "/create"], {
+        planId: plan.id,
+        plan: plan.id,
+        wallet: wallet.address,
+        walletAddress: wallet.address,
+        amount: plan.priceUsd,
+      });
+      const approveUrl = extractApproveUrl(data);
+      const orderId = extractOrderId(data);
+      if (!approveUrl || !orderId) throw new Error("PayPal did not return an approval link");
+      const pending = { orderId, approveUrl, planId: plan.id, planName: plan.name, priceUsd: plan.priceUsd };
+      setPendingPayment(pending);
+      await copyText(approveUrl);
+      toast.success("PayPal link copied");
+      await electron.invoke("system:open-external", { url: approveUrl });
+    } catch (e) {
+      toast.error(err(e));
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
+  const confirmPayPalPayment = async () => {
+    if (!pendingPayment || !wallet?.address) return;
+    setPaymentBusy(true);
+    try {
+      const data = await postPayPal(["/paypal/capture-order", "/capture-order", "/paypal/confirm", "/confirm"], {
+        orderId: pendingPayment.orderId,
+        id: pendingPayment.orderId,
+        planId: pendingPayment.planId,
+        plan: pendingPayment.planId,
+        wallet: wallet.address,
+        walletAddress: wallet.address,
+      });
+      await electron.invoke("wallet:setPlan", {
+        planId: pendingPayment.planId,
+        txHash: `paypal:${pendingPayment.orderId}`,
+        paidUntil: data?.paidUntil || data?.expiresAt || null,
+      });
+      setPendingPayment(null);
+      setUpgradeOpen(false);
+      await refresh();
+      toast.success("Plan upgraded");
+    } catch (e) {
+      toast.error(err(e));
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen overflow-hidden bg-[#05060a] text-zinc-50">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_10%_10%,rgba(34,211,238,0.18),transparent_30%),radial-gradient(circle_at_90%_0%,rgba(139,92,246,0.18),transparent_34%),radial-gradient(circle_at_50%_90%,rgba(16,185,129,0.14),transparent_32%)]" />
@@ -340,11 +460,18 @@ export default function DriveP2PAppPassword() {
                   </div>
                 </div>
                 <div className="min-w-64 rounded-3xl border border-white/10 bg-black/40 p-5">
-                  <p className="text-sm text-zinc-400">Storage usage</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm text-zinc-400">Storage usage</p>
+                    <Button size="sm" onClick={() => setUpgradeOpen(true)} className="bg-cyan-300 text-zinc-950 hover:bg-cyan-200">
+                      <CreditCard className="size-4" />
+                      Upgrade
+                    </Button>
+                  </div>
                   <div className="mt-3 flex items-end justify-between gap-4">
                     <div>
                       <p className="text-3xl font-semibold">{bytes(used)}</p>
                       <p className="text-xs text-zinc-500">of {quota ? bytes(quota) : "unlimited / unknown"}</p>
+                      <p className="mt-1 text-xs text-cyan-100">Plan: {wallet?.plan?.name || "Free"}</p>
                     </div>
                     <HardDrive className="size-9 text-cyan-200" />
                   </div>
@@ -514,6 +641,65 @@ export default function DriveP2PAppPassword() {
           </CardContent>
         </Card>
       </main>
+
+      {upgradeOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md" onClick={() => setUpgradeOpen(false)}>
+          <div className="w-full max-w-4xl overflow-hidden rounded-3xl border border-white/10 bg-zinc-950 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 border-b border-white/10 p-5">
+              <div>
+                <p className="text-xl font-semibold">Upgrade storage</p>
+                <p className="text-sm text-zinc-400">Choose a plan, pay with PayPal, then confirm after payment.</p>
+              </div>
+              <Button variant="outline" onClick={() => setUpgradeOpen(false)}><X className="size-4" />Close</Button>
+            </div>
+            <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-4">
+              {paidPlans.map((plan) => (
+                <Card key={plan.id} className={`border-white/10 bg-white/[0.055] ${pendingPayment?.planId === plan.id ? "ring-2 ring-cyan-300" : ""}`}>
+                  <CardContent className="space-y-4 p-5">
+                    <div>
+                      <p className="text-2xl font-semibold">{plan.name}</p>
+                      <p className="mt-1 text-sm text-zinc-400">{bytes(plan.quotaBytes)} secure storage</p>
+                    </div>
+                    <div>
+                      <p className="text-3xl font-semibold">${plan.priceUsd}</p>
+                      <p className="text-xs text-zinc-500">per month</p>
+                    </div>
+                    <Button className="w-full bg-cyan-300 text-zinc-950 hover:bg-cyan-200" disabled={!connected || paymentBusy} onClick={() => startPayPalPayment(plan)}>
+                      <CreditCard className="size-4" />
+                      Choose plan
+                    </Button>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+
+            {pendingPayment && (
+              <div className="border-t border-white/10 bg-cyan-300/5 p-5">
+                <div className="mb-4 rounded-2xl border border-cyan-300/20 bg-black/30 p-4">
+                  <p className="font-semibold">Pending PayPal payment</p>
+                  <p className="mt-1 text-sm text-zinc-400">Plan: {pendingPayment.planName} · Order: {pendingPayment.orderId}</p>
+                  <p className="mt-1 break-all text-xs text-cyan-100">{pendingPayment.approveUrl}</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={() => electron.invoke("system:open-external", { url: pendingPayment.approveUrl })} disabled={paymentBusy}>
+                    <ExternalLink className="size-4" />
+                    Open PayPal
+                  </Button>
+                  <Button variant="outline" onClick={async () => { await copyText(pendingPayment.approveUrl); toast.success("Payment link copied"); }} disabled={paymentBusy}>
+                    <Copy className="size-4" />
+                    Copy payment link
+                  </Button>
+                  <Button className="bg-emerald-400 text-zinc-950 hover:bg-emerald-300" onClick={confirmPayPalPayment} disabled={paymentBusy}>
+                    <CheckCircle2 className="size-4" />
+                    Confirm Payment
+                  </Button>
+                  <Button variant="destructive" onClick={() => setPendingPayment(null)} disabled={paymentBusy}>Cancel pending</Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {preview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-md" onClick={() => setPreview(null)}>
