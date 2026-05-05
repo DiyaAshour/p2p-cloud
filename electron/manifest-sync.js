@@ -30,6 +30,10 @@ function normalizeWallet(address = '') {
   return String(address || '').trim().toLowerCase();
 }
 
+function sanitizeFolder(value = '') {
+  return String(value || '').trim().replace(/[\\/]+/g, ' / ').slice(0, 80);
+}
+
 function sanitizeEncryptionMetadata(encryption) {
   if (!encryption || typeof encryption !== 'object') return null;
   const clean = {};
@@ -43,11 +47,13 @@ function sanitizeManifest(manifest) {
   return {
     id: manifest.id,
     name: manifest.name,
+    folder: sanitizeFolder(manifest.folder),
     size: manifest.size,
     storedSize: manifest.storedSize,
     hash: manifest.hash,
     rootHash: manifest.rootHash,
     uploadedAt: manifest.uploadedAt,
+    updatedAt: manifest.updatedAt || manifest.uploadedAt,
     isEncrypted: Boolean(manifest.isEncrypted),
     encryption: sanitizeEncryptionMetadata(manifest.encryption),
     mimeType: manifest.mimeType || 'application/octet-stream',
