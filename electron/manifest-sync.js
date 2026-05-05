@@ -1,161 +1,116 @@
-import http from 'node:http';
-import https from 'node:https';
+const DEFAULT_MANIFEST_SYNC_URL = 'http://54.166.171.208:8790';
 
-const DEFAULT_TIMEOUT_MS = 12000;
-const LOCAL_SYNC_URL = 'http://127.0.0.1:8790';
-const HOSTED_SYNC_URL = 'http://54.166.171.208:8790';
-const ALLOWED_ENCRYPTION_KEYS = new Set([
-  'version',
-  'algorithm',
-  'keySource',
-  'kdf',
-  'kdfIterations',
-  'salt',
-  'iv',
-  'authTag',
-  'originalHash',
-  'originalSize',
-]);
-
-function configuredSyncUrl() {
-  return process.env.P2P_MANIFEST_SYNC_URL || process.env.VITE_P2P_MANIFEST_SYNC_URL || '';
-}
-
-function candidateSyncUrls() {
-  const configured = configuredSyncUrl();
-  return [...new Set([configured, LOCAL_SYNC_URL, HOSTED_SYNC_URL].filter(Boolean))];
+function normalizeBaseUrl(value = '') {
+  return String(value || '').trim().replace(/\/$/, '');
 }
 
 function normalizeWallet(address = '') {
   return String(address || '').trim().toLowerCase();
 }
 
-function sanitizeFolder(value = '') {
-  return String(value || '').trim().replace(/[\\/]+/g, ' / ').slice(0, 80);
+function validWallet(address = '') {
+  return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));
 }
 
-function sanitizeEncryptionMetadata(encryption) {
-  if (!encryption || typeof encryption !== 'object') return null;
-  const clean = {};
-  for (const key of ALLOWED_ENCRYPTION_KEYS) {
-    if (encryption[key] !== undefined && encryption[key] !== null) clean[key] = encryption[key];
-  }
-  return Object.keys(clean).length ? clean : null;
-}
-
-function sanitizeManifest(manifest) {
-  return {
-    id: manifest.id,
-    name: manifest.name,
-    folder: sanitizeFolder(manifest.folder),
-    size: manifest.size,
-    storedSize: manifest.storedSize,
-    hash: manifest.hash,
-    rootHash: manifest.rootHash,
-    uploadedAt: manifest.uploadedAt,
-    updatedAt: manifest.updatedAt || manifest.uploadedAt,
-    isEncrypted: Boolean(manifest.isEncrypted),
-    encryption: sanitizeEncryptionMetadata(manifest.encryption),
-    mimeType: manifest.mimeType || 'application/octet-stream',
-    chunkSize: manifest.chunkSize,
-    totalChunks: manifest.totalChunks,
-    ownerNodeId: manifest.ownerNodeId,
-    ownerWallet: normalizeWallet(manifest.ownerWallet),
-    planId: manifest.planId || 'free',
-    replicas: Array.isArray(manifest.replicas) ? manifest.replicas : [],
-    chunks: Array.isArray(manifest.chunks) ? manifest.chunks : [],
-  };
-}
-
-async function requestJson(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const body = options.body || '';
-    const client = parsed.protocol === 'https:' ? https : http;
-    const req = client.request({
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port,
-      path: `${parsed.pathname}${parsed.search}`,
-      method: options.method || 'GET',
-      timeout: DEFAULT_TIMEOUT_MS,
-      headers: {
-        'content-type': 'application/json',
-        'accept': 'application/json',
-        'content-length': Buffer.byteLength(body),
-        ...(options.headers || {}),
-      },
-    }, (res) => {
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => {
-        const raw = Buffer.concat(chunks).toString('utf8');
-        if ((res.statusCode || 0) < 200 || (res.statusCode || 0) >= 300) {
-          reject(new Error(`Manifest sync failed: ${res.statusCode} ${res.statusMessage || ''} ${raw}`.trim()));
-          return;
-        }
-        try {
-          resolve(raw ? JSON.parse(raw) : {});
-        } catch {
-          reject(new Error('Manifest sync returned invalid JSON'));
-        }
-      });
-    });
-    req.on('timeout', () => {
-      req.destroy(new Error('Manifest sync request timed out'));
-    });
-    req.on('error', reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-async function requestFirstAvailable(path, options = {}) {
-  const errors = [];
-  for (const baseUrl of candidateSyncUrls()) {
-    const url = `${baseUrl.replace(/\/$/, '')}${path}`;
-    try {
-      const data = await requestJson(url, options);
-      return { data, baseUrl };
-    } catch (error) {
-      errors.push(`${baseUrl}: ${error?.message || error}`);
-    }
-  }
-  throw new Error(errors.join(' | ') || 'No manifest sync endpoint available');
-}
-
-export function manifestSyncUrl() {
-  return candidateSyncUrls()[0] || '';
+function manifestSyncBaseUrl() {
+  return normalizeBaseUrl(
+    process.env.P2P_MANIFEST_SYNC_URL ||
+    process.env.MANIFEST_SYNC_URL ||
+    process.env.VITE_MANIFEST_SYNC_URL ||
+    DEFAULT_MANIFEST_SYNC_URL
+  );
 }
 
 export function isManifestSyncEnabled() {
-  return candidateSyncUrls().length > 0;
+  const disabled = String(process.env.P2P_MANIFEST_SYNC_DISABLED || '').toLowerCase();
+  return disabled !== '1' && disabled !== 'true' && Boolean(manifestSyncBaseUrl());
 }
 
-export async function pullWalletManifests(ownerWallet) {
-  const wallet = normalizeWallet(ownerWallet);
-  if (!wallet) return [];
-  const path = `/wallet/${encodeURIComponent(wallet)}/manifests`;
-  const { data, baseUrl } = await requestFirstAvailable(path, { method: 'GET' });
-  console.log('[manifest-sync] pull ok from', baseUrl);
-  return Array.isArray(data?.manifests) ? data.manifests.map(sanitizeManifest) : [];
+function hasEncryptionMetadata(manifest = {}) {
+  return Boolean(
+    manifest.encryption &&
+    manifest.encryption.algorithm &&
+    manifest.encryption.keySource &&
+    manifest.encryption.salt &&
+    manifest.encryption.iv &&
+    manifest.encryption.authTag
+  );
 }
 
-export async function pushWalletManifest(manifest) {
-  const clean = sanitizeManifest(manifest);
-  const path = `/wallet/${encodeURIComponent(clean.ownerWallet)}/manifests`;
-  const { data, baseUrl } = await requestFirstAvailable(path, {
+function isBadEncryptedManifest(manifest = {}) {
+  return manifest?.isEncrypted === true && !hasEncryptionMetadata(manifest);
+}
+
+function sanitizePulledManifest(manifest = {}) {
+  if (!manifest || typeof manifest !== 'object') return null;
+  if (!manifest.hash || !manifest.ownerWallet) return null;
+  if (isBadEncryptedManifest(manifest)) return null;
+  return {
+    ...manifest,
+    ownerWallet: normalizeWallet(manifest.ownerWallet),
+    visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),
+    isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
+  };
+}
+
+async function parseJsonResponse(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${response.status}`);
+  return data;
+}
+
+export async function pullWalletManifests(walletAddress) {
+  const wallet = normalizeWallet(walletAddress);
+  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync pull');
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests`);
+  const data = await parseJsonResponse(response);
+  const incoming = Array.isArray(data.manifests) ? data.manifests : [];
+  const clean = [];
+  let skipped = 0;
+  for (const item of incoming) {
+    const manifest = sanitizePulledManifest(item);
+    if (manifest) clean.push(manifest);
+    else skipped += 1;
+  }
+  if (skipped) console.warn(`[manifest-sync] skipped ${skipped} invalid encrypted manifest(s) from remote`);
+  return clean;
+}
+
+export async function pushWalletManifest(manifest = {}) {
+  const wallet = normalizeWallet(manifest.ownerWallet);
+  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync push');
+  if (isBadEncryptedManifest(manifest)) {
+    throw new Error('Refusing to sync encrypted manifest without encryption metadata');
+  }
+  const payload = {
+    manifest: {
+      ...manifest,
+      ownerWallet: wallet,
+      visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),
+      isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
+    },
+  };
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests`, {
     method: 'POST',
-    body: JSON.stringify({ manifest: clean }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
   });
-  console.log('[manifest-sync] push ok to', baseUrl);
-  return data;
+  return parseJsonResponse(response);
 }
 
-export async function deleteWalletManifest(ownerWallet, hash) {
-  const wallet = normalizeWallet(ownerWallet);
-  const path = `/wallet/${encodeURIComponent(wallet)}/manifests/${encodeURIComponent(hash)}`;
-  const { data, baseUrl } = await requestFirstAvailable(path, { method: 'DELETE' });
-  console.log('[manifest-sync] delete ok from', baseUrl);
-  return data;
+export async function deleteWalletManifest(walletAddress, hash) {
+  const wallet = normalizeWallet(walletAddress);
+  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync delete');
+  if (!hash) throw new Error('Manifest hash required for delete');
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests/${encodeURIComponent(hash)}`, {
+    method: 'DELETE',
+  });
+  return parseJsonResponse(response);
+}
+
+export async function searchPublicManifests(query = '') {
+  const q = String(query || '').trim();
+  const response = await fetch(`${manifestSyncBaseUrl()}/public/manifests?q=${encodeURIComponent(q)}`);
+  const data = await parseJsonResponse(response);
+  return Array.isArray(data.manifests) ? data.manifests : [];
 }
