@@ -41,6 +41,7 @@ let manifestsPath = null;
 let walletPath = null;
 let manifests = [];
 let walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+let lastSyncStatus = { ok: false, lastPulledAt: null, lastPushedAt: null, error: null, remoteFiles: 0 };
 
 function normalizeWallet(address = '') { return String(address || '').trim().toLowerCase(); }
 function activeWallet() { return normalizeWallet(walletState.address); }
@@ -55,6 +56,8 @@ function validateDrivePassword(drivePassword) { const password = String(drivePas
 function drivePasswordFromPayload(payload = {}) { return validateDrivePassword(payload.drivePassword); }
 function splitIntoChunks(buffer) { const chunks = []; for (let offset = 0; offset < buffer.length; offset += CHUNK_SIZE_BYTES) { const data = buffer.slice(offset, offset + CHUNK_SIZE_BYTES); chunks.push({ index: chunks.length, size: data.length, data, hash: hashBufferHex(data) }); } return chunks; }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
+function hasEncryptionMetadata(manifest = {}) { return Boolean(manifest.encryption && manifest.encryption.algorithm && manifest.encryption.keySource && manifest.encryption.salt && manifest.encryption.iv && manifest.encryption.authTag); }
+function isUsableManifest(manifest = {}) { return !(manifest.isEncrypted === true && !hasEncryptionMetadata(manifest)); }
 
 function parseLoginMessageTime(message = '') {
   const match = String(message).match(/^Time:\s*(.+)$/im);
@@ -135,27 +138,48 @@ function loadWallet() {
 }
 
 function persistWallet() { ensureDataDir(); const { encryptionSecret, loginSignature, ...safeWallet } = walletState; fs.writeFileSync(walletPath, JSON.stringify({ ...safeWallet, encryptionKeySource: ENCRYPTION_KEY_SOURCE }, null, 2), 'utf8'); }
-function loadManifests() { ensureDataDir(); try { const parsed = JSON.parse(fs.readFileSync(manifestsPath, 'utf8')); manifests = Array.isArray(parsed) ? parsed : []; } catch { manifests = []; } }
-function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, JSON.stringify(manifests, null, 2), 'utf8'); }
+function loadManifests() { ensureDataDir(); try { const parsed = JSON.parse(fs.readFileSync(manifestsPath, 'utf8')); manifests = Array.isArray(parsed) ? parsed.filter(isUsableManifest) : []; persistManifests(); } catch { manifests = []; } }
+function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, JSON.stringify(manifests.filter(isUsableManifest), null, 2), 'utf8'); }
 function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
-function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest) : []; }
+function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }
 function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
-function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes) }; }
+function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }
 function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free; if (totalStoredBytesForWallet() + nextBytes > plan.quotaBytes) throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`); }
 function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
 
 async function syncPull() {
+  if (!isManifestSyncEnabled() || !walletState.connected || !walletState.address) return { ok: false, skipped: true };
   try {
-    if (!isManifestSyncEnabled() || !walletState.connected || !walletState.address) return;
     const remote = await pullWalletManifests(activeWallet());
-    if (!Array.isArray(remote)) return;
-    const map = new Map(manifests.map((m) => [`${normalizeWallet(m.ownerWallet)}:${m.hash}`, m]));
-    for (const m of remote) map.set(`${normalizeWallet(m.ownerWallet)}:${m.hash}`, { ...m, ownerWallet: normalizeWallet(m.ownerWallet) });
-    manifests = Array.from(map.values());
+    if (!Array.isArray(remote)) return { ok: false, skipped: true };
+    const map = new Map(manifests.filter(isUsableManifest).map((m) => [`${normalizeWallet(m.ownerWallet)}:${m.hash}`, m]));
+    for (const m of remote.filter(isUsableManifest)) {
+      const key = `${normalizeWallet(m.ownerWallet)}:${m.hash}`;
+      const local = map.get(key);
+      map.set(key, { ...(local || {}), ...m, ownerWallet: normalizeWallet(m.ownerWallet), encryption: m.encryption || local?.encryption || null });
+    }
+    manifests = Array.from(map.values()).filter(isUsableManifest);
     persistManifests();
-  } catch (e) { console.warn('[manifest-sync] pull failed:', e?.message || e); }
+    lastSyncStatus = { ...lastSyncStatus, ok: true, lastPulledAt: new Date().toISOString(), error: null, remoteFiles: remote.length };
+    return { ok: true, remoteFiles: remote.length };
+  } catch (e) {
+    lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) };
+    console.warn('[manifest-sync] pull failed:', e?.message || e);
+    throw new Error(`Manifest sync pull failed: ${e?.message || e}`);
+  }
 }
-async function syncPush(manifest) { try { if (isManifestSyncEnabled()) await pushWalletManifest(manifest); } catch (e) { console.warn('[manifest-sync] push failed:', e?.message || e); } }
+async function syncPush(manifest) {
+  if (!isManifestSyncEnabled()) return { ok: false, skipped: true };
+  try {
+    const result = await pushWalletManifest(manifest);
+    lastSyncStatus = { ...lastSyncStatus, ok: true, lastPushedAt: new Date().toISOString(), error: null };
+    return result || { ok: true };
+  } catch (e) {
+    lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) };
+    console.warn('[manifest-sync] push failed:', e?.message || e);
+    throw new Error(`File was saved locally, but cross-device sync failed: ${e?.message || e}`);
+  }
+}
 async function syncDelete(ownerWallet, hash) { try { if (isManifestSyncEnabled()) await deleteWalletManifest(ownerWallet, hash); } catch (e) { console.warn('[manifest-sync] delete failed:', e?.message || e); } }
 
 function ensureTransport(options = {}) {
@@ -171,7 +195,7 @@ function networkSummary() {
   const node = ensureTransport({});
   const own = walletManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), wallet: walletSummary() };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), wallet: walletSummary(), sync: lastSyncStatus };
 }
 
 function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
@@ -194,8 +218,8 @@ ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
 });
 ipcMain.handle('wallet:disconnect', async () => { walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
-ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); await syncPull(); return networkSummary(); });
-ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
+ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) await syncPull(); return networkSummary(); });
+ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
 
 ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   const node = ensureTransport({});
@@ -211,7 +235,7 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   const tree = buildMerkleTree(chunks.map((c) => c.hash));
   const storedHash = hashBufferHex(storedBuffer);
   const fileReplicas = new Set([node.peerId]);
-  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: [] };
+  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: [] };
 
   for (const chunk of chunks) {
     const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };
@@ -226,17 +250,18 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   persistManifests();
   persistWallet();
   await syncPush(manifest);
-  return { ok: true, file: manifest, summary: networkSummary() };
+  await syncPull();
+  return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus };
 });
 
-ipcMain.handle('p2p:download', async (_event, payload = {}) => { assertVerifiedWallet(); const node = ensureTransport({}); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const buffers = []; for (const meta of [...(manifest.chunks || [])].sort((a, b) => a.index - b.index)) { const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash); const chunk = local || await node.fetchChunkFromNetwork(meta.hash); node.storeLocalChunk?.(chunk); const buffer = Buffer.from(chunk.data, 'base64'); if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`); buffers.push(buffer); } const storedBuffer = Buffer.concat(buffers); if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed'); const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null; const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer; return { ok: true, file: manifest, bytes: Array.from(outputBuffer) }; });
-ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
-ipcMain.handle('p2p:networkSummary', async () => networkSummary());
+ipcMain.handle('p2p:download', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const node = ensureTransport({}); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const buffers = []; for (const meta of [...(manifest.chunks || [])].sort((a, b) => a.index - b.index)) { const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash); const chunk = local || await node.fetchChunkFromNetwork(meta.hash); node.storeLocalChunk?.(chunk); const buffer = Buffer.from(chunk.data, 'base64'); if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`); buffers.push(buffer); } const storedBuffer = Buffer.concat(buffers); if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed'); const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null; const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer; return { ok: true, file: manifest, bytes: Array.from(outputBuffer) }; });
+ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
+ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) await syncPull(); return networkSummary(); });
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const chunk = manifest.chunks?.[0]; if (!chunk) throw new Error('No chunks available for proof'); return { ok: true, proof: { ownerWallet: activeWallet(), rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, encrypted: Boolean(manifest.isEncrypted), keySource: manifest.encryption?.keySource || null, preparedAt: new Date().toISOString() } }; });
 
-app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); await syncPull(); createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
+app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) await syncPull(); createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
 app.on('before-quit', () => { persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
 app.on('window-all-closed', () => {});
