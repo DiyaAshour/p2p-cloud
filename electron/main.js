@@ -9,6 +9,7 @@ import { buildMerkleTree, getMerkleProof } from './merkle-engine.js';
 import { startP2PTransport } from './p2p-transport.js';
 import { isManifestSyncEnabled, pullWalletManifests, pushWalletManifest, deleteWalletManifest } from './manifest-sync.js';
 import { replicateChunk, repairManifests, countUnderReplicatedChunks } from './replication-engine.js';
+import { putChunkToSafetyPeer, getChunkFromSafetyPeer, safetyPeerUrl } from './safety-peer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -195,7 +196,7 @@ function networkSummary() {
   const node = ensureTransport({});
   const own = walletManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), wallet: walletSummary(), sync: lastSyncStatus };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), wallet: walletSummary(), sync: lastSyncStatus };
 }
 
 function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
@@ -240,8 +241,14 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   for (const chunk of chunks) {
     const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };
     const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
+    try {
+      await putChunkToSafetyPeer(chunkPayload, node.peerId);
+      replicas.push('aws-safety-peer');
+    } catch (error) {
+      throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+    }
     for (const peerId of replicas) fileReplicas.add(peerId);
-    manifest.chunks.push({ index: chunk.index, hash: chunk.hash, size: chunk.size, replicas, proof: getMerkleProof(tree, chunk.index) });
+    manifest.chunks.push({ index: chunk.index, hash: chunk.hash, size: chunk.size, replicas: unique(replicas), proof: getMerkleProof(tree, chunk.index) });
   }
 
   manifest.replicas = unique(Array.from(fileReplicas));
@@ -254,7 +261,35 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus };
 });
 
-ipcMain.handle('p2p:download', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const node = ensureTransport({}); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const buffers = []; for (const meta of [...(manifest.chunks || [])].sort((a, b) => a.index - b.index)) { const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash); const chunk = local || await node.fetchChunkFromNetwork(meta.hash); node.storeLocalChunk?.(chunk); const buffer = Buffer.from(chunk.data, 'base64'); if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`); buffers.push(buffer); } const storedBuffer = Buffer.concat(buffers); if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed'); const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null; const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer; return { ok: true, file: manifest, bytes: Array.from(outputBuffer) }; });
+ipcMain.handle('p2p:download', async (_event, payload = {}) => {
+  assertVerifiedWallet();
+  await syncPull();
+  const node = ensureTransport({});
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this wallet');
+  const buffers = [];
+  for (const meta of [...(manifest.chunks || [])].sort((a, b) => a.index - b.index)) {
+    const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+    let chunk = local;
+    if (!chunk) {
+      try {
+        chunk = await node.fetchChunkFromNetwork(meta.hash);
+      } catch (error) {
+        console.warn('[p2p:download] network fetch failed, trying safety peer:', error?.message || error);
+        chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+      }
+    }
+    node.storeLocalChunk?.(chunk);
+    const buffer = Buffer.from(chunk.data, 'base64');
+    if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
+    buffers.push(buffer);
+  }
+  const storedBuffer = Buffer.concat(buffers);
+  if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed');
+  const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
+  const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer;
+  return { ok: true, file: manifest, bytes: Array.from(outputBuffer) };
+});
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
 ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) await syncPull(); return networkSummary(); });
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
