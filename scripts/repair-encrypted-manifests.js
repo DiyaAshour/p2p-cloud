@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const MANIFEST_SYNC_URL = (process.env.MANIFEST_SYNC_URL || process.env.P2P_MANIFEST_SYNC_URL || 'http://54.166.171.208:8790').replace(/\/$/, '');
+const AUTO_MODE = process.env.P2P_AUTO_REPAIR_MANIFESTS !== '0';
 
 function candidateManifestPaths() {
   const home = os.homedir();
@@ -23,7 +24,7 @@ function loadLocalManifests() {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (Array.isArray(parsed)) return { file, manifests: parsed };
   }
-  throw new Error('Could not find local manifests.json. Set P2P_MANIFESTS_PATH to the file path.');
+  return { file: null, manifests: [] };
 }
 
 function normalizeWallet(address = '') {
@@ -36,6 +37,9 @@ function isRepairable(manifest) {
     manifest.isEncrypted === true &&
     manifest.encryption &&
     manifest.encryption.algorithm &&
+    manifest.encryption.salt &&
+    manifest.encryption.iv &&
+    manifest.encryption.authTag &&
     manifest.hash &&
     normalizeWallet(manifest.ownerWallet)
   );
@@ -55,6 +59,11 @@ async function pushManifest(manifest) {
 
 async function main() {
   const { file, manifests } = loadLocalManifests();
+  if (!file) {
+    console.log('[repair-manifests] no local manifests.json found; skipping auto repair');
+    return;
+  }
+
   const repairable = manifests.filter(isRepairable);
   console.log(`[repair-manifests] source: ${file}`);
   console.log(`[repair-manifests] manifest-sync: ${MANIFEST_SYNC_URL}`);
@@ -62,15 +71,19 @@ async function main() {
 
   let ok = 0;
   for (const manifest of repairable) {
-    await pushManifest(manifest);
-    ok += 1;
-    console.log(`[repair-manifests] pushed ${ok}/${repairable.length}: ${manifest.name} ${manifest.hash}`);
+    try {
+      await pushManifest(manifest);
+      ok += 1;
+      console.log(`[repair-manifests] pushed ${ok}/${repairable.length}: ${manifest.name} ${manifest.hash}`);
+    } catch (error) {
+      console.warn(`[repair-manifests] skipped ${manifest.name || manifest.hash}: ${error?.message || error}`);
+    }
   }
 
-  console.log(`[repair-manifests] done. Reopen the app, reconnect wallet, then try download again.`);
+  console.log(`[repair-manifests] done. repaired=${ok}/${repairable.length}`);
 }
 
 main().catch((error) => {
-  console.error(`[repair-manifests] failed: ${error?.message || error}`);
-  process.exit(1);
+  console.warn(`[repair-manifests] ${AUTO_MODE ? 'auto repair skipped' : 'repair failed'}: ${error?.message || error}`);
+  process.exit(AUTO_MODE ? 0 : 1);
 });
