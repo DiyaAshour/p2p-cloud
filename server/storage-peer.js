@@ -16,6 +16,10 @@ const CHUNKS_DIR = path.join(DATA_DIR, 'chunks');
 const INDEX_PATH = path.join(DATA_DIR, 'chunk-index.json');
 const PEER_ID_PATH = path.join(DATA_DIR, 'peer-id.txt');
 const HEARTBEAT_MS = Number(process.env.STORAGE_PEER_HEARTBEAT_MS || 30000);
+const MAX_CHUNK_BYTES = Number(process.env.STORAGE_PEER_MAX_CHUNK_BYTES || 2 * 1024 * 1024);
+const MAX_MESSAGE_BYTES = Number(process.env.STORAGE_PEER_MAX_MESSAGE_BYTES || Math.ceil(MAX_CHUNK_BYTES * 1.45) + 8192);
+const MAX_PUTS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_PUTS_PER_MINUTE || 240);
+const MAX_GETS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_GETS_PER_MINUTE || 600);
 const PUBLIC_DISPLAY_URL = 'Network route';
 const PUBLIC_ROLE = 'safety-peer';
 
@@ -72,38 +76,73 @@ function writeIndex(index) {
 }
 
 function chunkPath(hash) {
-  return path.join(CHUNKS_DIR, `${String(hash).replace(/[^a-fA-F0-9]/g, '')}.json`);
+  const clean = String(hash || '').replace(/[^a-fA-F0-9]/g, '');
+  if (!/^[a-fA-F0-9]{64}$/.test(clean)) throw new Error('Invalid chunk hash');
+  return path.join(CHUNKS_DIR, `${clean}.json`);
+}
+
+function sha256Hex(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function peerBucket(socket, type) {
+  const now = Date.now();
+  const key = type === 'get' ? 'getRate' : 'putRate';
+  const limit = type === 'get' ? MAX_GETS_PER_MINUTE : MAX_PUTS_PER_MINUTE;
+  const current = socket[key] || { startedAt: now, count: 0 };
+  if (now - current.startedAt > 60_000) {
+    current.startedAt = now;
+    current.count = 0;
+  }
+  current.count += 1;
+  socket[key] = current;
+  if (current.count > limit) throw new Error(`Rate limit exceeded for chunk:${type}`);
+}
+
+function validateChunk(chunk) {
+  if (!chunk?.hash || !chunk?.data) throw new Error('chunk.hash and chunk.data are required');
+  const hash = String(chunk.hash).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid chunk hash');
+  if (typeof chunk.data !== 'string') throw new Error('chunk.data must be base64');
+  const data = Buffer.from(chunk.data, 'base64');
+  if (!data.length) throw new Error('chunk.data is empty');
+  if (data.length > MAX_CHUNK_BYTES) throw new Error(`chunk too large: ${data.length} bytes`);
+  if (sha256Hex(data) !== hash) throw new Error('chunk hash mismatch');
+  const size = Number(chunk.size || data.length);
+  if (!Number.isFinite(size) || size < 0 || size !== data.length) throw new Error('chunk size mismatch');
+  const index = Number(chunk.index || 0);
+  if (!Number.isInteger(index) || index < 0) throw new Error('Invalid chunk index');
+  return { hash, data: chunk.data, index, size, ownerWallet: String(chunk.ownerWallet || '').toLowerCase(), encrypted: Boolean(chunk.encrypted) };
 }
 
 function storeChunk(chunk, fromPeerId = '') {
-  if (!chunk?.hash || !chunk?.data) throw new Error('chunk.hash and chunk.data are required');
+  const clean = validateChunk(chunk);
   const index = readIndex();
-  const clean = {
-    hash: String(chunk.hash),
-    data: String(chunk.data),
-    index: Number(chunk.index || 0),
-    size: Number(chunk.size || 0),
-    ownerWallet: String(chunk.ownerWallet || '').toLowerCase(),
+  const record = {
+    ...clean,
     storedAt: new Date().toISOString(),
     fromPeerId,
   };
-  fs.writeFileSync(chunkPath(clean.hash), JSON.stringify(clean), 'utf8');
-  index[clean.hash] = {
-    hash: clean.hash,
-    size: clean.size,
-    ownerWallet: clean.ownerWallet,
-    storedAt: clean.storedAt,
+  fs.writeFileSync(chunkPath(record.hash), JSON.stringify(record), 'utf8');
+  index[record.hash] = {
+    hash: record.hash,
+    size: record.size,
+    ownerWallet: record.ownerWallet,
+    encrypted: record.encrypted,
+    storedAt: record.storedAt,
     fromPeerId,
   };
   writeIndex(index);
-  return clean;
+  return record;
 }
 
 function loadChunk(hash) {
   const file = chunkPath(hash);
   if (!fs.existsSync(file)) return null;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    const chunk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    validateChunk(chunk);
+    return chunk;
   } catch {
     return null;
   }
@@ -116,6 +155,12 @@ function send(socket, message) {
 }
 
 function handlePeerMessage(socket, raw) {
+  if (Buffer.byteLength(raw) > MAX_MESSAGE_BYTES) {
+    send(socket, { type: 'error', error: 'Message too large' });
+    socket.close(1009, 'Message too large');
+    return;
+  }
+
   let message;
   try {
     message = JSON.parse(raw.toString());
@@ -125,13 +170,13 @@ function handlePeerMessage(socket, raw) {
   }
 
   if (message.fromPeerId) {
-    socket.remotePeerId = message.fromPeerId;
-    peers.set(message.fromPeerId, socket);
+    socket.remotePeerId = String(message.fromPeerId).slice(0, 128);
+    peers.set(socket.remotePeerId, socket);
   }
 
   if (message.type === 'peer:hello') {
-    socket.remotePeerId = message.fromPeerId;
-    peers.set(message.fromPeerId, socket);
+    socket.remotePeerId = String(message.fromPeerId || '').slice(0, 128);
+    peers.set(socket.remotePeerId, socket);
     send(socket, {
       type: 'peer:hello',
       fromPeerId: PEER_ID,
@@ -144,6 +189,7 @@ function handlePeerMessage(socket, raw) {
 
   if (message.type === 'chunk:put') {
     try {
+      peerBucket(socket, 'put');
       const chunk = storeChunk(message.payload?.chunk, message.fromPeerId || 'unknown');
       send(socket, {
         id: crypto.randomUUID(),
@@ -168,29 +214,42 @@ function handlePeerMessage(socket, raw) {
   }
 
   if (message.type === 'chunk:get') {
-    const chunkHash = message.payload?.chunkHash;
-    const chunk = chunkHash ? loadChunk(chunkHash) : null;
-    if (chunk) {
+    try {
+      peerBucket(socket, 'get');
+      const chunkHash = String(message.payload?.chunkHash || '').toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(chunkHash)) throw new Error('Invalid chunk hash');
+      const chunk = loadChunk(chunkHash);
+      if (chunk) {
+        send(socket, {
+          id: crypto.randomUUID(),
+          type: 'chunk:found',
+          fromPeerId: PEER_ID,
+          toPeerId: message.fromPeerId,
+          createdAt: Date.now(),
+          payload: { chunk },
+        });
+        console.log('[storage-peer] served chunk', chunkHash, 'to', message.fromPeerId || 'unknown');
+        return;
+      }
       send(socket, {
         id: crypto.randomUUID(),
-        type: 'chunk:found',
+        type: 'chunk:not-found',
         fromPeerId: PEER_ID,
         toPeerId: message.fromPeerId,
         createdAt: Date.now(),
-        payload: { chunk },
+        payload: { chunkHash },
       });
-      console.log('[storage-peer] served chunk', chunkHash, 'to', message.fromPeerId || 'unknown');
-      return;
+      console.log('[storage-peer] missing chunk', chunkHash);
+    } catch (error) {
+      send(socket, {
+        id: crypto.randomUUID(),
+        type: 'chunk:error',
+        fromPeerId: PEER_ID,
+        toPeerId: message.fromPeerId,
+        createdAt: Date.now(),
+        error: error?.message || 'Failed to read chunk',
+      });
     }
-    send(socket, {
-      id: crypto.randomUUID(),
-      type: 'chunk:not-found',
-      fromPeerId: PEER_ID,
-      toPeerId: message.fromPeerId,
-      createdAt: Date.now(),
-      payload: { chunkHash },
-    });
-    console.log('[storage-peer] missing chunk', chunkHash);
   }
 }
 
@@ -227,7 +286,7 @@ function connectBootstrap() {
 }
 
 ensureDirs();
-const server = new WebSocketServer({ host: HOST, port: PORT });
+const server = new WebSocketServer({ host: HOST, port: PORT, maxPayload: MAX_MESSAGE_BYTES });
 server.on('connection', (socket) => {
   socket.isAlive = true;
   socket.on('pong', () => { socket.isAlive = true; });
@@ -262,3 +321,4 @@ console.log(`[storage-peer] displayName: ${PEER_NAME}`);
 console.log(`[storage-peer] listening on ws://${HOST}:${PORT}`);
 console.log(`[storage-peer] advertising ${PUBLIC_URL}`);
 console.log(`[storage-peer] chunks: ${CHUNKS_DIR}`);
+console.log(`[storage-peer] max chunk bytes: ${MAX_CHUNK_BYTES}`);
