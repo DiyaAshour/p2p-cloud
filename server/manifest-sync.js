@@ -9,6 +9,7 @@ const DEFAULT_PORT = Number(process.env.MANIFEST_SYNC_PORT || process.env.PORT |
 const DEFAULT_HOST = process.env.MANIFEST_SYNC_HOST || '0.0.0.0';
 const DEFAULT_DATA_DIR = process.env.MANIFEST_SYNC_DATA_DIR || path.join(__dirname, '..', 'sync-data');
 const MAX_BODY_BYTES = Number(process.env.MANIFEST_SYNC_MAX_BODY_BYTES || 10 * 1024 * 1024);
+const PUBLIC_SEARCH_LIMIT = Number(process.env.MANIFEST_SYNC_PUBLIC_SEARCH_LIMIT || 100);
 const ALLOWED_ENCRYPTION_KEYS = new Set([
   'version',
   'algorithm',
@@ -28,6 +29,16 @@ function normalizeWallet(address = '') {
 
 function validWallet(address = '') {
   return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));
+}
+
+function sanitizeVisibility(value, isEncrypted) {
+  if (!isEncrypted && String(value || 'public').toLowerCase() === 'private') return 'private';
+  if (!isEncrypted) return 'public';
+  return String(value || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+}
+
+function isPublicManifest(manifest = {}) {
+  return manifest.visibility === 'public' || manifest.isPublic === true || manifest.isEncrypted === false;
 }
 
 function sanitizeEncryptionMetadata(encryption) {
@@ -64,6 +75,8 @@ function createStore(dataDir) {
 function sanitizeManifest(manifest = {}, wallet) {
   const hash = String(manifest.hash || '').trim();
   if (!hash) throw new Error('manifest.hash is required');
+  const isEncrypted = Boolean(manifest.isEncrypted);
+  const visibility = sanitizeVisibility(manifest.visibility, isEncrypted);
   return {
     id: String(manifest.id || `${wallet}:${hash}`),
     name: String(manifest.name || 'file'),
@@ -72,7 +85,9 @@ function sanitizeManifest(manifest = {}, wallet) {
     hash,
     rootHash: String(manifest.rootHash || ''),
     uploadedAt: manifest.uploadedAt || new Date().toISOString(),
-    isEncrypted: Boolean(manifest.isEncrypted),
+    isEncrypted,
+    visibility,
+    isPublic: visibility === 'public',
     encryption: sanitizeEncryptionMetadata(manifest.encryption),
     mimeType: manifest.mimeType || 'application/octet-stream',
     chunkSize: Number(manifest.chunkSize || 0),
@@ -83,6 +98,29 @@ function sanitizeManifest(manifest = {}, wallet) {
     replicas: Array.isArray(manifest.replicas) ? manifest.replicas : [],
     chunks: Array.isArray(manifest.chunks) ? manifest.chunks : [],
     syncedAt: new Date().toISOString(),
+  };
+}
+
+function publicProjection(manifest = {}) {
+  return {
+    id: manifest.id,
+    name: manifest.name,
+    size: manifest.size,
+    storedSize: manifest.storedSize,
+    hash: manifest.hash,
+    rootHash: manifest.rootHash,
+    uploadedAt: manifest.uploadedAt,
+    isEncrypted: false,
+    visibility: 'public',
+    isPublic: true,
+    mimeType: manifest.mimeType,
+    chunkSize: manifest.chunkSize,
+    totalChunks: manifest.totalChunks,
+    ownerNodeId: manifest.ownerNodeId,
+    ownerWallet: manifest.ownerWallet,
+    replicas: manifest.replicas || [],
+    chunks: manifest.chunks || [],
+    syncedAt: manifest.syncedAt,
   };
 }
 
@@ -123,15 +161,36 @@ function routeParts(reqUrl) {
   return { url, parts: url.pathname.split('/').filter(Boolean) };
 }
 
+function searchPublicStore(db, query = '') {
+  const q = String(query || '').trim().toLowerCase();
+  const all = Object.values(db)
+    .flatMap((items) => (Array.isArray(items) ? items : []))
+    .filter(isPublicManifest)
+    .map(publicProjection);
+  const filtered = q
+    ? all.filter((item) => [item.name, item.mimeType, item.ownerWallet, item.hash, item.rootHash]
+      .some((value) => String(value || '').toLowerCase().includes(q)))
+    : all;
+  return filtered
+    .sort((a, b) => String(b.uploadedAt || '').localeCompare(String(a.uploadedAt || '')))
+    .slice(0, PUBLIC_SEARCH_LIMIT);
+}
+
 export function createManifestSyncServer({ dataDir = DEFAULT_DATA_DIR } = {}) {
   const store = createStore(dataDir);
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
-      const { parts } = routeParts(req.url || '/');
+      const { url, parts } = routeParts(req.url || '/');
 
       if (req.method === 'GET' && parts.length === 1 && parts[0] === 'health') {
-        return send(res, 200, { ok: true, service: 'p2p-cloud-manifest-sync', wallets: Object.keys(store.readStore()).length });
+        const db = store.readStore();
+        return send(res, 200, { ok: true, service: 'p2p-cloud-manifest-sync', wallets: Object.keys(db).length, publicFiles: searchPublicStore(db).length });
+      }
+
+      if (req.method === 'GET' && parts.length === 2 && parts[0] === 'public' && parts[1] === 'manifests') {
+        const manifests = searchPublicStore(store.readStore(), url.searchParams.get('q') || '');
+        return send(res, 200, { ok: true, public: true, count: manifests.length, manifests });
       }
 
       if (parts[0] !== 'wallet' || !parts[1] || parts[2] !== 'manifests') {
@@ -181,6 +240,7 @@ export function startManifestSyncServer({ port = DEFAULT_PORT, host = DEFAULT_HO
   server.listen(port, host, () => {
     console.log(`[manifest-sync] listening on http://${host}:${port}`);
     console.log(`[manifest-sync] store: ${server.storePath}`);
+    console.log('[manifest-sync] public search: GET /public/manifests?q=term');
   });
   return server;
 }
