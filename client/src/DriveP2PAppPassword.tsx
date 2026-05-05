@@ -41,7 +41,7 @@ type Channel =
   | "wallet:connect"
   | "wallet:disconnect";
 type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };
-type Wallet = { connected: boolean; address: string; plan?: { name: string; quotaBytes: number }; usedBytes: number };
+type Wallet = { connected: boolean; address: string; plan?: { name: string; quotaBytes: number }; usedBytes: number; minDrivePasswordLength?: number };
 type P2PFile = { name: string; size: number; hash: string; rootHash: string; uploadedAt: string; isEncrypted: boolean; mimeType?: string; ownerWallet?: string };
 type Summary = { peerId: string; connectedPeers: number };
 type DownloadResult = { file: P2PFile; bytes: number[] };
@@ -54,6 +54,7 @@ declare global {
 
 const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
+const DEFAULT_MIN_DRIVE_PASSWORD_LENGTH = 12;
 const getBridge = () => window.electron || null;
 const clean = (v = "") => v.split("/").map((x) => x.trim()).filter(Boolean).join("/");
 const join = (...p: string[]) => clean(p.join("/"));
@@ -117,8 +118,9 @@ export default function DriveP2PAppPassword() {
     );
   }
 
+  const minDrivePasswordLength = wallet?.minDrivePasswordLength || DEFAULT_MIN_DRIVE_PASSWORD_LENGTH;
   const connected = Boolean(wallet?.connected && wallet.address);
-  const passwordReady = drivePassword.trim().length >= 6;
+  const passwordReady = drivePassword.trim().length >= minDrivePasswordLength;
   const realFiles = useMemo(() => files.filter((f) => !isMarker(f)), [files]);
   const folders = useMemo(() => {
     const set = new Set<string>();
@@ -176,7 +178,7 @@ export default function DriveP2PAppPassword() {
     setConnecting(true);
     try {
       const r = await connectWalletWithWalletConnect();
-      const w = await electron.invoke<Wallet>("wallet:connect", { address: r.address, encryptionSignature: r.signature || r.encryptionSignature });
+      const w = await electron.invoke<Wallet>("wallet:connect", { address: r.address, loginMessage: r.loginMessage, signature: r.signature });
       setWallet(w);
       await refresh();
       toast.success("Wallet connected");
@@ -192,7 +194,7 @@ export default function DriveP2PAppPassword() {
     setPath("");
   });
   const requirePassword = () => {
-    if (!passwordReady) throw new Error("Enter Drive Password. Minimum 6 characters.");
+    if (!passwordReady) throw new Error(`Enter Drive Password. Minimum ${minDrivePasswordLength} characters.`);
   };
   const createFolder = () => run(async () => {
     if (!connected) throw new Error("Connect wallet first");
@@ -363,14 +365,14 @@ export default function DriveP2PAppPassword() {
                 type="password"
                 value={drivePassword}
                 onChange={(e) => setDrivePassword(e.target.value)}
-                placeholder="Minimum 6 characters"
+                placeholder={`Minimum ${minDrivePasswordLength} characters`}
                 disabled={!connected || busy}
                 className="h-12 border-amber-300/20 bg-black/30"
               />
               <div className={`rounded-2xl border p-4 text-sm ${passwordReady ? "border-emerald-300/20 bg-emerald-400/10 text-emerald-100" : "border-amber-300/20 bg-amber-400/10 text-amber-100"}`}>
                 <div className="mb-1 flex items-center gap-2 font-medium">
                   {passwordReady ? <CheckCircle2 className="size-4" /> : <Lock className="size-4" />}
-                  {passwordReady ? "Ready to decrypt" : "Required before upload/download"}
+                  {passwordReady ? "Ready to decrypt" : `Minimum ${minDrivePasswordLength} characters required`}
                 </div>
                 <p className="text-xs opacity-80">Same wallet + same password opens encrypted files from any device. Forgotten passwords cannot be recovered.</p>
               </div>
@@ -445,7 +447,7 @@ export default function DriveP2PAppPassword() {
                 <p className="text-sm text-zinc-400">Total upload size: {bytes(selectedBytes)} · Destination: {path || "My Drive"}</p>
               </div>
               {!connected && <Badge variant="destructive">Connect wallet first</Badge>}
-              {connected && !passwordReady && <Badge className="border-amber-300/20 bg-amber-400/10 text-amber-100">Password needed</Badge>}
+              {connected && !passwordReady && <Badge className="border-amber-300/20 bg-amber-400/10 text-amber-100">Use {minDrivePasswordLength}+ characters</Badge>}
               {connected && passwordReady && <Badge className="border-emerald-300/20 bg-emerald-400/10 text-emerald-100">Ready</Badge>}
             </div>
           </CardHeader>
