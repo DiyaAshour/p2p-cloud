@@ -12,6 +12,20 @@ function write(rel, content) {
   console.log(`[fix-download-paths] patched ${rel}`);
 }
 
+function stopLegacyBlobAfterSaveToPath(src) {
+  const patterns = [
+    'const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); if (previewUrl) URL.revokeObjectURL(previewUrl); const blob =',
+    'const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); const blob =',
+    'const result = await bridge.invoke<DownloadResult>("p2p:download", payload);\n    const blob =',
+  ];
+  for (const pattern of patterns) {
+    if (!src.includes(pattern)) continue;
+    const replacement = pattern.replace('const blob =', 'if ((result as any).savedToPath || (result as any).canceled) return; const blob =');
+    src = src.replaceAll(pattern, replacement);
+  }
+  return src;
+}
+
 function patchNativeP2PApp() {
   const rel = 'client/src/NativeP2PApp.tsx';
   let src = read(rel);
@@ -31,10 +45,11 @@ function patchNativeP2PApp() {
   const previewBlockStart = src.indexOf('  const previewImage = (file: P2PFile) => runBusy(async () => {');
   const previewEnd = src.indexOf('  const closePreview = () =>', previewBlockStart);
   if (previewBlockStart !== -1 && previewEnd !== -1) {
-    const replacement = '  const previewImage = (file: P2PFile) => runBusy(async () => { if (!isImageFile(file)) return; if (file.size > 25 * 1024 * 1024) { await downloadFile(file); return; } const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); if (previewUrl) URL.revokeObjectURL(previewUrl); const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" }); setPreviewUrl(URL.createObjectURL(blob)); setPreviewName(result.file.name); });\n';
+    const replacement = '  const previewImage = (file: P2PFile) => runBusy(async () => { if (!isImageFile(file)) return; if (file.size > 25 * 1024 * 1024) { await downloadFile(file); return; } const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); if ((result as any).savedToPath || (result as any).canceled) return; if (previewUrl) URL.revokeObjectURL(previewUrl); const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" }); setPreviewUrl(URL.createObjectURL(blob)); setPreviewName(result.file.name); });\n';
     src = src.slice(0, previewBlockStart) + replacement + src.slice(previewEnd);
   }
 
+  src = stopLegacyBlobAfterSaveToPath(src);
   write(rel, src);
 }
 
@@ -58,10 +73,11 @@ function patchDriveP2PApp() {
   const previewStart = src.indexOf('  const openPreview = (file: P2PFile) => runBusy(async () => {');
   const deleteStart = src.indexOf('  const deleteFile = (file: P2PFile) => runBusy(async () => {', previewStart);
   if (previewStart !== -1 && deleteStart !== -1) {
-    const replacement = '  const openPreview = (file: P2PFile) => runBusy(async () => {\n    if (!isImageFile(file) || file.size > 25 * 1024 * 1024) {\n      await downloadFile(file);\n      return;\n    }\n    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };\n    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);\n    const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });\n    if (previewUrl) URL.revokeObjectURL(previewUrl);\n    setPreviewUrl(URL.createObjectURL(blob));\n    setPreviewFile(file);\n  });\n\n';
+    const replacement = '  const openPreview = (file: P2PFile) => runBusy(async () => {\n    if (!isImageFile(file) || file.size > 25 * 1024 * 1024) {\n      await downloadFile(file);\n      return;\n    }\n    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };\n    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);\n    if ((result as any).savedToPath || (result as any).canceled) return;\n    const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });\n    if (previewUrl) URL.revokeObjectURL(previewUrl);\n    setPreviewUrl(URL.createObjectURL(blob));\n    setPreviewFile(file);\n  });\n\n';
     src = src.slice(0, previewStart) + replacement + src.slice(deleteStart);
   }
 
+  src = stopLegacyBlobAfterSaveToPath(src);
   write(rel, src);
 }
 
