@@ -12,48 +12,38 @@ function write(rel, content) {
   console.log(`[streaming-transfers] patched ${rel}`);
 }
 
-function addOnce(src, needle, insert, label) {
-  if (src.includes(insert.trim())) {
+function ensureAfter(src, anchor, line, label) {
+  if (src.includes(line)) {
     console.log(`[streaming-transfers] ${label} already applied`);
     return src;
   }
-  if (!src.includes(needle)) {
-    console.log(`[streaming-transfers] ${label} target not found; skipping`);
+  if (!src.includes(anchor)) {
+    console.log(`[streaming-transfers] ${label} anchor not found; skipping`);
     return src;
   }
-  return src.replace(needle, insert);
+  return src.replace(anchor, anchor + line);
 }
 
-function replaceOnce(src, needle, replacement, label) {
+function replaceBlockBetween(src, startNeedle, endNeedle, replacement, label) {
   if (src.includes(replacement)) {
     console.log(`[streaming-transfers] ${label} already applied`);
     return src;
   }
-  if (!src.includes(needle)) {
-    console.log(`[streaming-transfers] ${label} target not found; skipping`);
+  const start = src.indexOf(startNeedle);
+  const end = src.indexOf(endNeedle, start);
+  if (start === -1 || end === -1) {
+    console.log(`[streaming-transfers] ${label} block not found; skipping`);
     return src;
   }
-  return src.replace(needle, replacement);
-}
-
-function replaceRegex(src, regex, replacement, label) {
-  if (src.includes(replacement.slice(0, 140))) {
-    console.log(`[streaming-transfers] ${label} already applied`);
-    return src;
-  }
-  if (!regex.test(src)) {
-    console.log(`[streaming-transfers] ${label} target not found; skipping`);
-    return src;
-  }
-  return src.replace(regex, replacement);
+  return src.slice(0, start) + replacement + '\n  ' + src.slice(end);
 }
 
 function patchPreload() {
   const rel = 'electron/preload.cjs';
   let src = read(rel);
-  src = replaceOnce(src, "  'p2p:upload',\n", "  'p2p:upload',\n  'p2p:uploadPath',\n", 'allow uploadPath');
-  src = replaceOnce(src, "  'p2p:download',\n", "  'p2p:download',\n  'p2p:downloadToPath',\n", 'allow downloadToPath');
-  src = replaceOnce(src, "  'system:open-external',\n", "  'system:open-external',\n  'system:pickFiles',\n", 'allow pickFiles');
+  src = ensureAfter(src, "  'p2p:upload',\n", "  'p2p:uploadPath',\n", 'allow uploadPath');
+  src = ensureAfter(src, "  'p2p:download',\n", "  'p2p:downloadToPath',\n", 'allow downloadToPath');
+  src = ensureAfter(src, "  'system:open-external',\n", "  'system:pickFiles',\n", 'allow pickFiles');
   write(rel, src);
 }
 
@@ -248,20 +238,23 @@ async function downloadFileToPathPayload(payload = {}) {
 }
 `;
 
-  src = addOnce(src, "\nfunction ensureDataDir() {", `${helpers}\nfunction ensureDataDir() {`, 'streaming helper block');
+  if (!src.includes('async function uploadFilePathPayload')) {
+    const idx = src.indexOf('\nfunction ensureDataDir() {');
+    if (idx >= 0) src = src.slice(0, idx) + helpers + src.slice(idx);
+    else console.log('[streaming-transfers] main helper insert point not found; skipping');
+  }
 
   if (!src.includes("ipcMain.handle('system:pickFiles'")) {
-    src = replaceOnce(src,
-      "ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\\/\\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });\n",
-      "ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\\/\\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });\nipcMain.handle('system:pickFiles', async () => { const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] }); if (result.canceled) return { ok: false, files: [] }; return { ok: true, files: result.filePaths.map((filePath) => { const stat = fs.statSync(filePath); return { path: filePath, name: path.basename(filePath), size: stat.size, mimeType: 'application/octet-stream' }; }) }; });\n",
-      'native file picker handler');
+    src = src.replace("ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\\/\\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });",
+      "ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\\/\\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });\nipcMain.handle('system:pickFiles', async () => { const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] }); if (result.canceled) return { ok: false, files: [] }; return { ok: true, files: result.filePaths.map((filePath) => { const stat = fs.statSync(filePath); return { path: filePath, name: path.basename(filePath), size: stat.size, mimeType: 'application/octet-stream' }; }) }; });");
   }
 
   if (!src.includes("ipcMain.handle('p2p:uploadPath'")) {
-    src = replaceOnce(src, "\n});\n\nipcMain.handle('p2p:download'", "\n});\n\nipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => uploadFilePathPayload(payload));\n\nipcMain.handle('p2p:download'", 'uploadPath handler');
+    src = src.replace("ipcMain.handle('p2p:download', async (_event, payload = {}) => {",
+      "ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => uploadFilePathPayload(payload));\n\nipcMain.handle('p2p:download', async (_event, payload = {}) => {");
   }
   if (!src.includes("ipcMain.handle('p2p:downloadToPath'")) {
-    src = replaceOnce(src, "\n});\n\nipcMain.handle('p2p:delete'", "\n});\n\nipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => downloadFileToPathPayload(payload));\n\nipcMain.handle('p2p:delete'", 'downloadToPath handler');
+    src = src.replace("ipcMain.handle('p2p:delete'", "ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => downloadFileToPathPayload(payload));\n\nipcMain.handle('p2p:delete'");
   }
 
   write(rel, src);
@@ -270,39 +263,36 @@ async function downloadFileToPathPayload(payload = {}) {
 function patchNativeApp() {
   const rel = 'client/src/NativeP2PApp.tsx';
   let src = read(rel);
-  src = replaceOnce(src, '"p2p:upload" | "p2p:download"', '"p2p:upload" | "p2p:uploadPath" | "p2p:download" | "p2p:downloadToPath"', 'channel type streaming channels');
-  src = replaceOnce(src, '"electron:openDevTools" | "electron:diagnostics";', '"electron:openDevTools" | "electron:diagnostics" | "system:pickFiles";', 'channel type picker');
-  src = replaceOnce(src, 'type WalletPlan = { id: string; name: string; quotaBytes: number; priceUsd: number; locked?: boolean };', 'type WalletPlan = { id: string; name: string; quotaBytes: number; priceUsd: number; locked?: boolean };\ntype NativePickedFile = { path: string; name: string; size: number; mimeType?: string };\ntype DownloadToPathResult = { ok: boolean; canceled?: boolean; path?: string };', 'streaming types');
-  src = replaceOnce(src, '  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);', '  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);\n  const [nativeSelectedFiles, setNativeSelectedFiles] = useState<NativePickedFile[]>([]);', 'native file state');
-  src = replaceOnce(src, '  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles]);', '  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0) + nativeSelectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles, nativeSelectedFiles]);', 'quota includes native files');
 
-  const pickerFn = `
-  const pickNativeFiles = () => runBusy(async () => {
-    if (!walletConnected) throw new Error("Connect your wallet before uploading");
-    const result = await bridge.invoke<{ ok: boolean; files: NativePickedFile[] }>("system:pickFiles");
-    const picked = Array.isArray(result.files) ? result.files : [];
-    if (!picked.length) return;
-    setNativeSelectedFiles((current) => [...current, ...picked]);
-    toast.success(String(picked.length) + " file(s) ready to upload");
-  });
-`;
-  src = addOnce(src, '  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => setSelectedFiles(Array.from(event.target.files || []));\n', `  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => { void pickNativeFiles(); event.target.value = ""; };\n${pickerFn}`, 'native picker replaces browser file input');
+  src = ensureAfter(src, '"p2p:upload" | ', '"p2p:uploadPath" | ', 'channel uploadPath');
+  src = ensureAfter(src, '"p2p:download" | ', '"p2p:downloadToPath" | ', 'channel downloadToPath');
+  src = ensureAfter(src, '"electron:diagnostics"', ' | "system:pickFiles"', 'channel pickFiles');
 
-  const uploadFn = '  const uploadFiles = () => runBusy(async () => { if (!walletConnected) throw new Error("Connect your wallet before uploading"); if (uploadWouldExceedQuota) throw new Error("Storage quota exceeded. Upgrade your plan."); if (!nativeSelectedFiles.length && !selectedFiles.length) throw new Error("Select at least one file"); const password = getDrivePassword(); const targetFolder = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : ""; const uploadedHashes: string[] = []; for (const file of nativeSelectedFiles) { const result = await bridge.invoke<{ file?: P2PFile }>("p2p:uploadPath", { path: file.path, name: file.name, mimeType: file.mimeType || "application/octet-stream", isEncrypted, drivePassword: password }); if (result?.file?.hash) uploadedHashes.push(result.file.hash); } for (const file of selectedFiles) { const result = await bridge.invoke<{ file?: P2PFile }>("p2p:upload", { name: file.name, mimeType: file.type || "application/octet-stream", isEncrypted, drivePassword: password, bytes: await file.arrayBuffer() }); if (result?.file?.hash) uploadedHashes.push(result.file.hash); } if (targetFolder && uploadedHashes.length) setFileFolders((current) => ({ ...current, ...Object.fromEntries(uploadedHashes.map((hash) => [hash, targetFolder])) })); setSelectedFiles([]); setNativeSelectedFiles([]); toast.success("Files stored safely"); await refreshAll(); });';
-  src = replaceRegex(src, /  const uploadFiles = \(\) => runBusy\(async \(\) => \{ if \(!walletConnected\).*?await refreshAll\(\); \}\);/s, uploadFn, 'unified streaming upload function');
+  if (!src.includes('type NativePickedFile')) {
+    src = src.replace('type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };', 'type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };\ntype NativePickedFile = { path: string; name: string; size: number; mimeType?: string };\ntype DownloadToPathResult = { ok: boolean; canceled?: boolean; path?: string };');
+  }
 
-  const downloadFn = '  const downloadFile = (file: P2PFile) => runBusy(async () => { const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadToPathResult>("p2p:downloadToPath", { hash: file.hash, drivePassword: password }); if (!result.canceled) toast.success("Download saved to disk"); });';
-  src = replaceRegex(src, /  const downloadFile = \(file: P2PFile\) => runBusy\(async \(\) => \{ const password = file\.isEncrypted \? getDrivePassword\(\) : null; const result = await bridge\.invoke<DownloadResult>\("p2p:download".*?toast\.success\("Download verified"\); \}\);/s, downloadFn, 'unified streaming download function');
+  if (!src.includes('nativeSelectedFiles')) {
+    src = src.replace('  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);', '  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);\n  const [nativeSelectedFiles, setNativeSelectedFiles] = useState<NativePickedFile[]>([]);');
+    src = src.replace('  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles]);', '  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0) + nativeSelectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles, nativeSelectedFiles]);');
+  }
 
-  src = replaceOnce(src, '<Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} />', '<Button type="button" variant="outline" onClick={pickNativeFiles} disabled={!walletConnected || busy}><HardDrive className="size-4" />Choose files</Button><Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="hidden" />', 'upload chooser button');
-  src = replaceOnce(src, '{selectedFiles.length > 0 && <div className="grid gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:grid-cols-2 lg:grid-cols-3">', '{nativeSelectedFiles.length > 0 && <div className="rounded-2xl border border-emerald-900 bg-emerald-950/30 p-4 text-sm text-emerald-100"><p className="font-medium">Files selected</p><div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{nativeSelectedFiles.map((file, index) => <div key={`${file.path}-${index}`} className="truncate rounded-xl bg-zinc-950/70 p-3">{file.name} · {formatBytes(file.size)}</div>)}</div></div>}{selectedFiles.length > 0 && <div className="grid gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:grid-cols-2 lg:grid-cols-3">', 'show native files');
-  write(rel, src);
-}
+  if (!src.includes('const pickNativeFiles')) {
+    src = src.replace('  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => setSelectedFiles(Array.from(event.target.files || []));', '  const pickNativeFiles = () => runBusy(async () => { if (!walletConnected) throw new Error("Connect your wallet before uploading"); const result = await bridge.invoke<{ ok: boolean; files: NativePickedFile[] }>("system:pickFiles"); const picked = Array.isArray(result.files) ? result.files : []; if (!picked.length) return; setNativeSelectedFiles((current) => [...current, ...picked]); toast.success(String(picked.length) + " file(s) ready to upload"); });\n  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => { void pickNativeFiles(); event.target.value = ""; };');
+  }
 
-function patchPackage() {
-  const rel = 'package.json';
-  let src = read(rel);
-  src = replaceOnce(src, '"repair:manifests": "node scripts/repair-encrypted-manifests.js && node scripts/remove-bad-encrypted-manifests.js",', '"repair:manifests": "node scripts/repair-encrypted-manifests.js && node scripts/remove-bad-encrypted-manifests.js",\n    "transfers:streaming": "node scripts/enable-streaming-transfers.cjs",', 'package script');
+  const uploadReplacement = '  const uploadFiles = () => runBusy(async () => { if (!walletConnected) throw new Error("Connect your wallet before uploading"); if (uploadWouldExceedQuota) throw new Error("Storage quota exceeded. Upgrade your plan."); if (!nativeSelectedFiles.length && !selectedFiles.length) throw new Error("Select at least one file"); const password = getDrivePassword(); const targetFolder = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : ""; const uploadedHashes: string[] = []; for (const file of nativeSelectedFiles) { const result = await bridge.invoke<{ file?: P2PFile }>("p2p:uploadPath", { path: file.path, name: file.name, mimeType: file.mimeType || "application/octet-stream", isEncrypted, drivePassword: password }); if (result?.file?.hash) uploadedHashes.push(result.file.hash); } for (const file of selectedFiles) { const result = await bridge.invoke<{ file?: P2PFile }>("p2p:upload", { name: file.name, mimeType: file.type || "application/octet-stream", isEncrypted, drivePassword: password, bytes: await file.arrayBuffer() }); if (result?.file?.hash) uploadedHashes.push(result.file.hash); } if (targetFolder && uploadedHashes.length) setFileFolders((current) => ({ ...current, ...Object.fromEntries(uploadedHashes.map((hash) => [hash, targetFolder])) })); setSelectedFiles([]); setNativeSelectedFiles([]); toast.success("Files stored safely"); await refreshAll(); });';
+  src = replaceBlockBetween(src, '  const uploadFiles = () => runBusy(async () => {', 'const downloadFile = ', uploadReplacement, 'force uploadFiles');
+
+  const downloadReplacement = 'const downloadFile = (file: P2PFile) => runBusy(async () => { const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadToPathResult>("p2p:downloadToPath", { hash: file.hash, drivePassword: password }); if (!result.canceled) toast.success("Download saved to disk"); });';
+  src = replaceBlockBetween(src, 'const downloadFile = ', 'const previewImage = ', downloadReplacement, 'force downloadFile');
+
+  src = src.replace('<Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} />', '<Button type="button" variant="outline" onClick={pickNativeFiles} disabled={!walletConnected || busy}><HardDrive className="size-4" />Choose files</Button><Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="hidden" />');
+
+  if (!src.includes('Files selected</p><div')) {
+    src = src.replace('{selectedFiles.length > 0 && <div className="grid gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:grid-cols-2 lg:grid-cols-3">', '{nativeSelectedFiles.length > 0 && <div className="rounded-2xl border border-emerald-900 bg-emerald-950/30 p-4 text-sm text-emerald-100"><p className="font-medium">Files selected</p><div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{nativeSelectedFiles.map((file, index) => <div key={`${file.path}-${index}`} className="truncate rounded-xl bg-zinc-950/70 p-3">{file.name} · {formatBytes(file.size)}</div>)}</div></div>}{selectedFiles.length > 0 && <div className="grid gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:grid-cols-2 lg:grid-cols-3">');
+  }
+
   write(rel, src);
 }
 
@@ -310,8 +300,7 @@ function main() {
   patchPreload();
   patchMain();
   patchNativeApp();
-  patchPackage();
-  console.log('\n[streaming-transfers] done. Run: pnpm run check && pnpm run electron:dev');
+  console.log('\n[streaming-transfers] done. Run: pnpm run electron:dev');
 }
 
 main();
