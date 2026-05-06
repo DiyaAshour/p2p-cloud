@@ -27,14 +27,13 @@ type NetworkSummary = {
   };
 };
 
-type ElectronBridge = {
+type ElectronProgressBridge = {
   invoke: <T>(channel: 'p2p:networkSummary') => Promise<T>;
 };
 
-declare global {
-  interface Window {
-    electron?: ElectronBridge;
-  }
+function getProgressBridge(): ElectronProgressBridge | null {
+  const candidate = (window as unknown as { electron?: { invoke?: unknown } }).electron;
+  return typeof candidate?.invoke === 'function' ? candidate as ElectronProgressBridge : null;
 }
 
 function formatBytes(bytes = 0) {
@@ -108,9 +107,11 @@ export default function TransferProgressOverlay() {
     let cancelled = false;
 
     const tick = async () => {
-      if (typeof window === 'undefined' || typeof window.electron?.invoke !== 'function') return;
+      if (typeof window === 'undefined') return;
+      const bridge = getProgressBridge();
+      if (!bridge) return;
       try {
-        const next = await window.electron.invoke<NetworkSummary>('p2p:networkSummary');
+        const next = await bridge.invoke<NetworkSummary>('p2p:networkSummary');
         if (!cancelled) setSummary(next);
       } catch {
         // Keep this overlay silent; the main app handles visible operation errors.
