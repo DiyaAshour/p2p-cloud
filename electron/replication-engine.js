@@ -44,6 +44,8 @@ export function replicateChunk(node, chunkPayload, existingReplicas = [], config
 
   if (!targets.length) return unique(Array.from(replicas));
 
+  for (const peerId of targets) replicas.add(peerId);
+
   try {
     const result = node.putChunkOnNetwork?.(chunkPayload, targets);
 
@@ -52,6 +54,9 @@ export function replicateChunk(node, chunkPayload, existingReplicas = [], config
         .then((ackResult) => {
           if (ackResult?.replicas?.length) {
             console.log('[replication] acknowledged replicas:', chunkPayload.hash, ackResult.replicas.join(', '));
+          }
+          if (ackResult?.failedReplicas?.length) {
+            console.warn('[replication] unacknowledged replicas:', chunkPayload.hash, ackResult.failedReplicas.map((entry) => entry.peerId).join(', '));
           }
         })
         .catch((error) => console.warn('[replication] ack failed:', error?.message || error));
