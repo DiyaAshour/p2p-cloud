@@ -25,7 +25,7 @@ export function getHealthyReplicas(node, chunkHash, knownReplicas = []) {
   return unique(Array.from(replicas));
 }
 
-export async function replicateChunk(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = 3) {
+export function replicateChunk(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = 3) {
   if (!node) throw new Error('P2P node is required for replication');
   if (!chunkPayload?.hash) throw new Error('chunk.hash is required for replication');
 
@@ -45,8 +45,19 @@ export async function replicateChunk(node, chunkPayload, existingReplicas = [], 
   if (!targets.length) return unique(Array.from(replicas));
 
   try {
-    const result = await node.putChunkOnNetwork?.(chunkPayload, targets);
-    for (const peerId of result?.replicas || []) replicas.add(peerId);
+    const result = node.putChunkOnNetwork?.(chunkPayload, targets);
+
+    if (result && typeof result.then === 'function') {
+      result
+        .then((ackResult) => {
+          if (ackResult?.replicas?.length) {
+            console.log('[replication] acknowledged replicas:', chunkPayload.hash, ackResult.replicas.join(', '));
+          }
+        })
+        .catch((error) => console.warn('[replication] ack failed:', error?.message || error));
+    } else {
+      for (const peerId of result?.replicas || targets) replicas.add(peerId);
+    }
   } catch (error) {
     console.warn('[replication] failed:', error?.message || error);
   }
@@ -94,7 +105,7 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
       let after = before;
 
       if (chunk) {
-        after = await replicateChunk(node, chunk, before, configuredTargetReplicas);
+        after = replicateChunk(node, chunk, before, configuredTargetReplicas);
         const oldKey = unique(chunkMeta.replicas || []).sort().join('|');
         const newKey = unique(after).sort().join('|');
         if (oldKey !== newKey) {
