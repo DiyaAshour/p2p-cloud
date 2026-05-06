@@ -274,7 +274,7 @@ function patchNativeApp() {
     const picked = Array.isArray(result.files) ? result.files : [];
     if (!picked.length) return;
     setNativeSelectedFiles((current) => [...current, ...picked]);
-    toast.success(`${picked.length} file(s) ready to upload`);
+    toast.success(String(picked.length) + " file(s) ready to upload");
   });
 `;
   src = addOnce(src, '  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => setSelectedFiles(Array.from(event.target.files || []));\n', `  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => { void pickNativeFiles(); event.target.value = ""; };\n${pickerFn}`, 'native picker replaces browser file input');
