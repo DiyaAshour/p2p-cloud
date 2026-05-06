@@ -19,6 +19,8 @@ const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:30
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
 const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
 const AUTO_REPAIR_INTERVAL_MS = Math.max(30_000, Number(process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 60_000));
+const UPLOAD_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.P2P_UPLOAD_CONCURRENCY || 4)));
+const DOWNLOAD_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.P2P_DOWNLOAD_CONCURRENCY || 6)));
 const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
@@ -41,6 +43,7 @@ let transportNode = null;
 let autoRepairTimer = null;
 let autoRepairRunning = false;
 let lastAutoRepairStatus = { ok: true, active: false, intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: null, repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'not-started', error: null };
+let transferProgress = { upload: null, download: null };
 let dataDir = null;
 let manifestsPath = null;
 let walletPath = null;
@@ -63,6 +66,71 @@ function splitIntoChunks(buffer) { const chunks = []; for (let offset = 0; offse
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function hasEncryptionMetadata(manifest = {}) { return Boolean(manifest.encryption && manifest.encryption.algorithm && manifest.encryption.keySource && manifest.encryption.salt && manifest.encryption.iv && manifest.encryption.authTag); }
 function isUsableManifest(manifest = {}) { return !(manifest.isEncrypted === true && !hasEncryptionMetadata(manifest)); }
+function clampConcurrency(value, fallback, max) { return Math.max(1, Math.min(max, Number(value || fallback))); }
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex;
+      nextIndex += 1;
+      results[current] = await worker(items[current], current);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function createProgress(kind, { fileName, totalBytes, totalChunks, concurrency }) {
+  const now = Date.now();
+  transferProgress[kind] = {
+    active: true,
+    phase: 'running',
+    fileName,
+    totalBytes,
+    transferredBytes: 0,
+    percent: 0,
+    speedBytesPerSecond: 0,
+    etaSeconds: null,
+    chunksDone: 0,
+    totalChunks,
+    concurrency,
+    startedAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    error: null,
+  };
+}
+
+function updateProgress(kind, { bytesDelta = 0, chunkDelta = 0, phase = 'running', error = null } = {}) {
+  const progress = transferProgress[kind];
+  if (!progress) return;
+  const now = Date.now();
+  const started = new Date(progress.startedAt).getTime() || now;
+  const elapsedSeconds = Math.max(0.001, (now - started) / 1000);
+  const transferredBytes = Math.min(progress.totalBytes, Number(progress.transferredBytes || 0) + Number(bytesDelta || 0));
+  const chunksDone = Math.min(progress.totalChunks, Number(progress.chunksDone || 0) + Number(chunkDelta || 0));
+  const speedBytesPerSecond = transferredBytes / elapsedSeconds;
+  const remainingBytes = Math.max(0, progress.totalBytes - transferredBytes);
+  transferProgress[kind] = {
+    ...progress,
+    phase,
+    transferredBytes,
+    percent: progress.totalBytes ? (transferredBytes / progress.totalBytes) * 100 : 100,
+    speedBytesPerSecond,
+    etaSeconds: speedBytesPerSecond > 0 && remainingBytes > 0 ? remainingBytes / speedBytesPerSecond : 0,
+    chunksDone,
+    updatedAt: new Date(now).toISOString(),
+    error,
+  };
+}
+
+function finishProgress(kind, phase = 'complete', error = null) {
+  const progress = transferProgress[kind];
+  if (!progress) return;
+  updateProgress(kind, { bytesDelta: 0, chunkDelta: 0, phase, error });
+  transferProgress[kind] = { ...transferProgress[kind], active: false, phase, error };
+}
 
 function parseLoginMessageTime(message = '') {
   const match = String(message).match(/^Time:\s*(.+)$/im);
@@ -252,7 +320,7 @@ function networkSummary() {
   const node = ensureTransport({});
   const own = walletManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
 }
 
 function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
@@ -293,19 +361,32 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   const tree = buildMerkleTree(chunks.map((c) => c.hash));
   const storedHash = hashBufferHex(storedBuffer);
   const fileReplicas = new Set([node.peerId]);
-  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: [] };
+  const chunkResults = new Array(chunks.length);
+  const uploadConcurrency = clampConcurrency(payload.uploadConcurrency, UPLOAD_CONCURRENCY, 12);
+  createProgress('upload', { fileName: String(payload.name || 'file'), totalBytes: storedBuffer.length, totalChunks: chunks.length, concurrency: uploadConcurrency });
 
-  for (const chunk of chunks) {
-    const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };
-    const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
-    try {
-      await putChunkToSafetyPeer(chunkPayload, node.peerId);
-      replicas.push('aws-safety-peer');
-    } catch (error) {
-      throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
-    }
-    for (const peerId of replicas) fileReplicas.add(peerId);
-    manifest.chunks.push({ index: chunk.index, hash: chunk.hash, size: chunk.size, replicas: unique(replicas), proof: getMerkleProof(tree, chunk.index) });
+  try {
+    await mapWithConcurrency(chunks, uploadConcurrency, async (chunk) => {
+      const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };
+      const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
+      try {
+        await putChunkToSafetyPeer(chunkPayload, node.peerId);
+        replicas.push('aws-safety-peer');
+      } catch (error) {
+        throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+      }
+      chunkResults[chunk.index] = { index: chunk.index, hash: chunk.hash, size: chunk.size, replicas: unique(replicas), proof: getMerkleProof(tree, chunk.index) };
+      updateProgress('upload', { bytesDelta: chunk.size, chunkDelta: 1 });
+    });
+  } catch (error) {
+    finishProgress('upload', 'error', error?.message || String(error));
+    throw error;
+  }
+
+  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };
+
+  for (const chunkMeta of manifest.chunks) {
+    for (const peerId of chunkMeta.replicas || []) fileReplicas.add(peerId);
   }
 
   manifest.replicas = unique(Array.from(fileReplicas));
@@ -315,7 +396,8 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   persistWallet();
   await syncPush(manifest);
   await syncPull();
-  return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus };
+  finishProgress('upload');
+  return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
 });
 
 ipcMain.handle('p2p:download', async (_event, payload = {}) => {
@@ -324,28 +406,40 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   const node = ensureTransport({});
   const manifest = findManifest(payload);
   if (!manifest) throw new Error('File not found for this wallet');
-  const buffers = [];
-  for (const meta of [...(manifest.chunks || [])].sort((a, b) => a.index - b.index)) {
-    const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
-    let chunk = local;
-    if (!chunk) {
-      try {
-        chunk = await node.fetchChunkFromNetwork(meta.hash);
-      } catch (error) {
-        console.warn('[p2p:download] network fetch failed, trying safety peer:', error?.message || error);
-        chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+  const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
+  const buffers = new Array(orderedChunks.length);
+  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
+  createProgress('download', { fileName: manifest.name, totalBytes: Number(manifest.storedSize || manifest.size || 0), totalChunks: orderedChunks.length, concurrency: downloadConcurrency });
+
+  try {
+    await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+      const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+      let chunk = local;
+      if (!chunk) {
+        try {
+          chunk = await node.fetchChunkFromNetwork(meta.hash);
+        } catch (error) {
+          console.warn('[p2p:download] network fetch failed, trying safety peer:', error?.message || error);
+          chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+        }
       }
-    }
-    node.storeLocalChunk?.(chunk);
-    const buffer = Buffer.from(chunk.data, 'base64');
-    if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
-    buffers.push(buffer);
+      node.storeLocalChunk?.(chunk);
+      const buffer = Buffer.from(chunk.data, 'base64');
+      if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
+      buffers[meta.index] = buffer;
+      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+    });
+  } catch (error) {
+    finishProgress('download', 'error', error?.message || String(error));
+    throw error;
   }
+
   const storedBuffer = Buffer.concat(buffers);
   if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed');
   const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
   const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer;
-  return { ok: true, file: manifest, bytes: Array.from(outputBuffer) };
+  finishProgress('download');
+  return { ok: true, file: manifest, bytes: Array.from(outputBuffer), progress: transferProgress.download };
 });
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
 ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
