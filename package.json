@@ -91,8 +91,8 @@
   },
   "build": {
     "appId": "cloud.p2p.app",
-    "productName": "p2p.cloud",
-    "artifactName": "p2p-cloud-${version}-setup.${ext}",
+    "productName": "PeerCloud Drive",
+    "artifactName": "PeerCloud-Drive-${version}-setup.${ext}",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -112,8 +112,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "p2p.cloud",
-      "uninstallDisplayName": "p2p.cloud"
+      "shortcutName": "PeerCloud Drive",
+      "uninstallDisplayName": "PeerCloud Drive",
+      "license": "build/license.txt"
     }
   }
 }
