@@ -10,9 +10,7 @@ function patchPreload() {
   const rel = 'electron/preload.cjs';
   let src = read(rel);
   for (const channel of ['p2p:pauseTransfer', 'p2p:resumeTransfer', 'p2p:cancelTransfer']) {
-    if (!src.includes(`'${channel}'`)) {
-      src = src.replace("  'p2p:networkSummary',\n", `  'p2p:networkSummary',\n  '${channel}',\n`);
-    }
+    if (!src.includes(`'${channel}'`)) src = src.replace("  'p2p:networkSummary',\n", `  'p2p:networkSummary',\n  '${channel}',\n`);
   }
   write(rel, src);
 }
@@ -20,6 +18,13 @@ function patchPreload() {
 function patchMain() {
   const rel = 'electron/main.js';
   let src = read(rel);
+
+  if (src.includes("const SAFETY_UPLOAD_MAX_QUEUE = Math.max(0, Number(process.env.P2P_SAFETY_UPLOAD_MAX_QUEUE || 32));")) {
+    src = src.replace("const SAFETY_UPLOAD_MAX_QUEUE = Math.max(0, Number(process.env.P2P_SAFETY_UPLOAD_MAX_QUEUE || 32));", "const SAFETY_UPLOAD_MAX_QUEUE = Math.max(0, Number(process.env.P2P_SAFETY_UPLOAD_MAX_QUEUE || 8));");
+  }
+  if (src.includes("const SAFETY_UPLOAD_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.P2P_SAFETY_UPLOAD_CONCURRENCY || 2)));")) {
+    src = src.replace("const SAFETY_UPLOAD_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.P2P_SAFETY_UPLOAD_CONCURRENCY || 2)));", "const SAFETY_UPLOAD_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.P2P_SAFETY_UPLOAD_CONCURRENCY || 1)));");
+  }
 
   if (!src.includes('let transferControl =')) {
     src = src.replace(
@@ -29,8 +34,8 @@ let transferControl = { upload: { paused: false, canceled: false }, download: { 
 let backgroundSafetyQueue = [];
 let backgroundSafetyRunning = 0;
 const SAFETY_UPLOAD_MODE = String(process.env.P2P_UPLOAD_SAFETY_MODE || 'background').toLowerCase();
-const SAFETY_UPLOAD_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.P2P_SAFETY_UPLOAD_CONCURRENCY || 2)));
-const SAFETY_UPLOAD_MAX_QUEUE = Math.max(0, Number(process.env.P2P_SAFETY_UPLOAD_MAX_QUEUE || 32));`
+const SAFETY_UPLOAD_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.P2P_SAFETY_UPLOAD_CONCURRENCY || 1)));
+const SAFETY_UPLOAD_MAX_QUEUE = Math.max(0, Number(process.env.P2P_SAFETY_UPLOAD_MAX_QUEUE || 8));`
     );
   }
 
@@ -42,13 +47,14 @@ function resetTransferControl(kind) {
 function setTransferPaused(kind, paused) {
   if (!transferControl[kind]) transferControl[kind] = { paused: false, canceled: false };
   transferControl[kind].paused = Boolean(paused);
-  if (transferProgress[kind]?.active) transferProgress[kind] = { ...transferProgress[kind], phase: paused ? 'paused' : 'running' };
+  if (transferProgress[kind]?.active) transferProgress[kind] = { ...transferProgress[kind], phase: paused ? 'paused' : 'running', updatedAt: new Date().toISOString() };
   return { ok: true, kind, paused: transferControl[kind].paused, canceled: transferControl[kind].canceled };
 }
 function setTransferCanceled(kind) {
   if (!transferControl[kind]) transferControl[kind] = { paused: false, canceled: false };
   transferControl[kind].canceled = true;
   transferControl[kind].paused = false;
+  if (kind === 'upload') backgroundSafetyQueue = [];
   finishProgress(kind, 'canceled', 'Canceled by user');
   return { ok: true, kind, paused: false, canceled: true };
 }
@@ -56,31 +62,23 @@ function assertTransferNotCanceled(kind) {
   if (transferControl[kind]?.canceled) throw new Error('Transfer canceled');
 }
 async function waitIfTransferPaused(kind) {
-  while (transferControl[kind]?.paused && !transferControl[kind]?.canceled) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
+  while (transferControl[kind]?.paused && !transferControl[kind]?.canceled) await new Promise((resolve) => setTimeout(resolve, 100));
   assertTransferNotCanceled(kind);
 }
 function scheduleBackgroundSafetyPut(chunkPayload, peerId) {
-  if (SAFETY_UPLOAD_MODE === 'off') return false;
-  if (SAFETY_UPLOAD_MAX_QUEUE > 0 && backgroundSafetyQueue.length >= SAFETY_UPLOAD_MAX_QUEUE) {
-    console.warn('[safety-peer] background queue full; skipping chunk safety copy:', chunkPayload.hash);
-    return false;
-  }
+  if (SAFETY_UPLOAD_MODE === 'off' || transferControl.upload?.canceled) return false;
+  if (SAFETY_UPLOAD_MAX_QUEUE > 0 && backgroundSafetyQueue.length >= SAFETY_UPLOAD_MAX_QUEUE) return false;
   backgroundSafetyQueue.push({ chunkPayload, peerId });
   drainBackgroundSafetyQueue();
   return true;
 }
 function drainBackgroundSafetyQueue() {
-  while (backgroundSafetyRunning < SAFETY_UPLOAD_CONCURRENCY && backgroundSafetyQueue.length > 0) {
+  while (!transferControl.upload?.canceled && backgroundSafetyRunning < SAFETY_UPLOAD_CONCURRENCY && backgroundSafetyQueue.length > 0) {
     const job = backgroundSafetyQueue.shift();
     backgroundSafetyRunning += 1;
     putChunkToSafetyPeer(job.chunkPayload, job.peerId)
       .catch((error) => console.warn('[safety-peer] background upload failed:', job.chunkPayload.hash, error?.message || error))
-      .finally(() => {
-        backgroundSafetyRunning -= 1;
-        drainBackgroundSafetyQueue();
-      });
+      .finally(() => { backgroundSafetyRunning -= 1; drainBackgroundSafetyQueue(); });
   }
 }
 `;
@@ -90,6 +88,7 @@ function drainBackgroundSafetyQueue() {
   if (!src.includes('async function storeUploadChunkFastForManifest')) {
     const fastStore = `
 async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet, privateFile, fileReplicas }) {
+  assertTransferNotCanceled('upload');
   if (!Buffer.isBuffer(data) || data.length === 0) return null;
   const hash = hashBufferHex(data);
   const chunkPayload = { hash, data: data.toString('base64'), index, size: data.length, ownerWallet, encrypted: privateFile };
@@ -108,8 +107,10 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
   const endNeedle = '\nfunction writeStreamBuffer(stream, buffer) {';
   const start = src.indexOf(startNeedle);
   const end = src.indexOf(endNeedle, start);
-  if (start !== -1 && end !== -1 && !src.slice(start, end).includes("uploadMode: 'parallel-stream-path-v3'")) {
-    const replacement = `async function uploadFilePathPayload(payload = {}) {
+  if (start !== -1 && end !== -1) {
+    const current = src.slice(start, end);
+    if (!current.includes("uploadMode: 'parallel-stream-path-v4'")) {
+      const replacement = `async function uploadFilePathPayload(payload = {}) {
   resetTransferControl('upload');
   const node = ensureTransport({});
   const filePath = path.resolve(String(payload.path || payload.filePath || ''));
@@ -128,14 +129,15 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
   const fileReplicas = new Set([node.peerId]);
   const chunkResults = [];
   const pendingUploads = new Set();
-  const streamUploadConcurrency = Math.max(1, Math.min(12, Number(payload.uploadConcurrency || process.env.P2P_STREAM_UPLOAD_CONCURRENCY || UPLOAD_CONCURRENCY || 4)));
+  const streamUploadConcurrency = Math.max(1, Math.min(8, Number(payload.uploadConcurrency || process.env.P2P_STREAM_UPLOAD_CONCURRENCY || 4)));
   let chunkIndex = 0;
   let storedSize = 0;
   let cipher = null;
   let encryption = null;
+  let stream = null;
 
   async function enqueueStoredChunk(data, index, progressBytes) {
-    if (!Buffer.isBuffer(data) || data.length === 0) return;
+    assertTransferNotCanceled('upload');
     await waitIfTransferPaused('upload');
     const task = (async () => {
       await waitIfTransferPaused('upload');
@@ -154,15 +156,15 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
     const iv = crypto.randomBytes(12);
     const key = deriveDriveKey({ ownerWallet, drivePassword, salt });
     cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
-    encryption = { version: 6, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: null, originalHash: null, originalSize: stat.size, mode: 'parallel-stream-file-fast-safety' };
+    encryption = { version: 7, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: null, originalHash: null, originalSize: stat.size, mode: 'parallel-stream-file-fast-safety-v4' };
   }
 
-  const estimatedChunks = Math.max(1, Math.ceil(stat.size / CHUNK_SIZE_BYTES));
-  createProgress('upload', { fileName, totalBytes: stat.size, totalChunks: estimatedChunks, concurrency: streamUploadConcurrency });
+  createProgress('upload', { fileName, totalBytes: stat.size, totalChunks: Math.max(1, Math.ceil(stat.size / CHUNK_SIZE_BYTES)), concurrency: streamUploadConcurrency });
 
   try {
-    const stream = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });
+    stream = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });
     for await (const plainChunk of stream) {
+      assertTransferNotCanceled('upload');
       await waitIfTransferPaused('upload');
       const plainBuffer = Buffer.from(plainChunk);
       originalHash.update(plainBuffer);
@@ -175,6 +177,7 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
       }
     }
 
+    assertTransferNotCanceled('upload');
     if (privateFile) {
       const finalData = cipher.final();
       if (finalData.length > 0) {
@@ -185,15 +188,15 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
       }
       encryption.authTag = cipher.getAuthTag().toString('base64');
       encryption.originalHash = originalHash.digest('hex');
-    } else {
-      originalHash.digest('hex');
-    }
+    } else originalHash.digest('hex');
 
     await Promise.all(Array.from(pendingUploads));
     assertTransferNotCanceled('upload');
   } catch (error) {
+    try { stream?.destroy?.(); } catch {}
+    backgroundSafetyQueue = [];
     const message = error?.message || String(error);
-    finishProgress('upload', message.includes('canceled') ? 'canceled' : 'error', message);
+    finishProgress('upload', message.includes('canceled') || message.includes('canceled') ? 'canceled' : 'error', message);
     throw error;
   }
 
@@ -202,19 +205,20 @@ async function storeUploadChunkFastForManifest({ node, data, index, ownerWallet,
   const tree = buildMerkleTree(orderedChunkResults.map((chunk) => chunk.hash));
   const chunksWithProof = orderedChunkResults.map((chunk) => ({ ...chunk, proof: getMerkleProof(tree, chunk.index) }));
   const finalStoredHash = storedHash.digest('hex');
-  const manifest = { id: ownerWallet + ':' + finalStoredHash, name: fileName, size: stat.size, storedSize, hash: finalStoredHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption, mimeType, chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunksWithProof.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: unique(Array.from(fileReplicas)), chunks: chunksWithProof, uploadMode: 'parallel-stream-path-v3', uploadConcurrency: streamUploadConcurrency, safetyMode: SAFETY_UPLOAD_MODE };
+  const manifest = { id: ownerWallet + ':' + finalStoredHash, name: fileName, size: stat.size, storedSize, hash: finalStoredHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption, mimeType, chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunksWithProof.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: unique(Array.from(fileReplicas)), chunks: chunksWithProof, uploadMode: 'parallel-stream-path-v4', uploadConcurrency: streamUploadConcurrency, safetyMode: SAFETY_UPLOAD_MODE };
 
   manifests = manifests.filter((m) => !(normalizeWallet(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
   manifests.push(manifest);
   persistManifests();
   persistWallet();
   await syncPush(manifest);
-  await syncPull();
+  try { await syncPull(); } catch (error) { console.warn('[manifest-sync] upload pull skipped:', error?.message || error); }
   finishProgress('upload');
   return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
 }
 `;
-    src = src.slice(0, start) + replacement + src.slice(end);
+      src = src.slice(0, start) + replacement + src.slice(end);
+    }
   }
 
   if (!src.includes("ipcMain.handle('p2p:pauseTransfer'")) {
