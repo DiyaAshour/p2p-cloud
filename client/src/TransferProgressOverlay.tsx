@@ -36,6 +36,27 @@ function getProgressBridge(): ElectronProgressBridge | null {
   return typeof candidate?.invoke === 'function' ? candidate as ElectronProgressBridge : null;
 }
 
+function applyChunknetBranding() {
+  document.title = 'Chunknet';
+
+  const replacements = new Map([
+    ['p2p.cloud Drive', 'Chunknet'],
+    ['p2p.cloud', 'Chunknet'],
+    ['PeerCloud Drive', 'Chunknet'],
+    ['PeerCloud', 'Chunknet'],
+  ]);
+
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+
+  for (const node of textNodes) {
+    let next = node.nodeValue || '';
+    for (const [from, to] of replacements.entries()) next = next.replaceAll(from, to);
+    if (next !== node.nodeValue) node.nodeValue = next;
+  }
+}
+
 function formatBytes(bytes = 0) {
   if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
@@ -102,6 +123,13 @@ function TransferItem({ type, progress }: { type: 'upload' | 'download'; progres
 
 export default function TransferProgressOverlay() {
   const [summary, setSummary] = useState<NetworkSummary | null>(null);
+
+  useEffect(() => {
+    applyChunknetBranding();
+    const observer = new MutationObserver(() => applyChunknetBranding());
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
