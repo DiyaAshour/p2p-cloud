@@ -16,6 +16,19 @@ function replaceFunction(src, functionName, nextFunctionName, replacement, rel) 
   return src.slice(0, start) + replacement + src.slice(end);
 }
 
+function removeFunction(src, functionName) {
+  let start = src.indexOf(`  const ${functionName} =`);
+  while (start !== -1) {
+    const nextConst = src.indexOf('\n  const ', start + 1);
+    const nextReturn = src.indexOf('\n  return ', start + 1);
+    const candidates = [nextConst, nextReturn].filter((value) => value !== -1);
+    const end = candidates.length ? Math.min(...candidates) : src.length;
+    src = src.slice(0, start) + src.slice(end);
+    start = src.indexOf(`  const ${functionName} =`);
+  }
+  return src;
+}
+
 function ensureChannelTypes(src) {
   if (!src.includes('"p2p:uploadPath"')) src = src.replace('"p2p:upload" |', '"p2p:upload" | "p2p:uploadPath" |');
   if (!src.includes('"p2p:downloadToPath"')) src = src.replace('"p2p:download" |', '"p2p:download" | "p2p:downloadToPath" |');
@@ -44,6 +57,8 @@ function patchNative() {
     src = src.replace('  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);', '  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);\n  const [nativeSelectedFiles, setNativeSelectedFiles] = useState<NativePickedFile[]>([]);');
     src = src.replace('const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles]);', 'const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0) + nativeSelectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles, nativeSelectedFiles]);');
   }
+
+  src = removeFunction(src, 'pickNativeFiles');
 
   const picker = '  const pickNativeFiles = () => runBusy(async () => {\n' +
     '    if (!walletConnected) throw new Error("Connect your wallet before uploading");\n' +
