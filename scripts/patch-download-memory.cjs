@@ -17,9 +17,18 @@ replaceOnce(
 );
 
 const start = s.indexOf("ipcMain.handle('p2p:download', async (_event, payload = {}) => {");
-const end = s.indexOf("\nipcMain.handle('p2p:delete'", start);
+let end = s.indexOf("\nipcMain.handle('p2p:delete'", start);
+if (start !== -1 && end === -1) end = s.indexOf("\nipcMain.handle('p2p:repair'", start);
+if (start !== -1 && end === -1) end = s.indexOf("\nipcMain.handle('p2p:prepareProof'", start);
 
-if (start !== -1 && end !== -1) {
+if (start === -1 || end === -1) {
+  throw new Error('[patch-download-memory] Could not locate p2p:download handler boundaries. Refusing to run unsafe download code.');
+}
+
+const currentHandler = s.slice(start, end);
+if (!currentHandler.includes('Buffer.concat(buffers)') && !currentHandler.includes('Array.from(plain)') && currentHandler.includes('chunknet-downloads')) {
+  console.log('[patch-download-memory] streaming download already installed');
+} else {
   const streamingHandler = `ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   assertVerifiedWallet();
   await syncPull();
@@ -30,7 +39,7 @@ if (start !== -1 && end !== -1) {
   const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => Number(a.index || 0) - Number(b.index || 0));
   if (!orderedChunks.length) throw new Error('File manifest has no chunks');
 
-  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 8);
+  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 4);
   createProgress('download', {
     fileName: manifest.name,
     totalBytes: Number(manifest.storedSize || manifest.size || 0),
@@ -48,27 +57,7 @@ if (start !== -1 && end !== -1) {
   const tempDir = path.join(app.getPath('temp'), 'chunknet-downloads');
   fs.mkdirSync(tempDir, { recursive: true });
   const tempPath = path.join(tempDir, String(Date.now()) + '-' + crypto.randomUUID() + '.chunknet-download');
-  const encryptedOut = fs.createWriteStream(tempPath);
   const encryptedHash = crypto.createHash('sha256');
-
-  const writeBuffer = (stream, buffer) => new Promise((resolve, reject) => {
-    const onError = (error) => {
-      stream.off('drain', onDrain);
-      reject(error);
-    };
-    const onDrain = () => {
-      stream.off('error', onError);
-      resolve();
-    };
-    stream.once('error', onError);
-    if (stream.write(buffer)) onDrain();
-    else stream.once('drain', onDrain);
-  });
-
-  const closeStream = (stream) => new Promise((resolve, reject) => {
-    stream.once('error', reject);
-    stream.end(resolve);
-  });
 
   const fetchChunkBuffer = async (meta) => {
     const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
@@ -93,11 +82,10 @@ if (start !== -1 && end !== -1) {
       const batchBuffers = await Promise.all(batch.map(fetchChunkBuffer));
       for (const buffer of batchBuffers) {
         encryptedHash.update(buffer);
-        await writeBuffer(encryptedOut, buffer);
+        fs.appendFileSync(tempPath, buffer);
         updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
       }
     }
-    await closeStream(encryptedOut);
 
     const actualHash = encryptedHash.digest('hex');
     if (manifest.hash && actualHash !== manifest.hash) {
@@ -117,11 +105,8 @@ if (start !== -1 && end !== -1) {
         input.on('error', reject);
         decipher.on('error', (error) => {
           const reason = String(error?.message || error);
-          if (reason.includes('authenticate data') || reason.includes('Unsupported state')) {
-            reject(new Error('Encrypted file authentication failed. The chunks matched the manifest, but the encryption metadata/password/wallet did not authenticate.'));
-          } else {
-            reject(error);
-          }
+          if (reason.includes('authenticate data') || reason.includes('Unsupported state')) reject(new Error('Encrypted file authentication failed. The chunks matched the manifest, but the encryption metadata/password/wallet did not authenticate.'));
+          else reject(error);
         });
         output.on('error', reject);
         output.on('finish', resolve);
@@ -134,21 +119,28 @@ if (start !== -1 && end !== -1) {
     finishProgress('download');
     return { ok: true, file: manifest, savedPath: saveResult.filePath, progress: transferProgress.download };
   } catch (error) {
-    try { encryptedOut.destroy?.(); } catch {}
     finishProgress('download', 'error', error?.message || String(error));
     throw error;
   } finally {
     try { fs.unlinkSync(tempPath); } catch {}
   }
 });`;
-
   s = s.slice(0, start) + streamingHandler + s.slice(end);
   changed = true;
 }
 
+const patchedHandlerStart = s.indexOf("ipcMain.handle('p2p:download', async (_event, payload = {}) => {");
+let patchedHandlerEnd = s.indexOf("\nipcMain.handle('p2p:delete'", patchedHandlerStart);
+if (patchedHandlerEnd === -1) patchedHandlerEnd = s.indexOf("\nipcMain.handle('p2p:repair'", patchedHandlerStart);
+if (patchedHandlerEnd === -1) patchedHandlerEnd = s.indexOf("\nipcMain.handle('p2p:prepareProof'", patchedHandlerStart);
+const patchedHandler = s.slice(patchedHandlerStart, patchedHandlerEnd);
+if (patchedHandler.includes('Array.from(plain)') || patchedHandler.includes('Buffer.concat(buffers)')) {
+  throw new Error('[patch-download-memory] Unsafe large-file download code is still present after patch.');
+}
+
 if (changed) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-download-memory] patched large-file streaming download');
+  console.log('[patch-download-memory] installed strict large-file streaming download');
 } else {
-  console.log('[patch-download-memory] no patch needed or target not found');
+  console.log('[patch-download-memory] strict streaming download already active');
 }
