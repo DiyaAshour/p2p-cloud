@@ -30,14 +30,17 @@ type P2PChannel =
   | "p2p:start"
   | "p2p:listFiles"
   | "p2p:upload"
+  | "p2p:uploadPath"
   | "p2p:download"
+  | "p2p:downloadToPath"
   | "p2p:delete"
   | "p2p:networkSummary"
   | "p2p:bootstrapNow"
   | "p2p:repair"
   | "wallet:status"
   | "wallet:connect"
-  | "wallet:disconnect";
+  | "wallet:disconnect"
+  | "system:pickFiles";
 
 type ElectronBridge = { invoke: <T>(channel: P2PChannel, payload?: unknown) => Promise<T>; isElectron?: boolean };
 type WalletPlan = { id: string; name: string; quotaBytes: number; priceUsd: number; locked?: boolean };
@@ -58,13 +61,16 @@ type P2PFile = {
   replicas: string[];
 };
 type P2PSummary = { ok: boolean; peerId: string; listenUrl: string; connectedPeers: number; totalFiles: number; totalBytes: number; encryptedFiles: number; underReplicatedChunks: number };
-type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };
+type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[]; savedToPath?: string | null; canceled?: boolean };
+type DownloadToPathResult = { ok: boolean; canceled?: boolean; path?: string };
+type NativePickedFile = { path: string; name: string; size: number; mimeType?: string };
 type ViewMode = "grid" | "list";
 
 declare global { interface Window { electron?: ElectronBridge } }
 
 const FOLDER_MARKER = ".p2p-folder";
 const FOLDER_MIME = "application/x-p2p-folder";
+const SMALL_PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
 
 function getElectronBridge(): ElectronBridge | null {
   return typeof window !== "undefined" && typeof window.electron?.invoke === "function" ? window.electron : null;
@@ -153,6 +159,7 @@ export default function DriveP2PApp() {
   const [wallet, setWallet] = useState<WalletState | null>(null);
   const [files, setFiles] = useState<P2PFile[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [nativeSelectedFiles, setNativeSelectedFiles] = useState<NativePickedFile[]>([]);
   const [currentPath, setCurrentPath] = useState("");
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
@@ -163,7 +170,7 @@ export default function DriveP2PApp() {
   const [drivePassword, setDrivePassword] = useState("");
 
   const walletConnected = Boolean(wallet?.connected && wallet.address);
-  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles]);
+  const selectedBytes = useMemo(() => selectedFiles.reduce((sum, file) => sum + file.size, 0) + nativeSelectedFiles.reduce((sum, file) => sum + file.size, 0), [selectedFiles, nativeSelectedFiles]);
   const quotaPercent = wallet?.plan?.quotaBytes ? Math.min(100, (wallet.usedBytes / wallet.plan.quotaBytes) * 100) : 0;
   const uploadWouldExceedQuota = Boolean(wallet && selectedBytes > 0 && wallet.usedBytes + selectedBytes > wallet.plan.quotaBytes);
 
@@ -290,14 +297,40 @@ export default function DriveP2PApp() {
     await refreshAll();
   });
 
-  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => setSelectedFiles(Array.from(event.target.files || []));
+  const pickNativeFiles = () => runBusy(async () => {
+    if (!walletConnected) throw new Error("Connect wallet before uploading");
+    const result = await bridge.invoke<{ ok: boolean; files: NativePickedFile[] }>("system:pickFiles");
+    const picked = Array.isArray(result.files) ? result.files : [];
+    if (!picked.length) return;
+    setNativeSelectedFiles((current) => [...current, ...picked]);
+    setSelectedFiles([]);
+    toast.success(`${picked.length} file(s) ready to upload`);
+  });
+
+  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
+    event.target.value = "";
+    void pickNativeFiles();
+  };
 
   const uploadFiles = () => runBusy(async () => {
     if (!walletConnected) throw new Error("Connect wallet before uploading");
     const password = requireDrivePassword();
     if (uploadWouldExceedQuota) throw new Error("Storage quota exceeded. Upgrade your plan.");
-    if (!selectedFiles.length) throw new Error("Select at least one file");
+    if (!nativeSelectedFiles.length && !selectedFiles.length) throw new Error("Select at least one file");
+    const uploadedCount = nativeSelectedFiles.length + selectedFiles.length;
+
+    for (const file of nativeSelectedFiles) {
+      await bridge.invoke("p2p:uploadPath", {
+        path: file.path,
+        name: joinPath(currentPath, file.name),
+        mimeType: file.mimeType || "application/octet-stream",
+        isEncrypted: true,
+        drivePassword: password,
+      });
+    }
+
     for (const file of selectedFiles) {
+      if (file.size > SMALL_PREVIEW_LIMIT_BYTES) throw new Error("Large browser-file upload blocked. Use Choose files again so Chunknet can stream from disk safely.");
       await bridge.invoke("p2p:upload", {
         name: joinPath(currentPath, file.name),
         mimeType: file.type || "application/octet-stream",
@@ -306,33 +339,27 @@ export default function DriveP2PApp() {
         bytes: await file.arrayBuffer(),
       });
     }
+
     setSelectedFiles([]);
-    toast.success(`Uploaded ${selectedFiles.length} file(s) to ${currentPath || "My Drive"}`);
+    setNativeSelectedFiles([]);
+    toast.success(`Uploaded ${uploadedCount} file(s) to ${currentPath || "My Drive"}`);
     await refreshAll();
   });
 
   const downloadFile = (file: P2PFile) => runBusy(async () => {
     const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };
-    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);
-    const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = baseName(result.file.name);
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-    toast.success("Download ready");
+    const result = await bridge.invoke<DownloadToPathResult>("p2p:downloadToPath", payload);
+    if (!result.canceled) toast.success("Download saved to disk");
   });
 
   const openPreview = (file: P2PFile) => runBusy(async () => {
-    if (!isImageFile(file)) {
+    if (!isImageFile(file) || file.size > SMALL_PREVIEW_LIMIT_BYTES) {
       await downloadFile(file);
       return;
     }
     const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };
     const result = await bridge.invoke<DownloadResult>("p2p:download", payload);
+    if (result.savedToPath || result.canceled) return;
     const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(blob));
@@ -421,14 +448,15 @@ export default function DriveP2PApp() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Input type="password" value={drivePassword} onChange={(event) => setDrivePassword(event.target.value)} placeholder="Drive Password" disabled={!walletConnected || busy} className="max-w-xs" />
-                <Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="max-w-xs" />
-                <Button onClick={uploadFiles} disabled={busy || !walletConnected || selectedFiles.length === 0 || uploadWouldExceedQuota}><Upload className="size-4" />Upload here</Button>
+                <Button type="button" variant="outline" onClick={pickNativeFiles} disabled={!walletConnected || busy}>Choose files</Button>
+                <Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="hidden" />
+                <Button onClick={uploadFiles} disabled={busy || !walletConnected || (selectedFiles.length === 0 && nativeSelectedFiles.length === 0) || uploadWouldExceedQuota}><Upload className="size-4" />Upload here</Button>
               </div>
             </div>
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs text-zinc-400"><span>Storage usage</span><span>{formatBytes(wallet?.usedBytes ?? 0)} / {formatBytes(wallet?.plan?.quotaBytes ?? 0)}</span></div>
               <div className="h-2 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-zinc-50" style={{ width: `${quotaPercent}%` }} /></div>
-              <p className="text-xs text-zinc-500">Selected: {selectedFiles.length} file(s), {formatBytes(selectedBytes)} · Images in this folder: {imageCount}</p>
+              <p className="text-xs text-zinc-500">Selected: {selectedFiles.length + nativeSelectedFiles.length} file(s), {formatBytes(selectedBytes)} · Images in this folder: {imageCount}</p>
               {walletConnected && drivePassword.trim().length > 0 && drivePassword.trim().length < 6 && <p className="rounded border border-red-900 bg-red-950/40 p-2 text-sm text-red-200">Drive Password must be at least 6 characters.</p>}
               {uploadWouldExceedQuota && <p className="rounded border border-red-900 bg-red-950/40 p-2 text-sm text-red-200">Selected files exceed your plan. Upgrade before upload.</p>}
             </div>
@@ -469,8 +497,8 @@ export default function DriveP2PApp() {
                       </div>
                     </button>
                     <div className={viewMode === "grid" ? "mt-3 flex gap-2" : "flex gap-2"}>
-                      <Button variant="outline" size="sm" onClick={() => downloadFile(file)} disabled={busy}><Download className="size-4" /></Button>
-                      <Button variant="destructive" size="sm" onClick={() => deleteFile(file)} disabled={busy}><Trash2 className="size-4" /></Button>
+                      <Button variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); void downloadFile(file); }} disabled={busy}><Download className="size-4" /></Button>
+                      <Button variant="destructive" size="sm" onClick={(event) => { event.stopPropagation(); void deleteFile(file); }} disabled={busy}><Trash2 className="size-4" /></Button>
                     </div>
                   </CardContent>
                 </Card>
@@ -490,7 +518,7 @@ export default function DriveP2PApp() {
         <div className="max-h-[92vh] w-full max-w-5xl rounded-md border border-zinc-800 bg-zinc-950 p-4" onClick={(event) => event.stopPropagation()}>
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="min-w-0"><p className="truncate font-medium">{baseName(previewFile.name)}</p><p className="text-xs text-zinc-500">{formatBytes(previewFile.size)}</p></div>
-            <div className="flex gap-2"><Button variant="outline" onClick={() => downloadFile(previewFile)}><Download className="size-4" />Download</Button><Button variant="outline" onClick={() => setPreviewFile(null)}>Close</Button></div>
+            <div className="flex gap-2"><Button variant="outline" onClick={(event) => { event.stopPropagation(); void downloadFile(previewFile); }}><Download className="size-4" />Download</Button><Button variant="outline" onClick={() => setPreviewFile(null)}>Close</Button></div>
           </div>
           <div className="flex max-h-[78vh] items-center justify-center overflow-auto rounded bg-zinc-900"><img src={previewUrl} alt={baseName(previewFile.name)} className="max-h-[78vh] max-w-full object-contain" /></div>
         </div>
