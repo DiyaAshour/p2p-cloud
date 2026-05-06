@@ -1,0 +1,9 @@
+PeerCloud Drive Terms of Use
+
+PeerCloud Drive provides encrypted distributed storage features. By installing and using this application, you agree that the app may use local device resources, including storage space, network connectivity, and background transfer capabilities, to help provide secure file storage and synchronization features.
+
+Files are encrypted before transfer when encrypted storage is enabled. Other devices and peers should only receive encrypted file chunks and related metadata required for storage, discovery, replication, and repair.
+
+You are responsible for keeping your wallet, recovery credentials, and Drive Password safe. Forgotten Drive Passwords cannot be recovered by the application provider.
+
+Do not use PeerCloud Drive to store or distribute illegal, harmful, or unauthorized content. Continued use of the application means you accept these terms.
