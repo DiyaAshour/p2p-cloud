@@ -18,6 +18,7 @@ const IS_DEV = !app.isPackaged;
 const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
 const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
+const AUTO_REPAIR_INTERVAL_MS = Math.max(30_000, Number(process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 60_000));
 const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
@@ -37,6 +38,9 @@ const PLANS = {
 
 let mainWindow = null;
 let transportNode = null;
+let autoRepairTimer = null;
+let autoRepairRunning = false;
+let lastAutoRepairStatus = { ok: true, active: false, intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: null, repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'not-started', error: null };
 let dataDir = null;
 let manifestsPath = null;
 let walletPath = null;
@@ -192,11 +196,63 @@ function ensureTransport(options = {}) {
   return transportNode;
 }
 
+async function runAutoRepair(reason = 'interval') {
+  if (autoRepairRunning) {
+    lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, skippedReason: 'already-running' };
+    return lastAutoRepairStatus;
+  }
+
+  if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) {
+    lastAutoRepairStatus = { ...lastAutoRepairStatus, active: Boolean(autoRepairTimer), skippedReason: 'wallet-not-verified', error: null };
+    return lastAutoRepairStatus;
+  }
+
+  const node = ensureTransport({});
+  const own = walletManifests();
+  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);
+  if (underReplicatedChunks <= 0) {
+    lastAutoRepairStatus = { ok: true, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'healthy', error: null };
+    return lastAutoRepairStatus;
+  }
+
+  autoRepairRunning = true;
+  try {
+    console.log(`[auto-repair] ${reason}: repairing ${underReplicatedChunks} under-replicated chunk(s)`);
+    const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush });
+    const repairedChunks = (result.report || []).filter((entry) => entry.repaired).length;
+    lastAutoRepairStatus = { ok: true, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks, underReplicatedChunks, skippedReason: null, error: null };
+    return lastAutoRepairStatus;
+  } catch (error) {
+    lastAutoRepairStatus = { ok: false, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks: 0, underReplicatedChunks, skippedReason: null, error: error?.message || String(error) };
+    console.warn('[auto-repair] failed:', error?.message || error);
+    return lastAutoRepairStatus;
+  } finally {
+    autoRepairRunning = false;
+  }
+}
+
+function startAutoRepairLoop() {
+  if (autoRepairTimer) return;
+  autoRepairTimer = setInterval(() => {
+    runAutoRepair('interval').catch((error) => console.warn('[auto-repair] unhandled:', error?.message || error));
+  }, AUTO_REPAIR_INTERVAL_MS);
+  autoRepairTimer.unref?.();
+  lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, intervalMs: AUTO_REPAIR_INTERVAL_MS, skippedReason: 'waiting' };
+  runAutoRepair('startup').catch((error) => console.warn('[auto-repair] startup failed:', error?.message || error));
+}
+
+function stopAutoRepairLoop() {
+  if (!autoRepairTimer) return;
+  clearInterval(autoRepairTimer);
+  autoRepairTimer = null;
+  lastAutoRepairStatus = { ...lastAutoRepairStatus, active: false, skippedReason: 'stopped' };
+}
+
 function networkSummary() {
   const node = ensureTransport({});
   const own = walletManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), wallet: walletSummary(), sync: lastSyncStatus };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
 }
 
 function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
@@ -215,11 +271,12 @@ ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
   walletState = { ...walletState, connected: true, verified: true, address, planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free', connectedAt: new Date().toISOString(), verifiedAt: login.signedAt, loginMessage: login.message, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
   persistWallet();
   await syncPull();
+  startAutoRepairLoop();
   return walletSummary();
 });
-ipcMain.handle('wallet:disconnect', async () => { walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
+ipcMain.handle('wallet:disconnect', async () => { stopAutoRepairLoop(); walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
-ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) await syncPull(); return networkSummary(); });
+ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
 ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
 
 ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
@@ -291,12 +348,12 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   return { ok: true, file: manifest, bytes: Array.from(outputBuffer) };
 });
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
-ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) await syncPull(); return networkSummary(); });
+ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const chunk = manifest.chunks?.[0]; if (!chunk) throw new Error('No chunks available for proof'); return { ok: true, proof: { ownerWallet: activeWallet(), rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, encrypted: Boolean(manifest.isEncrypted), keySource: manifest.encryption?.keySource || null, preparedAt: new Date().toISOString() } }; });
 
-app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) await syncPull(); createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
-app.on('before-quit', () => { persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
+app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
+app.on('before-quit', () => { stopAutoRepairLoop(); persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
 app.on('window-all-closed', () => {});
