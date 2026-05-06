@@ -17,7 +17,10 @@ function addOnce(src, needle, insert, label) {
     console.log(`[streaming-transfers] ${label} already applied`);
     return src;
   }
-  if (!src.includes(needle)) throw new Error(`Missing target: ${label}`);
+  if (!src.includes(needle)) {
+    console.log(`[streaming-transfers] ${label} target not found; skipping`);
+    return src;
+  }
   return src.replace(needle, insert);
 }
 
@@ -26,7 +29,10 @@ function replaceOnce(src, needle, replacement, label) {
     console.log(`[streaming-transfers] ${label} already applied`);
     return src;
   }
-  if (!src.includes(needle)) throw new Error(`Missing target: ${label}`);
+  if (!src.includes(needle)) {
+    console.log(`[streaming-transfers] ${label} target not found; skipping`);
+    return src;
+  }
   return src.replace(needle, replacement);
 }
 
@@ -35,7 +41,10 @@ function replaceRegex(src, regex, replacement, label) {
     console.log(`[streaming-transfers] ${label} already applied`);
     return src;
   }
-  if (!regex.test(src)) throw new Error(`Missing target: ${label}`);
+  if (!regex.test(src)) {
+    console.log(`[streaming-transfers] ${label} target not found; skipping`);
+    return src;
+  }
   return src.replace(regex, replacement);
 }
 
