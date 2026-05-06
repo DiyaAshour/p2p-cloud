@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const APP_TITLE = 'p2p.cloud';
+const APP_TITLE = 'Chunknet';
 let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
@@ -96,15 +96,15 @@ function showMainWindow() {
 function createTray() {
   if (tray) return tray;
   tray = new Tray(resolveTrayIcon());
-  tray.setToolTip(`${APP_TITLE} — running as a network peer`);
+  tray.setToolTip(`${APP_TITLE} — running securely in the background`);
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open p2p.cloud', click: showMainWindow },
+    { label: 'Open Chunknet', click: showMainWindow },
     { type: 'separator' },
-    { label: 'Network peer is running', enabled: false },
-    { label: 'Close window keeps peer online', enabled: false },
+    { label: 'Secure storage is running', enabled: false },
+    { label: 'Close window keeps protection online', enabled: false },
     { type: 'separator' },
     {
-      label: 'Quit p2p.cloud',
+      label: 'Quit Chunknet',
       click: () => {
         isQuitting = true;
         app.quit();
@@ -140,7 +140,7 @@ app.on('browser-window-created', (_event, win) => {
       closeNoticeShown = true;
       tray.displayBalloon?.({
         title: APP_TITLE,
-        content: 'p2p.cloud is still running in the background as a network peer.',
+        content: 'Chunknet is still running in the background to keep your storage available.',
       });
     }
   });
