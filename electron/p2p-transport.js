@@ -6,6 +6,7 @@ import path from 'node:path';
 const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
 const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
 const CHUNK_REQUEST_TIMEOUT_MS = Number(process.env.P2P_CHUNK_REQUEST_TIMEOUT_MS || 15000);
+const CHUNK_STORE_ACK_TIMEOUT_MS = Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOUT_MS || 5000);
 
 export class P2PTransportNode {
   constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST, publicUrl = null, chunkStoreDir = null } = {}) {
@@ -21,6 +22,7 @@ export class P2PTransportNode {
     this.localChunks = new Map();
     this.chunkReplicas = new Map();
     this.pendingChunkRequests = new Map();
+    this.pendingChunkAcks = new Map();
     this.ensureChunkStore();
   }
 
@@ -127,6 +129,11 @@ export class P2PTransportNode {
       pending.reject(new Error('P2P node stopped'));
     }
     this.pendingChunkRequests.clear();
+    for (const pending of this.pendingChunkAcks.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, peerId: pending.peerId, chunkHash: pending.chunkHash, error: 'P2P node stopped' });
+    }
+    this.pendingChunkAcks.clear();
     for (const socket of this.peerSockets.values()) socket.close();
     for (const socket of this.uiClients.values()) socket.close();
     this.server?.close();
@@ -190,28 +197,61 @@ export class P2PTransportNode {
     return { peerId, status: 'connecting', url };
   }
 
-  putChunkOnNetwork(chunk, replicaPeerIds = this.connectedPeerIds()) {
+  async putChunkOnNetwork(chunk, replicaPeerIds = this.connectedPeerIds()) {
     if (!chunk?.hash) throw new Error('chunk.hash is required');
     const targets = replicaPeerIds.filter((peerId) => this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN);
     if (!targets.length) throw new Error('No connected P2P peers available');
 
     const replicaSet = this.chunkReplicas.get(chunk.hash) || new Set();
+    const ackPromises = [];
 
     for (const peerId of targets) {
       const socket = this.peerSockets.get(peerId);
+      const messageId = crypto.randomUUID();
+      const fallbackKey = `${chunk.hash}:${peerId}`;
+
+      const ackPromise = new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          this.pendingChunkAcks.delete(messageId);
+          this.pendingChunkAcks.delete(fallbackKey);
+          resolve({ ok: false, peerId, chunkHash: chunk.hash, error: 'chunk:stored-ack timeout' });
+        }, CHUNK_STORE_ACK_TIMEOUT_MS);
+
+        const pending = { resolve, timeout, peerId, chunkHash: chunk.hash };
+        this.pendingChunkAcks.set(messageId, pending);
+        this.pendingChunkAcks.set(fallbackKey, pending);
+      });
+
+      ackPromises.push(ackPromise);
+
       this.send(socket, {
-        id: crypto.randomUUID(),
+        id: messageId,
         type: 'chunk:put',
         fromPeerId: this.peerId,
         toPeerId: peerId,
         createdAt: Date.now(),
         payload: { chunk },
       });
-      replicaSet.add(peerId);
+    }
+
+    const ackResults = await Promise.all(ackPromises);
+    const stored = [];
+    const failed = [];
+
+    for (const result of ackResults) {
+      if (result?.ok && result.peerId) {
+        replicaSet.add(result.peerId);
+        stored.push(result.peerId);
+      } else if (result?.peerId) {
+        failed.push(result);
+      }
     }
 
     this.chunkReplicas.set(chunk.hash, replicaSet);
-    return { ok: true, replicas: Array.from(replicaSet) };
+    if (failed.length) {
+      console.warn('[p2p-transport] chunk replica ack failed:', chunk.hash, failed.map((entry) => `${entry.peerId}:${entry.error}`).join(', '));
+    }
+    return { ok: true, replicas: stored, failedReplicas: failed, allKnownReplicas: Array.from(replicaSet) };
   }
 
   fetchChunkFromNetwork(chunkHash) {
@@ -299,7 +339,7 @@ export class P2PTransportNode {
           fromPeerId: this.peerId,
           toPeerId: message.fromPeerId,
           createdAt: Date.now(),
-          payload: { chunkHash: chunk.hash },
+          payload: { chunkHash: chunk.hash, ackTo: message.id || null },
         });
         this.broadcastToUi({ type: 'chunk:stored', chunkHash: chunk.hash, fromPeerId: message.fromPeerId });
       }
@@ -308,10 +348,22 @@ export class P2PTransportNode {
 
     if (message.type === 'chunk:stored-ack') {
       const chunkHash = message.payload?.chunkHash;
-      if (chunkHash && message.fromPeerId) {
+      const ackTo = message.payload?.ackTo;
+      const fromPeerId = message.fromPeerId;
+      if (chunkHash && fromPeerId) {
         const replicaSet = this.chunkReplicas.get(chunkHash) || new Set();
-        replicaSet.add(message.fromPeerId);
+        replicaSet.add(fromPeerId);
         this.chunkReplicas.set(chunkHash, replicaSet);
+      }
+
+      const ackKey = ackTo || (chunkHash && fromPeerId ? `${chunkHash}:${fromPeerId}` : null);
+      const pending = ackKey ? this.pendingChunkAcks.get(ackKey) : null;
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.pendingChunkAcks.delete(ackKey);
+        if (chunkHash && fromPeerId) this.pendingChunkAcks.delete(`${chunkHash}:${fromPeerId}`);
+        if (ackTo) this.pendingChunkAcks.delete(ackTo);
+        pending.resolve({ ok: true, peerId: fromPeerId, chunkHash });
       }
       return;
     }
