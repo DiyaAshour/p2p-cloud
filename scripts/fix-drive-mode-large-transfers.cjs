@@ -11,29 +11,24 @@ if (!fs.existsSync(file)) {
 
 let src = fs.readFileSync(file, 'utf8');
 
-function replaceBlock(startNeedle, endNeedle, replacement, label) {
+function replaceBlockByNextConst(functionName, nextFunctionName, replacement, label) {
+  const startNeedle = `  const ${functionName} =`;
+  const endNeedle = `\n\n  const ${nextFunctionName} =`;
   const start = src.indexOf(startNeedle);
   const end = src.indexOf(endNeedle, start);
   if (start === -1 || end === -1) {
     console.log(`[fix-drive-mode] ${label} not found; skipping`);
-    return;
+    return false;
   }
   src = src.slice(0, start) + replacement + src.slice(end);
   console.log(`[fix-drive-mode] patched ${label}`);
+  return true;
 }
 
-// IPC channel typing.
-if (!src.includes('| "p2p:uploadPath"')) {
-  src = src.replace('  | "p2p:upload"\n', '  | "p2p:upload"\n  | "p2p:uploadPath"\n');
-}
-if (!src.includes('| "p2p:downloadToPath"')) {
-  src = src.replace('  | "p2p:download"\n', '  | "p2p:download"\n  | "p2p:downloadToPath"\n');
-}
-if (!src.includes('| "system:pickFiles"')) {
-  src = src.replace('  | "wallet:disconnect";', '  | "wallet:disconnect"\n  | "system:pickFiles";');
-}
+if (!src.includes('| "p2p:uploadPath"')) src = src.replace('  | "p2p:upload"\n', '  | "p2p:upload"\n  | "p2p:uploadPath"\n');
+if (!src.includes('| "p2p:downloadToPath"')) src = src.replace('  | "p2p:download"\n', '  | "p2p:download"\n  | "p2p:downloadToPath"\n');
+if (!src.includes('| "system:pickFiles"')) src = src.replace('  | "wallet:disconnect";', '  | "wallet:disconnect"\n  | "system:pickFiles";');
 
-// Types.
 if (!src.includes('type NativePickedFile')) {
   src = src.replace(
     'type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };',
@@ -41,7 +36,6 @@ if (!src.includes('type NativePickedFile')) {
   );
 }
 
-// State and selected bytes.
 if (!src.includes('nativeSelectedFiles')) {
   src = src.replace(
     '  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);',
@@ -53,11 +47,7 @@ if (!src.includes('nativeSelectedFiles')) {
   );
 }
 
-// Native picker: avoid browser File.arrayBuffer for large files.
-replaceBlock(
-  '  const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) =>',
-  '\n\n  const uploadFiles = () => runBusy(async () => {',
-  `  const pickNativeFiles = () => runBusy(async () => {
+replaceBlockByNextConst('handleFileSelect', 'uploadFiles', `  const pickNativeFiles = () => runBusy(async () => {
     if (!walletConnected) throw new Error("Connect wallet before uploading");
     const result = await bridge.invoke<{ ok: boolean; files: NativePickedFile[] }>("system:pickFiles");
     const picked = Array.isArray(result.files) ? result.files : [];
@@ -67,15 +57,9 @@ replaceBlock(
   });
 
   const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => { void pickNativeFiles(); event.target.value = ""; };
-`,
-  'native file picker'
-);
+`, 'native file picker');
 
-// Upload via p2p:uploadPath for native picked files. Keep old small fallback only for any existing browser-selected File[] state.
-replaceBlock(
-  '  const uploadFiles = () => runBusy(async () => {',
-  '\n\n  const downloadFile = (file: P2PFile) =>',
-  `  const uploadFiles = () => runBusy(async () => {
+replaceBlockByNextConst('uploadFiles', 'downloadFile', `  const uploadFiles = () => runBusy(async () => {
     if (!walletConnected) throw new Error("Connect wallet before uploading");
     const password = requireDrivePassword();
     if (uploadWouldExceedQuota) throw new Error("Storage quota exceeded. Upgrade your plan.");
@@ -105,31 +89,19 @@ replaceBlock(
 
     setSelectedFiles([]);
     setNativeSelectedFiles([]);
-    toast.success(\`Uploaded \${uploadedCount} file(s) to \${currentPath || "My Drive"}\`);
+    toast.success(` + '`' + `Uploaded \${uploadedCount} file(s) to \${currentPath || "My Drive"}` + '`' + `);
     await refreshAll();
   });
-`,
-  'streaming uploadFiles'
-);
+`, 'streaming uploadFiles');
 
-// Download must save to disk. No Blob/anchor for main Download button.
-replaceBlock(
-  '  const downloadFile = (file: P2PFile) =>',
-  '\n\n  const openPreview = (file: P2PFile) =>',
-  `  const downloadFile = (file: P2PFile) => runBusy(async () => {
+replaceBlockByNextConst('downloadFile', 'openPreview', `  const downloadFile = (file: P2PFile) => runBusy(async () => {
     const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };
     const result = await bridge.invoke<DownloadToPathResult>("p2p:downloadToPath", payload);
     if (!result.canceled) toast.success("Download saved to disk");
   });
-`,
-  'save-to-disk downloadFile'
-);
+`, 'save-to-disk downloadFile');
 
-// Preview only for small images; large or non-image routes to downloadFile and stops there.
-replaceBlock(
-  '  const openPreview = (file: P2PFile) =>',
-  '\n\n  const deleteFile = (file: P2PFile) =>',
-  `  const openPreview = (file: P2PFile) => runBusy(async () => {
+replaceBlockByNextConst('openPreview', 'deleteFile', `  const openPreview = (file: P2PFile) => runBusy(async () => {
     if (!isImageFile(file) || file.size > 25 * 1024 * 1024) {
       await downloadFile(file);
       return;
@@ -142,11 +114,8 @@ replaceBlock(
     setPreviewUrl(URL.createObjectURL(blob));
     setPreviewFile(file);
   });
-`,
-  'safe openPreview'
-);
+`, 'safe openPreview');
 
-// UI: use native picker button, hide browser file input, count both file arrays.
 src = src.replace(
   '<Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="max-w-xs" />',
   '<Button type="button" variant="outline" onClick={pickNativeFiles} disabled={!walletConnected || busy}>Choose files</Button><Input type="file" multiple onChange={handleFileSelect} disabled={!walletConnected || busy} className="hidden" />'
@@ -160,7 +129,6 @@ src = src.replace(
   'Selected: {selectedFiles.length + nativeSelectedFiles.length} file(s), {formatBytes(selectedBytes)}'
 );
 
-// Prevent click bubbling from Download/Delete buttons triggering card preview/open and causing two dialogs.
 src = src.replaceAll('onClick={() => downloadFile(file)}', 'onClick={(event) => { event.stopPropagation(); void downloadFile(file); }}');
 src = src.replaceAll('onClick={() => deleteFile(file)}', 'onClick={(event) => { event.stopPropagation(); void deleteFile(file); }}');
 src = src.replaceAll('onClick={() => downloadFile(previewFile)}', 'onClick={(event) => { event.stopPropagation(); void downloadFile(previewFile); }}');
