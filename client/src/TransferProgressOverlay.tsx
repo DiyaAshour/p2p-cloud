@@ -1,0 +1,146 @@
+import { Download, Upload, XCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+
+type TransferProgress = {
+  active: boolean;
+  phase: string;
+  fileName: string;
+  totalBytes: number;
+  transferredBytes: number;
+  percent: number;
+  speedBytesPerSecond: number;
+  etaSeconds: number | null;
+  chunksDone: number;
+  totalChunks: number;
+  concurrency: number;
+  error?: string | null;
+};
+
+type NetworkSummary = {
+  transferProgress?: {
+    upload?: TransferProgress | null;
+    download?: TransferProgress | null;
+  };
+  transferSettings?: {
+    uploadConcurrency: number;
+    downloadConcurrency: number;
+  };
+};
+
+type ElectronBridge = {
+  invoke: <T>(channel: 'p2p:networkSummary') => Promise<T>;
+};
+
+declare global {
+  interface Window {
+    electron?: ElectronBridge;
+  }
+}
+
+function formatBytes(bytes = 0) {
+  if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(2)} TB`;
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  return `${bytes} B`;
+}
+
+function formatEta(seconds?: number | null) {
+  if (!seconds || seconds <= 0) return 'Almost done';
+  if (seconds < 60) return `${Math.ceil(seconds)}s remaining`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.ceil(seconds % 60);
+  return `${minutes}m ${rest}s remaining`;
+}
+
+function progressLabel(type: 'upload' | 'download') {
+  return type === 'upload' ? 'Uploading' : 'Downloading';
+}
+
+function TransferItem({ type, progress }: { type: 'upload' | 'download'; progress: TransferProgress }) {
+  const Icon = type === 'upload' ? Upload : Download;
+  const percent = Math.min(100, Math.max(0, Number(progress.percent || 0)));
+  const isError = progress.phase === 'error';
+
+  return (
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="rounded-xl bg-zinc-800 p-2 text-zinc-100">
+            {isError ? <XCircle className="size-5 text-red-300" /> : <Icon className="size-5" />}
+          </div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-zinc-50">
+              {progressLabel(type)} {progress.fileName || 'file'}
+            </p>
+            <p className="mt-1 text-xs text-zinc-400">
+              {progress.chunksDone}/{progress.totalChunks} chunks · {progress.concurrency} parallel
+            </p>
+          </div>
+        </div>
+        <div className="shrink-0 rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-100">
+          {isError ? 'Error' : `${percent.toFixed(0)}%`}
+        </div>
+      </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-zinc-800">
+        <div className="h-full rounded-full bg-zinc-50 transition-all duration-500" style={{ width: `${percent}%` }} />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+        <span>{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</span>
+        <span>{formatBytes(progress.speedBytesPerSecond)}/s · {formatEta(progress.etaSeconds)}</span>
+      </div>
+
+      {progress.error && (
+        <p className="mt-3 rounded-xl bg-red-950/50 p-2 text-xs text-red-200">
+          {progress.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default function TransferProgressOverlay() {
+  const [summary, setSummary] = useState<NetworkSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const tick = async () => {
+      if (typeof window === 'undefined' || typeof window.electron?.invoke !== 'function') return;
+      try {
+        const next = await window.electron.invoke<NetworkSummary>('p2p:networkSummary');
+        if (!cancelled) setSummary(next);
+      } catch {
+        // Keep this overlay silent; the main app handles visible operation errors.
+      }
+    };
+
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const transfers = useMemo(() => {
+    const upload = summary?.transferProgress?.upload;
+    const download = summary?.transferProgress?.download;
+    return [
+      upload && (upload.active || upload.phase === 'error') ? { type: 'upload' as const, progress: upload } : null,
+      download && (download.active || download.phase === 'error') ? { type: 'download' as const, progress: download } : null,
+    ].filter(Boolean) as Array<{ type: 'upload' | 'download'; progress: TransferProgress }>;
+  }, [summary]);
+
+  if (!transfers.length) return null;
+
+  return (
+    <div className="fixed bottom-5 right-5 z-[80] grid w-[min(420px,calc(100vw-2.5rem))] gap-3">
+      {transfers.map((transfer) => (
+        <TransferItem key={transfer.type} type={transfer.type} progress={transfer.progress} />
+      ))}
+    </div>
+  );
+}
