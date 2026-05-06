@@ -16,9 +16,7 @@ function patchNativeP2PApp() {
   const rel = 'client/src/NativeP2PApp.tsx';
   let src = read(rel);
 
-  if (!src.includes('"p2p:downloadToPath"')) {
-    src = src.replace('"p2p:download" |', '"p2p:download" | "p2p:downloadToPath" |');
-  }
+  if (!src.includes('"p2p:downloadToPath"')) src = src.replace('"p2p:download" |', '"p2p:download" | "p2p:downloadToPath" |');
   if (!src.includes('type DownloadToPathResult')) {
     src = src.replace('type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };', 'type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };\ntype DownloadToPathResult = { ok: boolean; canceled?: boolean; path?: string };');
   }
@@ -30,10 +28,10 @@ function patchNativeP2PApp() {
     src = src.slice(0, downloadStart) + replacement + src.slice(previewStart);
   }
 
-  const previewEnd = src.indexOf('  const closePreview = () =>', src.indexOf('  const previewImage = (file: P2PFile) => runBusy(async () => {'));
   const previewBlockStart = src.indexOf('  const previewImage = (file: P2PFile) => runBusy(async () => {');
+  const previewEnd = src.indexOf('  const closePreview = () =>', previewBlockStart);
   if (previewBlockStart !== -1 && previewEnd !== -1) {
-    const replacement = '  const previewImage = (file: P2PFile) => runBusy(async () => { if (!isImageFile(file)) return; if (file.size > 25 * 1024 * 1024) { toast.info("Large image preview is disabled. Use Download to save it safely."); await downloadFile(file); return; } const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); if (previewUrl) URL.revokeObjectURL(previewUrl); const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" }); setPreviewUrl(URL.createObjectURL(blob)); setPreviewName(result.file.name); });\n';
+    const replacement = '  const previewImage = (file: P2PFile) => runBusy(async () => { if (!isImageFile(file)) return; if (file.size > 25 * 1024 * 1024) { await downloadFile(file); return; } const password = file.isEncrypted ? getDrivePassword() : null; const result = await bridge.invoke<DownloadResult>("p2p:download", { hash: file.hash, drivePassword: password }); if (previewUrl) URL.revokeObjectURL(previewUrl); const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" }); setPreviewUrl(URL.createObjectURL(blob)); setPreviewName(result.file.name); });\n';
     src = src.slice(0, previewBlockStart) + replacement + src.slice(previewEnd);
   }
 
@@ -42,13 +40,10 @@ function patchNativeP2PApp() {
 
 function patchDriveP2PApp() {
   const rel = 'client/src/DriveP2PApp.tsx';
-  const abs = path.join(root, rel);
-  if (!fs.existsSync(abs)) return;
+  if (!fs.existsSync(path.join(root, rel))) return;
   let src = read(rel);
 
-  if (!src.includes('| "p2p:downloadToPath"')) {
-    src = src.replace('  | "p2p:download"\n', '  | "p2p:download"\n  | "p2p:downloadToPath"\n');
-  }
+  if (!src.includes('| "p2p:downloadToPath"')) src = src.replace('  | "p2p:download"\n', '  | "p2p:download"\n  | "p2p:downloadToPath"\n');
   if (!src.includes('type DownloadToPathResult')) {
     src = src.replace('type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };', 'type DownloadResult = { ok: boolean; file: P2PFile; bytes: number[] };\ntype DownloadToPathResult = { ok: boolean; canceled?: boolean; path?: string };');
   }
@@ -63,7 +58,7 @@ function patchDriveP2PApp() {
   const previewStart = src.indexOf('  const openPreview = (file: P2PFile) => runBusy(async () => {');
   const deleteStart = src.indexOf('  const deleteFile = (file: P2PFile) => runBusy(async () => {', previewStart);
   if (previewStart !== -1 && deleteStart !== -1) {
-    const replacement = '  const openPreview = (file: P2PFile) => runBusy(async () => {\n    if (!isImageFile(file) || file.size > 25 * 1024 * 1024) {\n      if (isImageFile(file)) toast.info("Large image preview is disabled. Use Download to save it safely.");\n      await downloadFile(file);\n      return;\n    }\n    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };\n    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);\n    const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });\n    if (previewUrl) URL.revokeObjectURL(previewUrl);\n    setPreviewUrl(URL.createObjectURL(blob));\n    setPreviewFile(file);\n  });\n\n';
+    const replacement = '  const openPreview = (file: P2PFile) => runBusy(async () => {\n    if (!isImageFile(file) || file.size > 25 * 1024 * 1024) {\n      await downloadFile(file);\n      return;\n    }\n    const payload = file.isEncrypted ? { hash: file.hash, drivePassword: requireDrivePassword() } : { hash: file.hash };\n    const result = await bridge.invoke<DownloadResult>("p2p:download", payload);\n    const blob = new Blob([new Uint8Array(result.bytes)], { type: result.file.mimeType || "image/*" });\n    if (previewUrl) URL.revokeObjectURL(previewUrl);\n    setPreviewUrl(URL.createObjectURL(blob));\n    setPreviewFile(file);\n  });\n\n';
     src = src.slice(0, previewStart) + replacement + src.slice(deleteStart);
   }
 
@@ -73,15 +68,27 @@ function patchDriveP2PApp() {
 function patchMainLegacyGuard() {
   const rel = 'electron/main.js';
   let src = read(rel);
+  const throwingGuard = "  if (Number(manifest.storedSize || manifest.size || 0) > 50 * 1024 * 1024) throw new Error('Large downloads must use p2p:downloadToPath. Use the Download button, not Preview.');\n";
+  const routingGuard = "  if (Number(manifest.storedSize || manifest.size || 0) > 50 * 1024 * 1024) {\n    const saved = await downloadFileToPathPayload(payload);\n    return { ok: true, file: manifest, bytes: [], savedToPath: saved?.path || null, canceled: Boolean(saved?.canceled) };\n  }\n";
+
+  if (src.includes(throwingGuard)) {
+    src = src.replace(throwingGuard, routingGuard);
+    write(rel, src);
+    return;
+  }
+  if (src.includes(routingGuard)) {
+    console.log('[fix-download-paths] legacy large download routing already applied');
+    return;
+  }
+
   const needle = "  const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);";
-  const guard = "  if (Number(manifest.storedSize || manifest.size || 0) > 50 * 1024 * 1024) throw new Error('Large downloads must use p2p:downloadToPath. Use the Download button, not Preview.');\n";
   const handlerIndex = src.indexOf("ipcMain.handle('p2p:download'");
   const needleIndex = src.indexOf(needle, handlerIndex);
-  if (handlerIndex !== -1 && needleIndex !== -1 && !src.slice(handlerIndex, needleIndex).includes('Large downloads must use p2p:downloadToPath')) {
-    src = src.slice(0, needleIndex) + guard + src.slice(needleIndex);
+  if (handlerIndex !== -1 && needleIndex !== -1) {
+    src = src.slice(0, needleIndex) + routingGuard + src.slice(needleIndex);
     write(rel, src);
   } else {
-    console.log('[fix-download-paths] legacy guard already applied or target missing');
+    console.log('[fix-download-paths] legacy routing target missing');
   }
 }
 
