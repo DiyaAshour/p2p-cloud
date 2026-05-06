@@ -1,7 +1,7 @@
 {
-  "name": "p2p-cloud",
+  "name": "chunknet",
   "version": "1.0.0",
-  "description": "A wallet-based P2P cloud storage desktop app with encrypted chunks, peer discovery, and manifest sync.",
+  "description": "Chunknet is a wallet-based P2P cloud storage desktop app with encrypted chunks, peer discovery, and manifest sync.",
   "author": "Diya Ashour",
   "type": "module",
   "license": "MIT",
@@ -90,9 +90,9 @@
     ]
   },
   "build": {
-    "appId": "cloud.p2p.app",
-    "productName": "PeerCloud Drive",
-    "artifactName": "PeerCloud-Drive-${version}-setup.${ext}",
+    "appId": "io.chunknet.app",
+    "productName": "Chunknet",
+    "artifactName": "Chunknet-${version}-setup.${ext}",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -112,8 +112,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "PeerCloud Drive",
-      "uninstallDisplayName": "PeerCloud Drive",
+      "shortcutName": "Chunknet",
+      "uninstallDisplayName": "Chunknet",
       "license": "build/license.txt"
     }
   }
