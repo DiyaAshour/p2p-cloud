@@ -9,14 +9,23 @@ const checks = [
     scopeEndCandidates: ["\nipcMain.handle('p2p:delete'", "\nipcMain.handle('p2p:repair'", "\nipcMain.handle('p2p:prepareProof'"],
   },
   {
+    file: 'electron/main.js',
+    forbidden: ['Buffer.from(payload.bytes)', 'splitIntoChunks(storedBuffer)', 'encryptPrivateBuffer(originalBuffer'],
+    required: ['p2p:uploadFiles', 'uploadFilePathStreaming', 'chunknet-uploads', 'fs.createReadStream(filePath'],
+  },
+  {
+    file: 'electron/preload.cjs',
+    required: ["'p2p:uploadFiles'"],
+  },
+  {
     file: 'client/src/DriveP2PAppPassword.tsx',
-    forbidden: ['new Uint8Array(r.bytes)', 'bytes: number[]'],
-    required: ['savedPath', 'Download complete'],
+    forbidden: ['new Uint8Array(r.bytes)', 'bytes: number[]', 'await file.arrayBuffer()', 'bytes: await'],
+    required: ['savedPath', 'Download complete', 'p2p:uploadFiles'],
   },
   {
     file: 'package.json',
     forbidden: ['powershell -NoProfile -Command Start-Sleep'],
-    required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs'],
+    required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs', 'patch-native-upload-streaming.cjs', 'patch-native-upload-ui.cjs', 'verify-runtime-safety.cjs'],
   },
 ];
 
@@ -45,4 +54,4 @@ for (const check of checks) {
   }
 }
 
-console.log('[verify-runtime-safety] download/runtime checks passed');
+console.log('[verify-runtime-safety] upload/download streaming runtime checks passed');
