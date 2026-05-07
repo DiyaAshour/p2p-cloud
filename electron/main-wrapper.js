@@ -134,6 +134,32 @@ function applySmartSelfHealingPatch(mainFile) {
   }
 }
 
+function applyUploadTempPathScopeFix(mainFile) {
+  let source = fs.readFileSync(mainFile, 'utf8');
+  let next = source;
+  const uploadStart = next.indexOf("ipcMain.handle('p2p:upload', async");
+  const nativeUploadStart = next.indexOf('async function uploadFilePathStreaming', uploadStart);
+  const legacyUploadScope = uploadStart >= 0 ? next.slice(uploadStart, nativeUploadStart >= 0 ? nativeUploadStart : next.length) : '';
+
+  if (legacyUploadScope.includes("fs.openSync(tempPath, 'r')")) {
+    const fixedScope = legacyUploadScope.replace(
+      /const fd = fs\.openSync\(tempPath, 'r'\);\n\s*let data;\n\s*try \{\n\s*data = Buffer\.allocUnsafe\(chunk\.size\);\n\s*fs\.readSync\(fd, data, 0, chunk\.size, chunk\.offset\);\n\s*\} finally \{\n\s*fs\.closeSync\(fd\);\n\s*\}\n\s*const chunkPayload = \{ hash: chunk\.hash, data: data\.toString\('base64'\), index: chunk\.index, size: chunk\.size, ownerWallet, encrypted: privateFile \};/g,
+      "const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };"
+    );
+    next = next.slice(0, uploadStart) + fixedScope + next.slice(nativeUploadStart >= 0 ? nativeUploadStart : next.length);
+  }
+
+  next = next.replace(
+    /try \{ fs\.unlinkSync\(tempPath\); \} catch \{\}/g,
+    "try { if (typeof tempPath !== 'undefined' && tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}"
+  );
+
+  if (next !== source) {
+    fs.writeFileSync(mainFile, next, 'utf8');
+    console.log('[runtime-safety] fixed upload tempPath scope');
+  }
+}
+
 function applyRuntimeSafetyPatches() {
   const projectRoot = path.join(__dirname, '..');
   const mainFile = path.join(__dirname, 'main.js');
@@ -156,6 +182,7 @@ function applyRuntimeSafetyPatches() {
 
     if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
     if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
+    applyUploadTempPathScopeFix(mainFile);
 
     const patched = fs.readFileSync(mainFile, 'utf8');
     if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
