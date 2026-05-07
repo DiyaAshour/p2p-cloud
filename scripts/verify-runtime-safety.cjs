@@ -32,6 +32,11 @@ const checks = [
     required: ['savedPath', 'Download complete', 'p2p:uploadFiles'],
   },
   {
+    file: 'client/src/NativeP2PApp.tsx',
+    forbidden: ['new Uint8Array(result.bytes)', 'result.bytes', 'bytes: number[]', 'await file.arrayBuffer()', 'bytes: await'],
+    required: ['p2p:uploadFiles', 'savedPath', 'Download complete', 'RAM-safe mode'],
+  },
+  {
     file: 'package.json',
     forbidden: ['powershell -NoProfile -Command Start-Sleep'],
     required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs', 'patch-native-upload-streaming.cjs', 'patch-upload-ram-final.cjs', 'patch-native-upload-ui.cjs', 'verify-runtime-safety.cjs'],
