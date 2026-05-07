@@ -1,5 +1,3 @@
-import DriveP2PAppPassword from "./DriveP2PAppPassword";
+import NativeP2PApp from "./NativeP2PApp";
 
-export default function NativeP2PAppSafe() {
-  return <DriveP2PAppPassword />;
-}
+export default NativeP2PApp;
