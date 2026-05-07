@@ -114,12 +114,16 @@ function applyRuntimeSafetyPatches() {
     const needsUploadPatch =
       !mainSource.includes("ipcMain.handle('p2p:uploadFiles'") ||
       !mainSource.includes('uploadFilePathStreaming');
+    const needsUploadRamFinalPatch =
+      mainSource.includes('chunk.data.toString') ||
+      mainSource.includes('chunkMetas.push({ index, size: data.length, data, hash })');
     const needsDialogImport =
       !mainSource.includes("dialog } from 'electron'") &&
       !mainSource.includes("dialog, ");
 
     if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
     if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
+    runPatchScript(projectRoot, 'patch-upload-ram-final.cjs');
 
     const patched = fs.readFileSync(mainFile, 'utf8');
     if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
@@ -127,6 +131,9 @@ function applyRuntimeSafetyPatches() {
     }
     if (!patched.includes("ipcMain.handle('p2p:uploadFiles'") || !patched.includes('uploadFilePathStreaming')) {
       throw new Error('Streaming upload handler is missing after runtime patch.');
+    }
+    if (patched.includes('chunk.data.toString') || patched.includes('chunkMetas.push({ index, size: data.length, data, hash })')) {
+      throw new Error('Upload chunk RAM retention is still present after runtime patch.');
     }
   } catch (error) {
     console.error('[runtime-safety] failed to apply P2P memory safety patches:', error?.message || error);
