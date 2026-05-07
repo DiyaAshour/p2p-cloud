@@ -10,8 +10,15 @@ const checks = [
   },
   {
     file: 'electron/main.js',
+    forbidden: ['chunk.data.toString', 'chunkMetas.push({ index, size: data.length, data, hash })'],
+    required: ['uploadFilePathStreaming', 'chunknet-uploads', 'fs.createReadStream(filePath', 'fs.readSync(fd, data, 0, chunk.size, chunk.offset)'],
+    scopeStart: 'async function uploadFilePathStreaming',
+    scopeEndCandidates: ["\nipcMain.handle('p2p:uploadFiles'"],
+  },
+  {
+    file: 'electron/main.js',
     forbidden: [],
-    required: ['p2p:uploadFiles', 'uploadFilePathStreaming', 'chunknet-uploads', 'fs.createReadStream(filePath'],
+    required: ['p2p:uploadFiles', 'uploadFilePathStreaming'],
     scopeStart: "ipcMain.handle('p2p:uploadFiles'",
     scopeEndCandidates: ["\nipcMain.handle('p2p:download'", "\nipcMain.handle('p2p:delete'"],
   },
@@ -27,7 +34,7 @@ const checks = [
   {
     file: 'package.json',
     forbidden: ['powershell -NoProfile -Command Start-Sleep'],
-    required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs', 'patch-native-upload-streaming.cjs', 'patch-native-upload-ui.cjs', 'verify-runtime-safety.cjs'],
+    required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs', 'patch-native-upload-streaming.cjs', 'patch-upload-ram-final.cjs', 'patch-native-upload-ui.cjs', 'verify-runtime-safety.cjs'],
   },
 ];
 
