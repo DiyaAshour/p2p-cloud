@@ -13,6 +13,7 @@ function run(command, args) {
 run('node', ['scripts/fix-native-p2p-jsx.cjs']);
 run('node', ['scripts/patch-download-memory.cjs']);
 run('node', ['scripts/patch-drive-download-ui.cjs']);
+run('node', ['scripts/verify-runtime-safety.cjs']);
 run('node', ['scripts/repair-encrypted-manifests.js']);
 run('node', ['scripts/remove-bad-encrypted-manifests.js']);
 
