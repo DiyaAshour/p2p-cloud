@@ -75,29 +75,49 @@ function configureNetworkRuntime() {
   }
 }
 
+function runPatchScript(projectRoot, scriptName) {
+  const scriptPath = path.join(projectRoot, 'scripts', scriptName);
+  if (!fs.existsSync(scriptPath)) return;
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.stdout) console.log(result.stdout.trim());
+  if (result.stderr) console.warn(result.stderr.trim());
+  if (result.status !== 0) throw new Error(`${scriptName} failed: ${result.stderr || result.stdout || result.status}`);
+}
+
 function applyRuntimeSafetyPatches() {
   const projectRoot = path.join(__dirname, '..');
-  const patchScript = path.join(projectRoot, 'scripts', 'patch-download-memory.cjs');
   const mainFile = path.join(__dirname, 'main.js');
-  if (!fs.existsSync(patchScript) || !fs.existsSync(mainFile)) return;
+  if (!fs.existsSync(mainFile)) return;
 
   try {
     const mainSource = fs.readFileSync(mainFile, 'utf8');
-    const unsafeDownload = mainSource.includes('Buffer.concat(buffers)') || mainSource.includes('Array.from(plain)');
-    const missingDialogImport = !mainSource.includes("dialog } from 'electron'") && !mainSource.includes("dialog, ");
-    if (!unsafeDownload && !missingDialogImport && mainSource.includes('chunknet-downloads')) return;
+    const needsDownloadPatch =
+      mainSource.includes('Buffer.concat(buffers)') ||
+      mainSource.includes('Array.from(plain)') ||
+      !mainSource.includes('chunknet-downloads');
+    const needsUploadPatch =
+      !mainSource.includes("ipcMain.handle('p2p:uploadFiles'") ||
+      !mainSource.includes('uploadFilePathStreaming');
+    const needsDialogImport =
+      !mainSource.includes("dialog } from 'electron'") &&
+      !mainSource.includes("dialog, ");
 
-    const result = spawnSync(process.execPath, [patchScript], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
+    if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
 
-    if (result.stdout) console.log(result.stdout.trim());
-    if (result.stderr) console.warn(result.stderr.trim());
-    if (result.status !== 0) throw new Error(result.stderr || result.stdout || `patch exited with ${result.status}`);
+    const patched = fs.readFileSync(mainFile, 'utf8');
+    if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
+      throw new Error('Unsafe large-file download code is still present after runtime patch.');
+    }
+    if (!patched.includes("ipcMain.handle('p2p:uploadFiles'") || !patched.includes('uploadFilePathStreaming')) {
+      throw new Error('Streaming upload handler is missing after runtime patch.');
+    }
   } catch (error) {
-    console.error('[runtime-safety] failed to apply download memory patch:', error?.message || error);
+    console.error('[runtime-safety] failed to apply P2P memory safety patches:', error?.message || error);
     throw error;
   }
 }
