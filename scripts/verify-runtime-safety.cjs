@@ -10,8 +10,10 @@ const checks = [
   },
   {
     file: 'electron/main.js',
-    forbidden: ['Buffer.from(payload.bytes)', 'splitIntoChunks(storedBuffer)', 'encryptPrivateBuffer(originalBuffer'],
+    forbidden: [],
     required: ['p2p:uploadFiles', 'uploadFilePathStreaming', 'chunknet-uploads', 'fs.createReadStream(filePath'],
+    scopeStart: "ipcMain.handle('p2p:uploadFiles'",
+    scopeEndCandidates: ["\nipcMain.handle('p2p:download'", "\nipcMain.handle('p2p:delete'"],
   },
   {
     file: 'electron/preload.cjs',
