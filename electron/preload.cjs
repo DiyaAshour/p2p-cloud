@@ -6,8 +6,9 @@ const allowedChannels = new Set([
   'p2p:start',
   'p2p:listFiles',
   'p2p:upload',
-  'p2p:uploadFiles',
+  'p2p:uploadPath',
   'p2p:download',
+  'p2p:downloadToPath',
   'p2p:delete',
   'p2p:networkSummary',
   'p2p:bootstrapNow',
@@ -21,6 +22,7 @@ const allowedChannels = new Set([
   'electron:openDevTools',
   'electron:diagnostics',
   'system:open-external',
+  'system:pickFiles',
 ]);
 
 function assertAllowedChannel(channel) {
