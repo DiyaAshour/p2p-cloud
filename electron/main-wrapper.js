@@ -64,6 +64,13 @@ function chooseLanAddress() {
 
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
+
+  // Safer defaults: faster than 1 MB chunks, but still low-memory.
+  // Users can override any of these env vars for benchmarking.
+  if (!process.env.P2P_CHUNK_SIZE_BYTES) process.env.P2P_CHUNK_SIZE_BYTES = String(2 * 1024 * 1024);
+  if (!process.env.P2P_UPLOAD_CONCURRENCY) process.env.P2P_UPLOAD_CONCURRENCY = '4';
+  if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
+
   if (!process.env.P2P_PUBLIC_URL && !process.env.VITE_P2P_PUBLIC_URL) {
     const ip = chooseLanAddress();
     process.env.P2P_PUBLIC_URL = `ws://${ip}:${port}`;
@@ -73,6 +80,11 @@ function configureNetworkRuntime() {
     process.env.P2P_CHUNK_STORE_DIR = path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks');
     console.log('[runtime] selected chunk store:', process.env.P2P_CHUNK_STORE_DIR);
   }
+  console.log('[runtime] transfer defaults:', {
+    chunkSizeBytes: process.env.P2P_CHUNK_SIZE_BYTES,
+    uploadConcurrency: process.env.P2P_UPLOAD_CONCURRENCY,
+    downloadConcurrency: process.env.P2P_DOWNLOAD_CONCURRENCY,
+  });
 }
 
 function runPatchScript(projectRoot, scriptName) {
