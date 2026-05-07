@@ -2,6 +2,7 @@ import { app, Menu, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -71,6 +72,33 @@ function configureNetworkRuntime() {
   if (!process.env.P2P_CHUNK_STORE_DIR) {
     process.env.P2P_CHUNK_STORE_DIR = path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks');
     console.log('[runtime] selected chunk store:', process.env.P2P_CHUNK_STORE_DIR);
+  }
+}
+
+function applyRuntimeSafetyPatches() {
+  const projectRoot = path.join(__dirname, '..');
+  const patchScript = path.join(projectRoot, 'scripts', 'patch-download-memory.cjs');
+  const mainFile = path.join(__dirname, 'main.js');
+  if (!fs.existsSync(patchScript) || !fs.existsSync(mainFile)) return;
+
+  try {
+    const mainSource = fs.readFileSync(mainFile, 'utf8');
+    const unsafeDownload = mainSource.includes('Buffer.concat(buffers)') || mainSource.includes('Array.from(plain)');
+    const missingDialogImport = !mainSource.includes("dialog } from 'electron'") && !mainSource.includes("dialog, ");
+    if (!unsafeDownload && !missingDialogImport && mainSource.includes('chunknet-downloads')) return;
+
+    const result = spawnSync(process.execPath, [patchScript], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (result.stdout) console.log(result.stdout.trim());
+    if (result.stderr) console.warn(result.stderr.trim());
+    if (result.status !== 0) throw new Error(result.stderr || result.stdout || `patch exited with ${result.status}`);
+  } catch (error) {
+    console.error('[runtime-safety] failed to apply download memory patch:', error?.message || error);
+    throw error;
   }
 }
 
@@ -151,5 +179,6 @@ app.on('before-quit', () => {
 });
 
 if (gotSingleInstanceLock) {
+  applyRuntimeSafetyPatches();
   await import('./main.js');
 }
