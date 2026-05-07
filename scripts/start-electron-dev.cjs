@@ -14,6 +14,7 @@ run('node', ['scripts/fix-native-p2p-jsx.cjs']);
 run('node', ['scripts/patch-download-memory.cjs']);
 run('node', ['scripts/patch-drive-download-ui.cjs']);
 run('node', ['scripts/patch-native-upload-streaming.cjs']);
+run('node', ['scripts/patch-upload-ram-final.cjs']);
 run('node', ['scripts/patch-native-upload-ui.cjs']);
 run('node', ['scripts/verify-runtime-safety.cjs']);
 run('node', ['scripts/repair-encrypted-manifests.js']);
