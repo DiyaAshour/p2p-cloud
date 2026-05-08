@@ -63,7 +63,6 @@ function chooseLanAddress() {
 
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
-
   if (!process.env.P2P_CHUNK_SIZE_BYTES) process.env.P2P_CHUNK_SIZE_BYTES = String(2 * 1024 * 1024);
   if (!process.env.P2P_UPLOAD_CONCURRENCY) process.env.P2P_UPLOAD_CONCURRENCY = '4';
   if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
@@ -89,10 +88,7 @@ function configureNetworkRuntime() {
 }
 
 function resolveTrayIcon() {
-  const candidates = [
-    path.join(__dirname, '..', 'assets', 'icon.ico'),
-    path.join(__dirname, '..', 'assets', 'icon.png'),
-  ];
+  const candidates = [path.join(__dirname, '..', 'assets', 'icon.ico'), path.join(__dirname, '..', 'assets', 'icon.png')];
   const found = candidates.find((candidate) => fs.existsSync(candidate));
   if (!found) return nativeImage.createEmpty();
   const image = nativeImage.createFromPath(found);
@@ -117,13 +113,7 @@ function createTray() {
     { label: 'Secure storage is running', enabled: false },
     { label: 'Close window keeps protection online', enabled: false },
     { type: 'separator' },
-    {
-      label: 'Quit Chunknet',
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      },
-    },
+    { label: 'Quit Chunknet', click: () => { isQuitting = true; app.quit(); } },
   ]));
   tray.on('double-click', showMainWindow);
   return tray;
@@ -132,15 +122,6 @@ function createTray() {
 app.on('ready', () => {
   configureNetworkRuntime();
   createTray();
-  try {
-    app.setLoginItemSettings({
-      openAtLogin: true,
-      openAsHidden: false,
-      name: APP_TITLE,
-    });
-  } catch (error) {
-    console.warn('[tray] failed to enable auto start:', error?.message || error);
-  }
 });
 
 app.on('browser-window-created', (_event, win) => {
@@ -152,18 +133,13 @@ app.on('browser-window-created', (_event, win) => {
     createTray();
     if (!closeNoticeShown && tray) {
       closeNoticeShown = true;
-      tray.displayBalloon?.({
-        title: APP_TITLE,
-        content: 'Chunknet is still running in the background to keep your storage available.',
-      });
+      tray.displayBalloon?.({ title: APP_TITLE, content: 'Chunknet is still running in the background to keep your storage available.' });
     }
   });
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
-});
+app.on('before-quit', () => { isQuitting = true; });
 
 if (gotSingleInstanceLock) {
-  await import('./main.js');
+  await import('./main-stable.js');
 }
