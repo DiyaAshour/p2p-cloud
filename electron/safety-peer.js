@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 
+const DEFAULT_SAFETY_PEER_URL = 'ws://54.166.171.208:8787';
 const SAFETY_PEER_TIMEOUT_MS = Number(process.env.P2P_SAFETY_PEER_TIMEOUT_MS || 15000);
 
 export function safetyPeerUrl() {
@@ -7,7 +8,7 @@ export function safetyPeerUrl() {
     process.env.P2P_SAFETY_PEER_URL ||
     process.env.STORAGE_PEER_URL ||
     process.env.VITE_STORAGE_PEER_URL ||
-    ''
+    DEFAULT_SAFETY_PEER_URL
   ).trim();
 }
 
