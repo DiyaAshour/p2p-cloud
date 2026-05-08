@@ -2,7 +2,6 @@ import { app, Menu, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,14 +64,9 @@ function chooseLanAddress() {
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
 
-  // Safer defaults: faster than 1 MB chunks, but still low-memory.
-  // Users can override any of these env vars for benchmarking.
   if (!process.env.P2P_CHUNK_SIZE_BYTES) process.env.P2P_CHUNK_SIZE_BYTES = String(2 * 1024 * 1024);
   if (!process.env.P2P_UPLOAD_CONCURRENCY) process.env.P2P_UPLOAD_CONCURRENCY = '4';
   if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
-
-  // Commercial self-healing defaults: do not pressure startup.
-  // First background healing check waits 5 minutes, then runs every 3 hours.
   if (!process.env.P2P_AUTO_REPAIR_INTERVAL_MS) process.env.P2P_AUTO_REPAIR_INTERVAL_MS = String(3 * 60 * 60 * 1000);
   if (!process.env.P2P_AUTO_REPAIR_START_DELAY_MS) process.env.P2P_AUTO_REPAIR_START_DELAY_MS = String(5 * 60 * 1000);
 
@@ -92,109 +86,6 @@ function configureNetworkRuntime() {
     autoRepairIntervalMs: process.env.P2P_AUTO_REPAIR_INTERVAL_MS,
     autoRepairStartDelayMs: process.env.P2P_AUTO_REPAIR_START_DELAY_MS,
   });
-}
-
-function runPatchScript(projectRoot, scriptName) {
-  const scriptPath = path.join(projectRoot, 'scripts', scriptName);
-  if (!fs.existsSync(scriptPath)) return;
-  const result = spawnSync(process.execPath, [scriptPath], {
-    cwd: projectRoot,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (result.stdout) console.log(result.stdout.trim());
-  if (result.stderr) console.warn(result.stderr.trim());
-  if (result.status !== 0) throw new Error(`${scriptName} failed: ${result.stderr || result.stdout || result.status}`);
-}
-
-function applySmartSelfHealingPatch(mainFile) {
-  let source = fs.readFileSync(mainFile, 'utf8');
-  let next = source;
-
-  next = next.replace(
-    'process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 60_000',
-    'process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 10_800_000'
-  );
-
-  next = next.replace(
-    "  runAutoRepair('startup').catch((error) => console.warn('[auto-repair] startup failed:', error?.message || error));",
-    "  setTimeout(() => runAutoRepair('delayed-startup').catch((error) => console.warn('[auto-repair] delayed startup failed:', error?.message || error)), Number(process.env.P2P_AUTO_REPAIR_START_DELAY_MS || 300000));"
-  );
-
-  if (!next.includes("skippedReason: 'no-peers'")) {
-    next = next.replace(
-      "  const node = ensureTransport({});\n  const own = walletManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);",
-      "  const node = ensureTransport({});\n  const connectedPeers = node.connectedPeerIds?.() || [];\n  const own = walletManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);\n  if (connectedPeers.length === 0) {\n    lastAutoRepairStatus = { ok: true, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks: 0, underReplicatedChunks, skippedReason: 'no-peers', error: null };\n    return lastAutoRepairStatus;\n  }"
-    );
-  }
-
-  if (next !== source) {
-    fs.writeFileSync(mainFile, next, 'utf8');
-    console.log('[runtime-safety] applied smart background self-healing patch');
-  }
-}
-
-function applyUploadTempPathScopeFix(mainFile) {
-  let source = fs.readFileSync(mainFile, 'utf8');
-  let next = source;
-  const uploadStart = next.indexOf("ipcMain.handle('p2p:upload', async");
-  const nativeUploadStart = next.indexOf('async function uploadFilePathStreaming', uploadStart);
-  const legacyUploadScope = uploadStart >= 0 ? next.slice(uploadStart, nativeUploadStart >= 0 ? nativeUploadStart : next.length) : '';
-
-  if (legacyUploadScope.includes("fs.openSync(tempPath, 'r')")) {
-    const fixedScope = legacyUploadScope.replace(
-      /const fd = fs\.openSync\(tempPath, 'r'\);\n\s*let data;\n\s*try \{\n\s*data = Buffer\.allocUnsafe\(chunk\.size\);\n\s*fs\.readSync\(fd, data, 0, chunk\.size, chunk\.offset\);\n\s*\} finally \{\n\s*fs\.closeSync\(fd\);\n\s*\}\n\s*const chunkPayload = \{ hash: chunk\.hash, data: data\.toString\('base64'\), index: chunk\.index, size: chunk\.size, ownerWallet, encrypted: privateFile \};/g,
-      "const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };"
-    );
-    next = next.slice(0, uploadStart) + fixedScope + next.slice(nativeUploadStart >= 0 ? nativeUploadStart : next.length);
-  }
-
-  next = next.replace(
-    /try \{ fs\.unlinkSync\(tempPath\); \} catch \{\}/g,
-    "try { if (typeof tempPath !== 'undefined' && tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}"
-  );
-
-  if (next !== source) {
-    fs.writeFileSync(mainFile, next, 'utf8');
-    console.log('[runtime-safety] fixed upload tempPath scope');
-  }
-}
-
-function applyRuntimeSafetyPatches() {
-  const projectRoot = path.join(__dirname, '..');
-  const mainFile = path.join(__dirname, 'main.js');
-  if (!fs.existsSync(mainFile)) return;
-
-  try {
-    applySmartSelfHealingPatch(mainFile);
-
-    const mainSource = fs.readFileSync(mainFile, 'utf8');
-    const needsDownloadPatch =
-      mainSource.includes('Buffer.concat(buffers)') ||
-      mainSource.includes('Array.from(plain)') ||
-      !mainSource.includes('chunknet-downloads');
-    const needsUploadPatch =
-      !mainSource.includes("ipcMain.handle('p2p:uploadFiles'") ||
-      !mainSource.includes('uploadFilePathStreaming');
-    const needsDialogImport =
-      !mainSource.includes("dialog } from 'electron'") &&
-      !mainSource.includes("dialog, ");
-
-    if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
-    if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
-    applyUploadTempPathScopeFix(mainFile);
-
-    const patched = fs.readFileSync(mainFile, 'utf8');
-    if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
-      throw new Error('Unsafe large-file download code is still present after runtime patch.');
-    }
-    if (!patched.includes("ipcMain.handle('p2p:uploadFiles'") || !patched.includes('uploadFilePathStreaming')) {
-      throw new Error('Streaming upload handler is missing after runtime patch.');
-    }
-  } catch (error) {
-    console.error('[runtime-safety] failed to apply P2P memory safety patches:', error?.message || error);
-    throw error;
-  }
 }
 
 function resolveTrayIcon() {
@@ -274,6 +165,5 @@ app.on('before-quit', () => {
 });
 
 if (gotSingleInstanceLock) {
-  applyRuntimeSafetyPatches();
   await import('./main.js');
 }
