@@ -6,6 +6,7 @@ const allowedChannels = new Set([
   'p2p:start',
   'p2p:listFiles',
   'p2p:upload',
+  'p2p:uploadFiles',
   'p2p:uploadPath',
   'p2p:download',
   'p2p:downloadToPath',
