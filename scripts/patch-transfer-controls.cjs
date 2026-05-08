@@ -42,7 +42,6 @@ async function waitForTransferControl(kind) {
 `
 );
 
-// Ensure the pause helper exists even when older transfer-control patches were already installed.
 insertBefore(
   'function normalizeTransferType',
   `function ensureTransferControlState() {
@@ -90,6 +89,24 @@ insertBefore(
 `
 );
 
+// Always reset a stale cancel before starting a new upload selection or file upload.
+replaceAll(
+  "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  const result = await dialog.showOpenDialog",
+  "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const result = await dialog.showOpenDialog"
+);
+replaceAll(
+  "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const result = await dialog.showOpenDialog",
+  "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const result = await dialog.showOpenDialog"
+);
+replaceAll(
+  "async function uploadFilePathStreaming(filePath, payload = {}) {\n  const node = ensureTransport({});",
+  "async function uploadFilePathStreaming(filePath, payload = {}) {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const node = ensureTransport({});"
+);
+replaceAll(
+  "async function uploadFilePathStreaming(filePath, payload = {}) {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const node = ensureTransport({});",
+  "async function uploadFilePathStreaming(filePath, payload = {}) {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const node = ensureTransport({});"
+);
+
 replaceAll(
   "  const now = Date.now();\n  transferProgress[kind] = {",
   "  resetTransferControl(kind);\n  const now = Date.now();\n  transferProgress[kind] = {"
@@ -126,7 +143,6 @@ replaceAll(
   "    paused: Boolean(transferControl[kind]?.paused),\n    cancellable: true,"
 );
 
-// Make pause/cancel responsive during every disk/encryption stream.
 replaceAll(
   "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        const output = fs.createWriteStream(tempPath);",
   "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);"
@@ -136,7 +152,6 @@ replaceAll(
   "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);"
 );
 
-// Check pause/cancel before each chunk operation.
 replaceAll(
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      const chunkPayload",
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      await waitForTransferControl('upload');\n      const chunkPayload"
@@ -187,7 +202,6 @@ ipcMain.handle('p2p:cancelTransfer', async (_event, payload = {}) => {
   s = s.slice(0, idx) + controls + s.slice(idx);
 }
 
-// Upgrade old handlers in place.
 s = s.replace(/ipcMain\.handle\('p2p:pauseTransfer',[\s\S]*?\n\}\);\n\nipcMain\.handle\('p2p:resumeTransfer'/, `ipcMain.handle('p2p:pauseTransfer', async (_event, payload = {}) => {
   const type = normalizeTransferType(payload.type);
   ensureTransferControlState();
