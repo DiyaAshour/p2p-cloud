@@ -1,4 +1,4 @@
-import { Download, Upload, XCircle } from 'lucide-react';
+import { Download, Pause, Play, Upload, X, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 type TransferProgress = {
@@ -14,6 +14,8 @@ type TransferProgress = {
   totalChunks: number;
   concurrency: number;
   error?: string | null;
+  paused?: boolean;
+  cancellable?: boolean;
 };
 
 type NetworkSummary = {
@@ -27,8 +29,9 @@ type NetworkSummary = {
   };
 };
 
+type TransferControlChannel = 'p2p:networkSummary' | 'p2p:pauseTransfer' | 'p2p:resumeTransfer' | 'p2p:cancelTransfer';
 type ElectronProgressBridge = {
-  invoke: <T>(channel: 'p2p:networkSummary') => Promise<T>;
+  invoke: <T>(channel: TransferControlChannel, payload?: unknown) => Promise<T>;
 };
 
 function getProgressBridge(): ElectronProgressBridge | null {
@@ -73,14 +76,24 @@ function formatEta(seconds?: number | null) {
   return `${minutes}m ${rest}s remaining`;
 }
 
-function progressLabel(type: 'upload' | 'download') {
+function progressLabel(type: 'upload' | 'download', phase: string) {
+  if (phase === 'paused') return type === 'upload' ? 'Upload paused' : 'Download paused';
+  if (phase === 'error') return type === 'upload' ? 'Upload stopped' : 'Download stopped';
   return type === 'upload' ? 'Uploading' : 'Downloading';
 }
 
-function TransferItem({ type, progress }: { type: 'upload' | 'download'; progress: TransferProgress }) {
+async function controlTransfer(type: 'upload' | 'download', action: 'pause' | 'resume' | 'cancel') {
+  const bridge = getProgressBridge();
+  if (!bridge) return;
+  const channel = action === 'pause' ? 'p2p:pauseTransfer' : action === 'resume' ? 'p2p:resumeTransfer' : 'p2p:cancelTransfer';
+  await bridge.invoke(channel, { type });
+}
+
+function TransferItem({ type, progress, onDismiss }: { type: 'upload' | 'download'; progress: TransferProgress; onDismiss: () => void }) {
   const Icon = type === 'upload' ? Upload : Download;
   const percent = Math.min(100, Math.max(0, Number(progress.percent || 0)));
   const isError = progress.phase === 'error';
+  const isPaused = progress.phase === 'paused' || progress.paused;
 
   return (
     <div className="w-full overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur">
@@ -91,15 +104,25 @@ function TransferItem({ type, progress }: { type: 'upload' | 'download'; progres
           </div>
           <div className="min-w-0 flex-1">
             <p className="break-words text-sm font-semibold leading-snug text-zinc-50">
-              {progressLabel(type)} {progress.fileName || 'file'}
+              {progressLabel(type, progress.phase)} {progress.fileName || 'file'}
             </p>
             <p className="mt-1 text-xs text-zinc-400">
               {progress.chunksDone}/{progress.totalChunks} chunks · {progress.concurrency} parallel
             </p>
           </div>
         </div>
-        <div className="shrink-0 rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-100">
-          {isError ? 'Error' : `${percent.toFixed(0)}%`}
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-100">
+            {isError ? 'Error' : isPaused ? 'Paused' : `${percent.toFixed(0)}%`}
+          </div>
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="rounded-full bg-zinc-800 p-1.5 text-zinc-300 transition hover:bg-zinc-700 hover:text-zinc-50"
+            title="Hide this popup"
+          >
+            <X className="size-4" />
+          </button>
         </div>
       </div>
 
@@ -112,6 +135,27 @@ function TransferItem({ type, progress }: { type: 'upload' | 'download'; progres
         <span className="whitespace-nowrap">{formatBytes(progress.speedBytesPerSecond)}/s · {formatEta(progress.etaSeconds)}</span>
       </div>
 
+      {!isError && progress.active && (
+        <div className="mt-3 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => void controlTransfer(type, isPaused ? 'resume' : 'pause')}
+            className="rounded-xl border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:bg-zinc-800"
+          >
+            {isPaused ? <Play className="mr-1 inline size-3.5" /> : <Pause className="mr-1 inline size-3.5" />}
+            {isPaused ? 'Resume' : 'Pause'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void controlTransfer(type, 'cancel')}
+            className="rounded-xl border border-red-900/70 bg-red-950/40 px-3 py-2 text-xs font-medium text-red-100 transition hover:bg-red-950"
+          >
+            <XCircle className="mr-1 inline size-3.5" />
+            Cancel
+          </button>
+        </div>
+      )}
+
       {progress.error && (
         <p className="mt-3 max-h-24 overflow-auto break-words rounded-xl bg-red-950/50 p-2 text-xs text-red-200">
           {progress.error}
@@ -123,6 +167,7 @@ function TransferItem({ type, progress }: { type: 'upload' | 'download'; progres
 
 export default function TransferProgressOverlay() {
   const [summary, setSummary] = useState<NetworkSummary | null>(null);
+  const [hidden, setHidden] = useState<Record<string, string>>({});
 
   useEffect(() => {
     applyChunknetBranding();
@@ -163,13 +208,26 @@ export default function TransferProgressOverlay() {
     ].filter(Boolean) as Array<{ type: 'upload' | 'download'; progress: TransferProgress }>;
   }, [summary]);
 
-  if (!transfers.length) return null;
+  const visibleTransfers = transfers.filter((transfer) => {
+    const signature = `${transfer.progress.fileName}:${transfer.progress.phase}:${transfer.progress.startedAt ?? ''}`;
+    return hidden[transfer.type] !== signature;
+  });
+
+  if (!visibleTransfers.length) return null;
 
   return (
     <div className="fixed inset-x-3 bottom-3 z-[80] grid max-h-[45vh] gap-3 overflow-y-auto sm:inset-x-auto sm:right-5 sm:bottom-5 sm:w-[min(520px,calc(100vw-2.5rem))]">
-      {transfers.map((transfer) => (
-        <TransferItem key={transfer.type} type={transfer.type} progress={transfer.progress} />
-      ))}
+      {visibleTransfers.map((transfer) => {
+        const signature = `${transfer.progress.fileName}:${transfer.progress.phase}:${transfer.progress.startedAt ?? ''}`;
+        return (
+          <TransferItem
+            key={transfer.type}
+            type={transfer.type}
+            progress={transfer.progress}
+            onDismiss={() => setHidden((current) => ({ ...current, [transfer.type]: signature }))}
+          />
+        );
+      })}
     </div>
   );
 }
