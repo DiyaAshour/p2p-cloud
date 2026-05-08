@@ -13,6 +13,8 @@ type TransferProgress = {
   chunksDone: number;
   totalChunks: number;
   concurrency: number;
+  startedAt?: string | null;
+  updatedAt?: string | null;
   error?: string | null;
   paused?: boolean;
   cancellable?: boolean;
