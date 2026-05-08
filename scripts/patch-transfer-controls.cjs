@@ -37,6 +37,42 @@ async function waitForTransferControl(kind) {
 `
 );
 
+insertAfter(
+  "async function waitForTransferControl(kind) {\n  const type = normalizeTransferType(kind);\n  while (transferControl[type]?.paused && !transferControl[type]?.cancelled) {\n    updateProgress(type, { phase: 'paused' });\n    await new Promise((resolve) => setTimeout(resolve, 250));\n  }\n  if (transferControl[type]?.cancelled) throw new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled');\n}",
+  `
+function bindTransferControlToReadStream(stream, kind) {
+  const type = normalizeTransferType(kind);
+  let waiting = false;
+  stream.on('data', () => {
+    if (transferControl[type]?.cancelled) {
+      stream.destroy(new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled'));
+      return;
+    }
+    if (transferControl[type]?.paused && !waiting) {
+      waiting = true;
+      updateProgress(type, { phase: 'paused' });
+      stream.pause();
+      const timer = setInterval(() => {
+        if (transferControl[type]?.cancelled) {
+          clearInterval(timer);
+          waiting = false;
+          stream.destroy(new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled'));
+          return;
+        }
+        if (!transferControl[type]?.paused) {
+          clearInterval(timer);
+          waiting = false;
+          updateProgress(type, { phase: 'running' });
+          stream.resume();
+        }
+      }, 250);
+      timer.unref?.();
+    }
+  });
+}
+`
+);
+
 replaceAll(
   "  const now = Date.now();\n  transferProgress[kind] = {",
   "  resetTransferControl(kind);\n  const now = Date.now();\n  transferProgress[kind] = {"
@@ -57,13 +93,27 @@ replaceAll(
   "    error,\n    paused: Boolean(transferControl[kind]?.paused),\n    cancellable: true,\n  };"
 );
 
+// Make pause/cancel responsive during the initial disk/encryption stream, not only after chunking starts.
+replaceAll(
+  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        const output = fs.createWriteStream(tempPath);",
+  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);"
+);
+
 // Check pause/cancel before each chunk operation in upload and download workers.
 replaceAll(
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      const chunkPayload",
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      await waitForTransferControl('upload');\n      const chunkPayload"
 );
 replaceAll(
+  "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      await waitForTransferControl('upload');\n      await waitForTransferControl('upload');\n      const chunkPayload",
+  "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      await waitForTransferControl('upload');\n      const chunkPayload"
+);
+replaceAll(
   "await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {\n      const local",
+  "await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {\n      await waitForTransferControl('download');\n      const local"
+);
+replaceAll(
+  "await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {\n      await waitForTransferControl('download');\n      await waitForTransferControl('download');\n      const local",
   "await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {\n      await waitForTransferControl('download');\n      const local"
 );
 
@@ -98,7 +148,7 @@ ipcMain.handle('p2p:cancelTransfer', async (_event, payload = {}) => {
 
 if (s !== before) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-transfer-controls] installed pause/resume/cancel controls');
+  console.log('[patch-transfer-controls] installed responsive pause/resume/cancel controls');
 } else {
   console.log('[patch-transfer-controls] transfer controls already installed');
 }
