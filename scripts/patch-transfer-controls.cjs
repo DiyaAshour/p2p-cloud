@@ -52,44 +52,11 @@ insertBefore(
 `
 );
 
-insertBefore(
-  'function resetTransferControl',
-  `function bindTransferControlToReadStream(stream, kind) {
-  const type = normalizeTransferType(kind);
-  let waiting = false;
-  stream.on('data', () => {
-    ensureTransferControlState();
-    if (transferControl[type]?.cancelled) {
-      stream.destroy(new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled'));
-      return;
-    }
-    if (transferControl[type]?.paused && !waiting) {
-      waiting = true;
-      updateProgress(type, { phase: 'paused' });
-      stream.pause();
-      const timer = setInterval(() => {
-        ensureTransferControlState();
-        if (transferControl[type]?.cancelled) {
-          clearInterval(timer);
-          waiting = false;
-          stream.destroy(new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled'));
-          return;
-        }
-        if (!transferControl[type]?.paused) {
-          clearInterval(timer);
-          waiting = false;
-          updateProgress(type, { phase: 'running' });
-          stream.resume();
-        }
-      }, 250);
-      timer.unref?.();
-    }
-  });
-}
-`
-);
+// Remove old direct stream pause hook. It can deadlock piped encryption streams in Electron.
+s = s.replace(/\nfunction bindTransferControlToReadStream\(stream, kind\) \{[\s\S]*?\n\}\n\nfunction resetTransferControl/g, '\nfunction resetTransferControl');
+s = s.replace(/\n\s*bindTransferControlToReadStream\(input, 'upload'\);/g, '');
 
-// Always reset a stale cancel before starting a new upload selection or file upload.
+// Always reset stale state before a new upload selection or file upload.
 replaceAll(
   "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  const result = await dialog.showOpenDialog",
   "ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {\n  ensureTransferControlState();\n  resetTransferControl('upload');\n  const result = await dialog.showOpenDialog"
@@ -143,15 +110,7 @@ replaceAll(
   "    paused: Boolean(transferControl[kind]?.paused),\n    cancellable: true,"
 );
 
-replaceAll(
-  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        const output = fs.createWriteStream(tempPath);",
-  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);"
-);
-replaceAll(
-  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);",
-  "const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES });\n        bindTransferControlToReadStream(input, 'upload');\n        const output = fs.createWriteStream(tempPath);"
-);
-
+// Check pause/cancel before each chunk operation. This is safe and avoids stream deadlocks.
 replaceAll(
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      const chunkPayload",
   "await mapWithConcurrency(chunkMetas, uploadConcurrency, async (chunk) => {\n      await waitForTransferControl('upload');\n      const chunkPayload"
@@ -232,7 +191,7 @@ s = s.replace(/ipcMain\.handle\('p2p:cancelTransfer',[\s\S]*?\n\}\);/, `ipcMain.
 
 if (s !== before) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-transfer-controls] installed responsive pause/resume/cancel controls');
+  console.log('[patch-transfer-controls] installed safe pause/resume/cancel controls');
 } else {
   console.log('[patch-transfer-controls] transfer controls already installed');
 }
