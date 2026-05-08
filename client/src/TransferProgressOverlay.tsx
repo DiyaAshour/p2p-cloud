@@ -1,4 +1,4 @@
-import { Download, Pause, Play, Upload, X, XCircle } from 'lucide-react';
+import { Download, Upload, X, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 type TransferProgress = {
@@ -31,7 +31,7 @@ type NetworkSummary = {
   };
 };
 
-type TransferControlChannel = 'p2p:networkSummary' | 'p2p:pauseTransfer' | 'p2p:resumeTransfer' | 'p2p:cancelTransfer';
+type TransferControlChannel = 'p2p:networkSummary' | 'p2p:cancelTransfer';
 type ElectronProgressBridge = {
   invoke: <T>(channel: TransferControlChannel, payload?: unknown) => Promise<T>;
 };
@@ -79,23 +79,20 @@ function formatEta(seconds?: number | null) {
 }
 
 function progressLabel(type: 'upload' | 'download', phase: string) {
-  if (phase === 'paused') return type === 'upload' ? 'Upload paused' : 'Download paused';
   if (phase === 'error') return type === 'upload' ? 'Upload stopped' : 'Download stopped';
   return type === 'upload' ? 'Uploading' : 'Downloading';
 }
 
-async function controlTransfer(type: 'upload' | 'download', action: 'pause' | 'resume' | 'cancel') {
+async function cancelTransfer(type: 'upload' | 'download') {
   const bridge = getProgressBridge();
   if (!bridge) return;
-  const channel = action === 'pause' ? 'p2p:pauseTransfer' : action === 'resume' ? 'p2p:resumeTransfer' : 'p2p:cancelTransfer';
-  await bridge.invoke(channel, { type });
+  await bridge.invoke('p2p:cancelTransfer', { type });
 }
 
 function TransferItem({ type, progress, onDismiss }: { type: 'upload' | 'download'; progress: TransferProgress; onDismiss: () => void }) {
   const Icon = type === 'upload' ? Upload : Download;
   const percent = Math.min(100, Math.max(0, Number(progress.percent || 0)));
   const isError = progress.phase === 'error';
-  const isPaused = progress.phase === 'paused' || progress.paused;
 
   return (
     <div className="w-full overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/95 p-4 shadow-2xl backdrop-blur">
@@ -115,7 +112,7 @@ function TransferItem({ type, progress, onDismiss }: { type: 'upload' | 'downloa
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <div className="rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-100">
-            {isError ? 'Error' : isPaused ? 'Paused' : `${percent.toFixed(0)}%`}
+            {isError ? 'Error' : `${percent.toFixed(0)}%`}
           </div>
           <button
             type="button"
@@ -141,15 +138,7 @@ function TransferItem({ type, progress, onDismiss }: { type: 'upload' | 'downloa
         <div className="mt-3 flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            onClick={() => void controlTransfer(type, isPaused ? 'resume' : 'pause')}
-            className="rounded-xl border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-100 transition hover:bg-zinc-800"
-          >
-            {isPaused ? <Play className="mr-1 inline size-3.5" /> : <Pause className="mr-1 inline size-3.5" />}
-            {isPaused ? 'Resume' : 'Pause'}
-          </button>
-          <button
-            type="button"
-            onClick={() => void controlTransfer(type, 'cancel')}
+            onClick={() => void cancelTransfer(type)}
             className="rounded-xl border border-red-900/70 bg-red-950/40 px-3 py-2 text-xs font-medium text-red-100 transition hover:bg-red-950"
           >
             <XCircle className="mr-1 inline size-3.5" />
