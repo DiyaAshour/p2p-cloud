@@ -142,4 +142,5 @@ app.on('before-quit', () => { isQuitting = true; });
 
 if (gotSingleInstanceLock) {
   await import('./main-stable.js');
+  await import('./download-to-path-override.js');
 }
