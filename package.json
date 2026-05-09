@@ -13,7 +13,7 @@
     "fix:commercial": "node scripts/fix-commercial-critical-issues.cjs && node scripts/patch-native-ui-upload-streaming.cjs && node scripts/fix-native-upload-button.cjs",
     "patch:ui-upload": "pnpm run fix:commercial",
     "apply:download-streaming": "node scripts/apply-download-streaming-to-path.cjs",
-    "apply:drive-ui": "node scripts/patch-folder-tree-actions.cjs && node scripts/patch-peer-branding.cjs",
+    "apply:drive-ui": "node scripts/patch-live-drive-ui.cjs",
     "dev:electron": "pnpm run apply:download-streaming && concurrently \"pnpm dev\" \"pnpm paypal:server\" \"electron .\"",
     "electron:dev": "pnpm run apply:download-streaming && concurrently \"pnpm dev\" \"pnpm paypal:server\" \"electron .\"",
     "build": "pnpm run apply:drive-ui && vite build",
