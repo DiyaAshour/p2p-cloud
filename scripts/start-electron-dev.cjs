@@ -35,7 +35,7 @@ function checkUrl(url) {
 
 async function waitForVite() {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 60_000) {
+  while (Date.now() - startedAt < 60000) {
     if (await checkUrl(DEV_SERVER_URL)) {
       console.log('[electron-dev] Vite is ready: ' + DEV_SERVER_URL);
       return;
@@ -46,9 +46,15 @@ async function waitForVite() {
 }
 
 function resolveElectronBin() {
+  if (process.platform === 'win32') {
+    const electronExe = path.join(process.cwd(), 'node_modules', 'electron', 'dist', 'electron.exe');
+    if (fs.existsSync(electronExe)) return electronExe;
+  }
+
   const localBin = process.platform === 'win32'
     ? path.join(process.cwd(), 'node_modules', '.bin', 'electron.cmd')
     : path.join(process.cwd(), 'node_modules', '.bin', 'electron');
+
   return fs.existsSync(localBin) ? localBin : 'electron';
 }
 
@@ -74,6 +80,7 @@ async function main() {
   const child = spawn(electronBin, ['--js-flags=--max-old-space-size=8192', '.'], {
     stdio: 'inherit',
     env: { ...baseEnv, ELECTRON_RENDERER_URL: DEV_SERVER_URL },
+    shell: false,
   });
 
   child.on('error', (error) => {
