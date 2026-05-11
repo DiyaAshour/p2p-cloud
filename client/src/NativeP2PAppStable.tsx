@@ -45,7 +45,20 @@ function getElectronBridge(): ElectronBridge | null {
 }
 function formatBytes(bytes = 0) { if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(2)} TB`; if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`; if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(2)} MB`; if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`; return `${bytes} B`; }
 function formatDate(value?: string | number | null) { if (!value) return "unknown"; const date = new Date(value); return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString(); }
-function errorMessage(error: unknown) { return error instanceof Error ? error.message : "Operation failed"; }
+function errorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "Operation failed";
+
+  if (
+    message.includes("__TRANSFER_CANCELLED_UPLOAD__") ||
+    message.includes("TRANSFER_CANCELLED_UPLOAD") ||
+    message.toLowerCase().includes("upload canceled") ||
+    message.toLowerCase().includes("upload cancelled")
+  ) {
+    return "Upload canceled";
+  }
+
+  return message;
+}
 function shortAddress(address = "") { return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "Not connected"; }
 function isImageFile(file: P2PFile) { return String(file.mimeType || "").startsWith("image/"); }
 function safeJson<T>(key: string, fallback: T): T { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; } }
@@ -103,9 +116,22 @@ export default function NativeP2PAppStable() {
   };
 
   const runBusy = async (work: () => Promise<void>) => {
-    setBusy(true);
-    try { await work(); } catch (error) { toast.error(errorMessage(error)); } finally { setBusy(false); }
-  };
+  setBusy(true);
+
+  try {
+    await work();
+  } catch (error) {
+    const message = errorMessage(error);
+
+    if (message === "Upload canceled") {
+      toast("Upload canceled");
+    } else {
+      toast.error(message);
+    }
+  } finally {
+    setBusy(false);
+  }
+};
 
   useEffect(() => {
     if (!bridge) return;
