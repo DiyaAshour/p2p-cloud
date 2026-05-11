@@ -20,6 +20,45 @@ replaceOnce(
   "import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';"
 );
 
+const safeUploadFilesHandler = `ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select files to upload to Chunknet',
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (result.canceled || !result.filePaths?.length) {
+    finishProgress('upload', 'cancelled', null);
+    return { ok: true, cancelled: true, files: [], summary: networkSummary(), progress: transferProgress.upload };
+  }
+
+  const files = [];
+
+  try {
+    for (const filePath of result.filePaths) {
+      files.push(await uploadFilePathStreaming(filePath, payload));
+    }
+
+    return { ok: true, files, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
+  } catch (error) {
+    const message = String(error?.message || error || '');
+    const cancelled =
+      error?.code === '__TRANSFER_CANCELLED_UPLOAD__' ||
+      message.includes('__TRANSFER_CANCELLED_UPLOAD__') ||
+      message.toLowerCase().includes('upload canceled') ||
+      message.toLowerCase().includes('upload cancelled') ||
+      message.toLowerCase().includes('transfer cancelled') ||
+      message.toLowerCase().includes('transfer canceled');
+
+    if (cancelled) {
+      finishProgress('upload', 'cancelled', null);
+      return { ok: true, cancelled: true, files, summary: networkSummary(), progress: transferProgress.upload };
+    }
+
+    throw error;
+  }
+});
+`;
+
 if (!main.includes("ipcMain.handle('p2p:uploadFiles'")) {
   const insertBefore = "\nipcMain.handle('p2p:download'";
   const idx = main.indexOf(insertBefore);
@@ -182,24 +221,31 @@ async function uploadFilePathStreaming(filePath, payload = {}) {
   }
 }
 
-ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select files to upload to Chunknet',
-    properties: ['openFile', 'multiSelections'],
-  });
-  if (result.canceled || !result.filePaths?.length) return { ok: false, cancelled: true, files: [] };
-  const files = [];
-  for (const filePath of result.filePaths) files.push(await uploadFilePathStreaming(filePath, payload));
-  return { ok: true, files, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
-});
-`;
+${safeUploadFilesHandler}`;
   main = main.slice(0, idx) + handler + main.slice(idx);
   changed = true;
 }
 
+// Always normalize the native upload handler, even if an older patch already inserted it.
+// This prevents user-facing IPC errors when upload cancellation is represented as
+// Error: __TRANSFER_CANCELLED_UPLOAD__ by Electron or the renderer.
+{
+  const uploadHandlerStart = main.indexOf("ipcMain.handle('p2p:uploadFiles'");
+  const downloadHandlerStart = main.indexOf("\nipcMain.handle('p2p:download'", uploadHandlerStart);
+  if (uploadHandlerStart !== -1 && downloadHandlerStart !== -1) {
+    const before = main.slice(0, uploadHandlerStart);
+    const after = main.slice(downloadHandlerStart);
+    const current = main.slice(uploadHandlerStart, downloadHandlerStart);
+    if (current !== safeUploadFilesHandler) {
+      main = before + safeUploadFilesHandler + after;
+      changed = true;
+    }
+  }
+}
+
 if (changed) {
   fs.writeFileSync(mainPath, main, 'utf8');
-  console.log('[patch-native-upload-streaming] installed native streaming upload');
+  console.log('[patch-native-upload-streaming] installed safe native streaming upload');
 } else {
-  console.log('[patch-native-upload-streaming] native streaming upload already installed');
+  console.log('[patch-native-upload-streaming] native streaming upload already safe');
 }
