@@ -41,6 +41,7 @@ let manifestsPath = null;
 let walletPath = null;
 let manifests = [];
 let transferProgress = { upload: null, download: null };
+const TRANSFER_CANCELLED_UPLOAD = '__TRANSFER_CANCELLED_UPLOAD__';
 let lastSyncStatus = { ok: false, lastPulledAt: null, lastPushedAt: null, error: null, remoteFiles: 0, skipped: true };
 let lastAutoRepairStatus = { ok: true, active: false, intervalMs: 10_800_000, lastRunAt: null, repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'disabled-at-startup', error: null };
 let walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
@@ -55,7 +56,13 @@ function firstLanAddress() { const nets = os.networkInterfaces(); for (const lis
 function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks'); }
 function publicPeerUrl(node) { return process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || `ws://${firstLanAddress()}:${node.port}`; }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
-function hasEncryptionMetadata(manifest = {}) { return Boolean(manifest.encryption?.algorithm && manifest.encryption?.keySource && manifest.encryption?.salt && manifest.encryption?.iv && manifest.encryption?.authTag); }
+function hasEncryptionMetadata(manifest = {}) {
+  if (!manifest.encryption?.algorithm || !manifest.encryption?.keySource || !manifest.encryption?.salt) return false;
+  // version 5: per-chunk encryption — لا يحتاج iv/authTag عالمستوى الكامل
+  if (manifest.encryption.version >= 5) return Boolean(manifest.encryption.perChunk && Array.isArray(manifest.encryption.chunkAuthTags));
+  // version 4: تشفير الملف كله
+  return Boolean(manifest.encryption.iv && manifest.encryption.authTag);
+}
 function isUsableManifest(manifest = {}) { return !(manifest.isEncrypted === true && !hasEncryptionMetadata(manifest)); }
 function validateDrivePassword(drivePassword) { const password = String(drivePassword || '').trim(); if (password.length < MIN_DRIVE_PASSWORD_LENGTH) throw new Error(`Drive Password required. Use at least ${MIN_DRIVE_PASSWORD_LENGTH} characters.`); return password; }
 function drivePasswordFromPayload(payload = {}) { return validateDrivePassword(payload.drivePassword); }
@@ -117,6 +124,7 @@ function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
   return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
 }
 
+// ─── version 4: فك تشفير الملف كله من buffer (للتوافق مع الملفات القديمة) ───
 function decryptPrivateBuffer(ciphertext, manifest, drivePassword) {
   if (!manifest?.encryption || manifest.encryption.algorithm !== ENCRYPTION_ALGORITHM) throw new Error('Encrypted file metadata is missing or unsupported');
   const key = deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: manifest.encryption.salt });
@@ -127,19 +135,97 @@ function decryptPrivateBuffer(ciphertext, manifest, drivePassword) {
   return plain;
 }
 
+// ─── version 5: فك تشفير chunk by chunk مباشرة على disk ───
+async function decryptChunkedFileToStream(encryptedPath, manifest, drivePassword, writeStream) {
+  const key = deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: manifest.encryption.salt });
+  const chunkAuthTags = manifest.encryption.chunkAuthTags;
+  const fd = fs.openSync(encryptedPath, 'r');
+  // كل chunk مخزّن هيك: [iv: 12 bytes][authTag: 16 bytes][size: 4 bytes][encryptedData]
+  const HEADER_SIZE = 32; // 12 + 16 + 4
+  let fileOffset = 0;
+  try {
+    for (const { iv, authTag } of chunkAuthTags) {
+      const header = Buffer.allocUnsafe(HEADER_SIZE);
+      fs.readSync(fd, header, 0, HEADER_SIZE, fileOffset);
+      fileOffset += HEADER_SIZE;
+      const encryptedSize = header.readUInt32BE(28);
+      const encryptedData = Buffer.allocUnsafe(encryptedSize);
+      fs.readSync(fd, encryptedData, 0, encryptedSize, fileOffset);
+      fileOffset += encryptedSize;
+      const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(iv, 'base64'));
+      decipher.setAuthTag(Buffer.from(authTag, 'base64'));
+      const plain = Buffer.concat([decipher.update(encryptedData), decipher.final()]);
+      await new Promise((resolve, reject) => {
+        writeStream.write(plain, (err) => (err ? reject(err) : resolve()));
+      });
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function createProgress(kind, { fileName, totalBytes, totalChunks, concurrency }) { const now = Date.now(); transferProgress[kind] = { active: true, phase: 'running', fileName, totalBytes, transferredBytes: 0, percent: 0, speedBytesPerSecond: 0, etaSeconds: null, chunksDone: 0, totalChunks, concurrency, startedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), error: null }; }
 function updateProgress(kind, { bytesDelta = 0, chunkDelta = 0, phase = 'running', error = null } = {}) { const progress = transferProgress[kind]; if (!progress) return; const now = Date.now(); const started = new Date(progress.startedAt).getTime() || now; const elapsedSeconds = Math.max(0.001, (now - started) / 1000); const transferredBytes = Math.min(progress.totalBytes, Number(progress.transferredBytes || 0) + Number(bytesDelta || 0)); const chunksDone = Math.min(progress.totalChunks, Number(progress.chunksDone || 0) + Number(chunkDelta || 0)); const speedBytesPerSecond = transferredBytes / elapsedSeconds; const remainingBytes = Math.max(0, progress.totalBytes - transferredBytes); transferProgress[kind] = { ...progress, phase, transferredBytes, percent: progress.totalBytes ? (transferredBytes / progress.totalBytes) * 100 : 100, speedBytesPerSecond, etaSeconds: speedBytesPerSecond > 0 && remainingBytes > 0 ? remainingBytes / speedBytesPerSecond : 0, chunksDone, updatedAt: new Date(now).toISOString(), error }; }
 function finishProgress(kind, phase = 'complete', error = null) { const progress = transferProgress[kind]; if (!progress) return; updateProgress(kind, { phase, error }); transferProgress[kind] = { ...transferProgress[kind], active: false, phase, error }; }
 
+// ─── version 5: تشفير كل chunk لحاله — رام ثابت ~2MB بغض النظر عن حجم الملف ───
 async function encryptedTempFile(filePath, ownerWallet, drivePassword) {
   const salt = crypto.randomBytes(16);
-  const iv = crypto.randomBytes(12);
   const key = deriveDriveKey({ ownerWallet, drivePassword, salt });
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   const tempPath = path.join(app.getPath('temp'), `chunknet-${crypto.randomUUID()}.enc`);
-  await pipeline(fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES }), cipher, fs.createWriteStream(tempPath));
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  const writeStream = fs.createWriteStream(tempPath);
+  const chunkAuthTags = [];
+
+  try {
+    for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE_BYTES) {
+      const size = Math.min(CHUNK_SIZE_BYTES, stat.size - offset);
+      const data = Buffer.allocUnsafe(size);
+      fs.readSync(fd, data, 0, size, offset);
+
+      // IV مختلف لكل chunk — ضروري لأمان AES-GCM
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+      const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
+      const authTag = cipher.getAuthTag();
+
+      // format: [iv: 12][authTag: 16][encryptedSize: 4][encryptedData]
+      const sizeBuf = Buffer.allocUnsafe(4);
+      sizeBuf.writeUInt32BE(encrypted.length, 0);
+      const frame = Buffer.concat([iv, authTag, sizeBuf, encrypted]);
+
+      await new Promise((resolve, reject) => {
+        writeStream.write(frame, (err) => (err ? reject(err) : resolve()));
+      });
+
+      chunkAuthTags.push({ iv: iv.toString('base64'), authTag: authTag.toString('base64') });
+    }
+  } finally {
+    fs.closeSync(fd);
+    await new Promise((resolve, reject) => {
+      writeStream.end((err) => (err ? reject(err) : resolve()));
+    });
+  }
+
   const originalHash = await hashFileHex(filePath);
-  return { tempPath, cleanup: true, encryption: { version: 4, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash, originalSize: fs.statSync(filePath).size } };
+
+  return {
+    tempPath,
+    cleanup: true,
+    encryption: {
+      version: 5,
+      algorithm: ENCRYPTION_ALGORITHM,
+      keySource: ENCRYPTION_KEY_SOURCE,
+      kdf: KDF_ALGORITHM,
+      kdfIterations: KDF_ITERATIONS,
+      salt: salt.toString('base64'),
+      perChunk: true,
+      chunkAuthTags,
+      originalHash,
+      originalSize: stat.size,
+    },
+  };
 }
 
 async function hashFileHex(filePath) { const hash = crypto.createHash('sha256'); await new Promise((resolve, reject) => { const input = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES }); input.on('data', (data) => hash.update(data)); input.on('end', resolve); input.on('error', reject); }); return hash.digest('hex'); }
@@ -208,10 +294,148 @@ ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifie
 ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); return networkSummary(); });
 ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
 ipcMain.handle('p2p:upload', async () => { throw new Error('Use native streaming upload. Browser RAM upload is disabled.'); });
-ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => { const result = await dialog.showOpenDialog(mainWindow, { title: 'Choose files to store', properties: ['openFile', 'multiSelections'] }); if (result.canceled || !result.filePaths?.length) return { ok: true, cancelled: true, files: [] }; const files = []; for (const filePath of result.filePaths) files.push(await uploadFilePathStreaming(filePath, payload)); return { ok: true, files, summary: networkSummary(), progress: transferProgress.upload }; });
+ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose files to store',
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (result.canceled || !result.filePaths?.length) {
+    return { ok: true, cancelled: true, files: [] };
+  }
+
+  const files = [];
+
+  try {
+    for (const filePath of result.filePaths) {
+      files.push(await uploadFilePathStreaming(filePath, payload));
+    }
+
+    return {
+      ok: true,
+      files,
+      summary: networkSummary(),
+      progress: transferProgress.upload,
+    };
+  } catch (error) {
+    const message = String(error?.message || '');
+
+    if (
+      error?.code === TRANSFER_CANCELLED_UPLOAD ||
+      message.includes(TRANSFER_CANCELLED_UPLOAD) ||
+      message.toLowerCase().includes('upload canceled') ||
+      message.toLowerCase().includes('upload cancelled')
+    ) {
+      finishProgress('upload', 'cancelled', null);
+
+      return {
+        ok: true,
+        cancelled: true,
+        files,
+        summary: networkSummary(),
+        progress: transferProgress.upload,
+      };
+    }
+
+    throw error;
+  }
+});
 ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => ({ ok: true, file: await uploadFilePathStreaming(String(payload.filePath || ''), payload), summary: networkSummary() }));
 ipcMain.handle('p2p:download', async (_event, payload = {}) => { assertVerifiedWallet(); const node = ensureTransport({}); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const ordered = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index); createProgress('download', { fileName: manifest.name, totalBytes: Number(manifest.storedSize || manifest.size || 0), totalChunks: ordered.length, concurrency: DOWNLOAD_CONCURRENCY }); const buffers = []; for (const meta of ordered) { let chunk = readChunkPayload(meta.hash); if (!chunk) chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId); const buffer = Buffer.from(chunk.data, 'base64'); buffers.push(buffer); updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 }); } const stored = Buffer.concat(buffers); const plain = manifest.isEncrypted ? decryptPrivateBuffer(stored, manifest, payload.drivePassword) : stored; finishProgress('download'); return { ok: true, file: manifest, bytes: Array.from(plain), progress: transferProgress.download }; });
-ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => { const result = await ipcMain.emit; return { ok: false, skipped: true }; });
+ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
+  assertVerifiedWallet();
+
+  const node = ensureTransport({});
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this wallet');
+
+  const saveResult = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save file',
+    defaultPath: safeName(manifest.name),
+  });
+
+  if (saveResult.canceled || !saveResult.filePath) {
+    return { ok: true, cancelled: true };
+  }
+
+  const ordered = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
+
+  createProgress('download', {
+    fileName: manifest.name,
+    totalBytes: Number(manifest.storedSize || manifest.size || 0),
+    totalChunks: ordered.length,
+    concurrency: 1,
+  });
+
+  const outputPath = saveResult.filePath;
+  // ملفات مشفرة: نحتاج temp file للـ ciphertext قبل فك التشفير
+  const tempEncryptedPath = path.join(app.getPath('temp'), `chunknet-download-${crypto.randomUUID()}.enc`);
+  const writePath = manifest.isEncrypted ? tempEncryptedPath : outputPath;
+  const writeStream = fs.createWriteStream(writePath);
+
+  try {
+    // ── اكتب الـ chunks على disk مباشرة بدون تجميعهم بالرام ──
+    for (const meta of ordered) {
+      let chunk = readChunkPayload(meta.hash);
+      if (!chunk) chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+      if (!chunk?.data) throw new Error(`Missing chunk: ${meta.hash}`);
+
+      const buffer = Buffer.from(chunk.data, 'base64');
+
+      await new Promise((resolve, reject) => {
+        writeStream.write(buffer, (err) => (err ? reject(err) : resolve()));
+      });
+
+      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.end((err) => (err ? reject(err) : resolve()));
+    });
+
+    // ── فك التشفير ──
+    if (manifest.isEncrypted) {
+      const encVersion = manifest.encryption?.version ?? 4;
+
+      if (encVersion >= 5) {
+        // version 5: فك تشفير chunk by chunk مباشرة على disk — رام ~2MB فقط
+        const decryptStream = fs.createWriteStream(outputPath);
+        await decryptChunkedFileToStream(tempEncryptedPath, manifest, payload.drivePassword, decryptStream);
+        await new Promise((resolve, reject) => {
+          decryptStream.end((err) => (err ? reject(err) : resolve()));
+        });
+      } else {
+        // version 4 (legacy): فك تشفير الملف كله — بيأكل رام بحجم الملف
+        const plain = decryptPrivateBuffer(
+          fs.readFileSync(tempEncryptedPath),
+          manifest,
+          payload.drivePassword
+        );
+        fs.writeFileSync(outputPath, plain);
+      }
+    }
+
+    finishProgress('download');
+
+    return {
+      ok: true,
+      savedTo: outputPath,
+      file: manifest,
+      progress: transferProgress.download,
+    };
+  } catch (error) {
+    finishProgress('download', 'error', error?.message || String(error));
+    try { writeStream.destroy(); } catch {}
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch {}
+    throw error;
+  } finally {
+    try {
+      if (manifest.isEncrypted && fs.existsSync(tempEncryptedPath)) {
+        fs.unlinkSync(tempEncryptedPath);
+      }
+    } catch {}
+  }
+});
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(normalizeWallet(m.ownerWallet) === activeWallet() && m.hash === manifest.hash)); persistManifests(); return { ok: true, summary: networkSummary() }; });
 ipcMain.handle('p2p:networkSummary', async () => networkSummary());
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, skipped: true, reason: 'stable-main-no-startup-bootstrap' }));
