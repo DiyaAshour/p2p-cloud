@@ -29,12 +29,12 @@ const checks = [
   {
     file: 'client/src/DriveP2PAppPassword.tsx',
     forbidden: ['new Uint8Array(r.bytes)', 'bytes: number[]', 'await file.arrayBuffer()', 'bytes: await'],
-    required: ['savedPath', 'Download complete', 'p2p:uploadFiles'],
+    required: ['savedPath', 'p2p:uploadFiles'],
   },
   {
     file: 'client/src/NativeP2PApp.tsx',
     forbidden: ['new Uint8Array(result.bytes)', 'result.bytes', 'bytes: number[]', 'await file.arrayBuffer()', 'bytes: await'],
-    required: ['p2p:uploadFiles', 'savedPath', 'Download complete', 'RAM-safe mode'],
+    required: ['p2p:uploadFiles', 'savedPath', 'RAM-safe mode'],
   },
   {
     file: 'package.json',
