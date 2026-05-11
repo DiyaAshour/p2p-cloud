@@ -16,6 +16,7 @@ run('node', ['scripts/patch-drive-download-ui.cjs']);
 run('node', ['scripts/patch-native-upload-streaming.cjs']);
 run('node', ['scripts/patch-upload-ram-final.cjs']);
 run('node', ['scripts/patch-native-upload-ui.cjs']);
+run('node', ['scripts/patch-main-stable-upload-cancel.cjs']);
 run('node', ['scripts/verify-runtime-safety.cjs']);
 run('node', ['scripts/repair-encrypted-manifests.js']);
 run('node', ['scripts/remove-bad-encrypted-manifests.js']);
