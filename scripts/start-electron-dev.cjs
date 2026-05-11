@@ -68,6 +68,7 @@ async function main() {
   runNode('scripts/patch-main-stable-upload-cancel.cjs');
   runNode('scripts/fix-generated-jsx-syntax.cjs');
   runNode('scripts/patch-electron-window-show.cjs');
+  runNode('scripts/patch-window-visible-only.cjs');
   runNode('scripts/verify-runtime-safety.cjs');
   runNode('scripts/repair-encrypted-manifests.js');
   runNode('scripts/remove-bad-encrypted-manifests.js');
