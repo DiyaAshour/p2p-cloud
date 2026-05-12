@@ -9,7 +9,7 @@ if (!fs.existsSync(file)) {
 let s = fs.readFileSync(file, 'utf8');
 const before = s;
 
-if (!s.includes("BrowserWindow") && s.includes("import { app, Menu, Tray, nativeImage } from 'electron';")) {
+if (s.includes("import { app, Menu, Tray, nativeImage } from 'electron';")) {
   s = s.replace(
     "import { app, Menu, Tray, nativeImage } from 'electron';",
     "import { app, BrowserWindow, Menu, Tray, nativeImage } from 'electron';"
@@ -65,12 +65,6 @@ async function importMainWhenReady() {
   if (s.includes(marker)) s = s.replace(marker, helper + marker);
 }
 
-const oldBottom = `if (gotSingleInstanceLock) {
-  console.log('[main-wrapper] importing main.js');
-  applyRuntimeSafetyPatches();
-  await import('./main.js');
-}
-`;
 const newBottom = `if (gotSingleInstanceLock) {
   console.log('[main-wrapper] scheduling main.js import after app ready');
   app.whenReady().then(importMainWhenReady).catch((error) => {
@@ -80,8 +74,12 @@ const newBottom = `if (gotSingleInstanceLock) {
 }
 `;
 
-if (s.includes(oldBottom)) {
-  s = s.replace(oldBottom, newBottom);
+// Remove any stale top-level import block. This is intentionally broad because
+// repeated patches may leave both the old and new boot blocks in the file.
+s = s.replace(/if \(gotSingleInstanceLock\) \{\s*console\.log\('\[main-wrapper\] importing main\.js'\);\s*applyRuntimeSafetyPatches\(\);\s*await import\('\.\/main\.js'\);\s*\}\s*$/s, '');
+
+if (!s.includes("[main-wrapper] scheduling main.js import after app ready")) {
+  s = s.trimEnd() + '\n\n' + newBottom;
 }
 
 if (s !== before) {
