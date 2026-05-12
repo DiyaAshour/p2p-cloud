@@ -8,15 +8,21 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const APP_TITLE = 'Chunknet';
+const IS_DEV_WRAPPER = !app.isPackaged || Boolean(process.env.ELECTRON_RENDERER_URL);
 let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+console.log('[main-wrapper] starting', { isPackaged: app.isPackaged, rendererUrl: process.env.ELECTRON_RENDERER_URL || null, dev: IS_DEV_WRAPPER });
+
+const gotSingleInstanceLock = IS_DEV_WRAPPER ? true : app.requestSingleInstanceLock();
+console.log('[main-wrapper] single-instance lock', gotSingleInstanceLock);
 if (!gotSingleInstanceLock) {
-  app.quit();
+  console.warn('[main-wrapper] another instance owns the lock; exiting this instance');
+  app.exit(0);
 } else {
   app.on('second-instance', () => {
+    console.log('[main-wrapper] second instance requested');
     showMainWindow();
   });
 }
@@ -65,8 +71,6 @@ function chooseLanAddress() {
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
 
-  // Safer defaults: faster than 1 MB chunks, but still low-memory.
-  // Users can override any of these env vars for benchmarking.
   if (!process.env.P2P_CHUNK_SIZE_BYTES) process.env.P2P_CHUNK_SIZE_BYTES = String(2 * 1024 * 1024);
   if (!process.env.P2P_UPLOAD_CONCURRENCY) process.env.P2P_UPLOAD_CONCURRENCY = '4';
   if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
@@ -124,6 +128,8 @@ function applyRuntimeSafetyPatches() {
     if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
     if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
     runPatchScript(projectRoot, 'patch-upload-ram-final.cjs');
+    runPatchScript(projectRoot, 'patch-electron-window-show.cjs');
+    runPatchScript(projectRoot, 'patch-window-visible-only.cjs');
 
     const patched = fs.readFileSync(mainFile, 'utf8');
     if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
@@ -154,10 +160,14 @@ function resolveTrayIcon() {
 
 function showMainWindow() {
   const win = globalThis.__p2pCloudMainWindow;
-  if (!win || win.isDestroyed()) return;
+  if (!win || win.isDestroyed()) {
+    console.warn('[main-wrapper] show requested but no main window exists');
+    return;
+  }
   win.show();
   if (win.isMinimized()) win.restore();
   win.focus();
+  console.log('[main-wrapper] main window shown');
 }
 
 function createTray() {
@@ -183,6 +193,7 @@ function createTray() {
 }
 
 app.on('ready', () => {
+  console.log('[main-wrapper] app ready');
   configureNetworkRuntime();
   createTray();
   try {
@@ -197,9 +208,22 @@ app.on('ready', () => {
 });
 
 app.on('browser-window-created', (_event, win) => {
+  console.log('[main-wrapper] browser window created');
   globalThis.__p2pCloudMainWindow = win;
+  setTimeout(() => {
+    try {
+      win.show();
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      console.log('[main-wrapper] forced window show');
+    } catch (error) {
+      console.warn('[main-wrapper] force window show failed:', error?.message || error);
+    }
+  }, 1200);
+
   win.on('close', (event) => {
     if (isQuitting) return;
+    if (IS_DEV_WRAPPER) return;
     event.preventDefault();
     win.hide();
     createTray();
@@ -218,6 +242,7 @@ app.on('before-quit', () => {
 });
 
 if (gotSingleInstanceLock) {
+  console.log('[main-wrapper] importing main.js');
   applyRuntimeSafetyPatches();
   await import('./main.js');
 }
