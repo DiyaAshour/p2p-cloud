@@ -1,4 +1,4 @@
-import { app, Menu, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,15 +7,28 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const APP_TITLE = 'Chunknet';
+const IS_DEV_WRAPPER = !app.isPackaged || Boolean(process.env.ELECTRON_RENDERER_URL);
 let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
+let mainImportStarted = false;
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+console.log('[main-wrapper] starting', {
+  isPackaged: app.isPackaged,
+  rendererUrl: process.env.ELECTRON_RENDERER_URL || null,
+  dev: IS_DEV_WRAPPER,
+});
+
+// In dev, never let a stale hidden/tray instance silently block the window.
+const gotSingleInstanceLock = IS_DEV_WRAPPER ? true : app.requestSingleInstanceLock();
+console.log('[main-wrapper] single-instance lock', gotSingleInstanceLock);
+
 if (!gotSingleInstanceLock) {
-  app.quit();
+  console.warn('[main-wrapper] another instance owns the lock; exiting this instance');
+  app.exit(0);
 } else {
   app.on('second-instance', () => {
+    console.log('[main-wrapper] second instance requested');
     showMainWindow();
   });
 }
@@ -97,9 +110,40 @@ function resolveTrayIcon() {
 
 function showMainWindow() {
   const win = globalThis.__p2pCloudMainWindow;
-  if (!win || win.isDestroyed()) return;
+  if (!win || win.isDestroyed()) {
+    console.warn('[main-wrapper] show requested but no main window exists');
+    return;
+  }
   win.show();
   if (win.isMinimized()) win.restore();
+  win.focus();
+  console.log('[main-wrapper] main window shown');
+}
+
+function createFallbackWindow(reason = 'main window did not appear') {
+  if (globalThis.__p2pCloudMainWindow && !globalThis.__p2pCloudMainWindow.isDestroyed()) return;
+  console.warn('[main-wrapper] fallback window created:', reason);
+  const win = new BrowserWindow({
+    title: APP_TITLE,
+    width: 1280,
+    height: 820,
+    minWidth: 980,
+    minHeight: 680,
+    show: true,
+    backgroundColor: '#09090b',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  globalThis.__p2pCloudMainWindow = win;
+  const url = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
+  win.loadURL(url).catch((error) => {
+    console.error('[main-wrapper] fallback loadURL failed:', error?.message || error);
+  });
+  win.show();
   win.focus();
 }
 
@@ -119,15 +163,45 @@ function createTray() {
   return tray;
 }
 
+async function importMainWhenReady() {
+  if (mainImportStarted) return;
+  mainImportStarted = true;
+  console.log('[main-wrapper] importing main-stable.js after app ready');
+  try {
+    await import('./main-stable.js');
+    console.log('[main-wrapper] main-stable.js import finished');
+    await import('./download-to-path-override.js');
+    console.log('[main-wrapper] download override import finished');
+    setTimeout(() => createFallbackWindow('main-stable imported but no BrowserWindow appeared'), 3000);
+  } catch (error) {
+    console.error('[main-wrapper] import failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'Electron startup import failed');
+  }
+}
+
 app.on('ready', () => {
+  console.log('[main-wrapper] app ready');
   configureNetworkRuntime();
   createTray();
 });
 
 app.on('browser-window-created', (_event, win) => {
+  console.log('[main-wrapper] browser window created');
   globalThis.__p2pCloudMainWindow = win;
+  setTimeout(() => {
+    try {
+      win.show();
+      if (win.isMinimized()) win.restore();
+      win.focus();
+      console.log('[main-wrapper] forced window show');
+    } catch (error) {
+      console.warn('[main-wrapper] force window show failed:', error?.message || error);
+    }
+  }, 1200);
+
   win.on('close', (event) => {
     if (isQuitting) return;
+    if (IS_DEV_WRAPPER) return;
     event.preventDefault();
     win.hide();
     createTray();
@@ -141,6 +215,9 @@ app.on('browser-window-created', (_event, win) => {
 app.on('before-quit', () => { isQuitting = true; });
 
 if (gotSingleInstanceLock) {
-  await import('./main-stable.js');
-  await import('./download-to-path-override.js');
+  console.log('[main-wrapper] scheduling main-stable.js import after app ready');
+  app.whenReady().then(importMainWhenReady).catch((error) => {
+    console.error('[main-wrapper] app.whenReady failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'app.whenReady failed');
+  });
 }
