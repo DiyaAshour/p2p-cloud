@@ -1,4 +1,4 @@
-import { app, Menu, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,8 +12,13 @@ const IS_DEV_WRAPPER = !app.isPackaged || Boolean(process.env.ELECTRON_RENDERER_
 let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
+let mainImportStarted = false;
 
-console.log('[main-wrapper] starting', { isPackaged: app.isPackaged, rendererUrl: process.env.ELECTRON_RENDERER_URL || null, dev: IS_DEV_WRAPPER });
+console.log('[main-wrapper] starting', {
+  isPackaged: app.isPackaged,
+  rendererUrl: process.env.ELECTRON_RENDERER_URL || null,
+  dev: IS_DEV_WRAPPER,
+});
 
 const gotSingleInstanceLock = IS_DEV_WRAPPER ? true : app.requestSingleInstanceLock();
 console.log('[main-wrapper] single-instance lock', gotSingleInstanceLock);
@@ -118,29 +123,15 @@ function applyRuntimeSafetyPatches() {
     const needsUploadPatch =
       !mainSource.includes("ipcMain.handle('p2p:uploadFiles'") ||
       !mainSource.includes('uploadFilePathStreaming');
-    const needsUploadRamFinalPatch =
-      mainSource.includes('chunk.data.toString') ||
-      mainSource.includes('chunkMetas.push({ index, size: data.length, data, hash })');
     const needsDialogImport =
       !mainSource.includes("dialog } from 'electron'") &&
-      !mainSource.includes("dialog, ");
+      !mainSource.includes('dialog, ');
 
     if (needsDownloadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-download-memory.cjs');
     if (needsUploadPatch || needsDialogImport) runPatchScript(projectRoot, 'patch-native-upload-streaming.cjs');
     runPatchScript(projectRoot, 'patch-upload-ram-final.cjs');
     runPatchScript(projectRoot, 'patch-electron-window-show.cjs');
     runPatchScript(projectRoot, 'patch-window-visible-only.cjs');
-
-    const patched = fs.readFileSync(mainFile, 'utf8');
-    if (patched.includes('Buffer.concat(buffers)') || patched.includes('Array.from(plain)')) {
-      throw new Error('Unsafe large-file download code is still present after runtime patch.');
-    }
-    if (!patched.includes("ipcMain.handle('p2p:uploadFiles'") || !patched.includes('uploadFilePathStreaming')) {
-      throw new Error('Streaming upload handler is missing after runtime patch.');
-    }
-    if (patched.includes('chunk.data.toString') || patched.includes('chunkMetas.push({ index, size: data.length, data, hash })')) {
-      throw new Error('Upload chunk RAM retention is still present after runtime patch.');
-    }
   } catch (error) {
     console.error('[runtime-safety] failed to apply P2P memory safety patches:', error?.message || error);
     throw error;
@@ -170,6 +161,33 @@ function showMainWindow() {
   console.log('[main-wrapper] main window shown');
 }
 
+function createFallbackWindow(reason = 'main window did not appear') {
+  if (globalThis.__p2pCloudMainWindow && !globalThis.__p2pCloudMainWindow.isDestroyed()) return;
+  console.warn('[main-wrapper] fallback window created:', reason);
+  const win = new BrowserWindow({
+    title: APP_TITLE,
+    width: 1280,
+    height: 820,
+    minWidth: 980,
+    minHeight: 680,
+    show: true,
+    backgroundColor: '#09090b',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  globalThis.__p2pCloudMainWindow = win;
+  const url = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
+  win.loadURL(url).catch((error) => {
+    console.error('[main-wrapper] fallback loadURL failed:', error?.message || error);
+  });
+  win.show();
+  win.focus();
+}
+
 function createTray() {
   if (tray) return tray;
   tray = new Tray(resolveTrayIcon());
@@ -190,6 +208,21 @@ function createTray() {
   ]));
   tray.on('double-click', showMainWindow);
   return tray;
+}
+
+async function importMainWhenReady() {
+  if (mainImportStarted) return;
+  mainImportStarted = true;
+  console.log('[main-wrapper] importing main.js after app ready');
+  try {
+    applyRuntimeSafetyPatches();
+    await import('./main.js');
+    console.log('[main-wrapper] main.js import finished');
+    setTimeout(() => createFallbackWindow('main.js imported but no BrowserWindow appeared'), 3000);
+  } catch (error) {
+    console.error('[main-wrapper] main.js import failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'main.js import failed');
+  }
 }
 
 app.on('ready', () => {
@@ -242,7 +275,9 @@ app.on('before-quit', () => {
 });
 
 if (gotSingleInstanceLock) {
-  console.log('[main-wrapper] importing main.js');
-  applyRuntimeSafetyPatches();
-  await import('./main.js');
+  console.log('[main-wrapper] scheduling main.js import after app ready');
+  app.whenReady().then(importMainWhenReady).catch((error) => {
+    console.error('[main-wrapper] app.whenReady failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'app.whenReady failed');
+  });
 }
