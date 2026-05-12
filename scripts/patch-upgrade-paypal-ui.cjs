@@ -54,13 +54,33 @@ function insertAfter(marker, addition, label) {
   return true;
 }
 
+if (!source.includes('function safeJson')) {
+  const helper = '\nfunction safeJson<T>(key: string, fallback: T): T { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; } }\n';
+  if (source.includes('function formatBytes')) {
+    source = source.replace('function formatBytes', `${helper}\nfunction formatBytes`);
+  } else {
+    const marker = 'export default function';
+    source = source.replace(marker, `${helper}\n${marker}`);
+  }
+  mark();
+}
+
 if (!source.includes('const PAYPAL_SERVER_BASE')) {
-  source = source.replace('const ALL_FILES =', 'const PAYPAL_SERVER_BASE = import.meta.env.VITE_PAYPAL_SERVER_BASE || "http://127.0.0.1:8791";\nconst ALL_FILES =');
+  if (source.includes('const ALL_FILES =')) {
+    source = source.replace('const ALL_FILES =', 'const PAYPAL_SERVER_BASE = import.meta.env.VITE_PAYPAL_SERVER_BASE || "http://127.0.0.1:8791";\nconst ALL_FILES =');
+  } else {
+    const marker = 'export default function';
+    source = source.replace(marker, 'const PAYPAL_SERVER_BASE = import.meta.env.VITE_PAYPAL_SERVER_BASE || "http://127.0.0.1:8791";\n\n' + marker);
+  }
   mark();
 }
 
 if (!source.includes('type PendingPayPal')) {
-  source = source.replace('type WalletConnectResult', 'type PendingPayPal = { orderId: string; planId: string; approveUrl?: string };\ntype WalletConnectResult');
+  if (source.includes('type WalletConnectResult')) {
+    source = source.replace('type WalletConnectResult', 'type PendingPayPal = { orderId: string; planId: string; approveUrl?: string };\ntype WalletConnectResult');
+  } else {
+    source = source.replace('declare global', 'type PendingPayPal = { orderId: string; planId: string; approveUrl?: string };\n\ndeclare global');
+  }
   mark();
 }
 
