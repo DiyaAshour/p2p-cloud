@@ -1,94 +1,148 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const appFile = path.join(process.cwd(), 'client', 'src', 'NativeP2PApp.tsx');
+const srcDir = path.join(process.cwd(), 'client', 'src');
 
-if (!fs.existsSync(appFile)) {
-  console.log('[patch-upgrade-paypal-ui] NativeP2PApp.tsx not found; skipping');
+function walk(dir) {
+  const files = [];
+  if (!fs.existsSync(dir)) return files;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...walk(full));
+    else if (/\.(tsx|jsx)$/.test(entry.name)) files.push(full);
+  }
+  return files;
+}
+
+const candidates = walk(srcDir)
+  .map((file) => ({ file, source: fs.readFileSync(file, 'utf8') }))
+  .filter(({ source }) =>
+    source.includes('Chunknet Drive') ||
+    source.includes('Encrypted storage that stays close to you') ||
+    (source.includes('My Files') && source.includes('Upload') && source.includes('Storage'))
+  );
+
+if (!candidates.length) {
+  console.warn('[patch-upgrade-paypal-ui] active drive UI file not found; skipping');
   process.exit(0);
 }
 
-let source = fs.readFileSync(appFile, 'utf8');
+const target = candidates[0];
+const appFile = target.file;
+let source = target.source;
 let changed = false;
 
-function replaceOnce(find, replacement, label) {
+function mark() { changed = true; }
+function replace(find, replacement, label) {
   if (!source.includes(find)) {
     console.warn(`[patch-upgrade-paypal-ui] marker not found: ${label}`);
-    return;
+    return false;
   }
   source = source.replace(find, replacement);
-  changed = true;
+  mark();
+  return true;
+}
+function insertAfter(marker, addition, label) {
+  if (source.includes(addition.trim().slice(0, 80))) return true;
+  const i = source.indexOf(marker);
+  if (i < 0) {
+    console.warn(`[patch-upgrade-paypal-ui] marker not found: ${label}`);
+    return false;
+  }
+  source = source.slice(0, i + marker.length) + addition + source.slice(i + marker.length);
+  mark();
+  return true;
 }
 
-// 1) Make Radix Tabs controlled so Upgrade buttons can jump to the Plans tab.
-if (!source.includes('const [activeTab, setActiveTab] = useState("files")')) {
-  replaceOnce(
-    '  const [pendingPayPal, setPendingPayPal] = useState<PendingPayPal | null>(() => safeJson<PendingPayPal | null>("peercloud.pending.paypal", null));',
-    '  const [pendingPayPal, setPendingPayPal] = useState<PendingPayPal | null>(() => safeJson<PendingPayPal | null>("peercloud.pending.paypal", null));\n  const [activeTab, setActiveTab] = useState("files");',
-    'pendingPayPal state'
-  );
+if (!source.includes('const PAYPAL_SERVER_BASE')) {
+  source = source.replace('const ALL_FILES =', 'const PAYPAL_SERVER_BASE = import.meta.env.VITE_PAYPAL_SERVER_BASE || "http://127.0.0.1:8791";\nconst ALL_FILES =');
+  mark();
+}
+
+if (!source.includes('type PendingPayPal')) {
+  source = source.replace('type WalletConnectResult', 'type PendingPayPal = { orderId: string; planId: string; approveUrl?: string };\ntype WalletConnectResult');
+  mark();
+}
+
+if (!source.includes('const [activeTab, setActiveTab]')) {
+  const marker = 'const [pendingPayPal, setPendingPayPal]';
+  const fallback = 'const [busy, setBusy]';
+  const stateMarker = source.includes(marker) ? marker : fallback;
+  const i = source.indexOf(stateMarker);
+  if (i >= 0) {
+    const eol = source.indexOf('\n', i);
+    source = source.slice(0, eol + 1) + '  const [activeTab, setActiveTab] = useState("files");\n' + source.slice(eol + 1);
+    mark();
+  }
+}
+
+if (!source.includes('const [pendingPayPal, setPendingPayPal]')) {
+  const i = source.indexOf('const [activeTab, setActiveTab]');
+  if (i >= 0) {
+    const eol = source.indexOf('\n', i);
+    source = source.slice(0, eol + 1) + '  const [pendingPayPal, setPendingPayPal] = useState<PendingPayPal | null>(() => safeJson<PendingPayPal | null>("peercloud.pending.paypal", null));\n' + source.slice(eol + 1);
+    mark();
+  }
+}
+
+if (!source.includes('const payWithPayPal =')) {
+  const marker = 'const logoutAuth =';
+  const i = source.indexOf(marker);
+  if (i >= 0) {
+    const helpers = '  const copyPaymentLink = async (url?: string) => { if (!url) throw new Error("No PayPal payment link available"); await navigator.clipboard.writeText(url); toast.success("Payment link copied"); };\n' +
+      '  const payWithPayPal = (plan: WalletPlan) => runBusy(async () => { if (!walletConnected || !wallet?.address) throw new Error("Connect wallet before payment"); const response = await fetch(`${PAYPAL_SERVER_BASE}/api/paypal/create-order`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wallet: wallet.address, planId: plan.id }) }); const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.error || "PayPal create-order failed"); const pending = { orderId: data.orderId, planId: plan.id, approveUrl: data.approveUrl }; localStorage.setItem("peercloud.pending.paypal", JSON.stringify(pending)); setPendingPayPal(pending); await copyPaymentLink(data.approveUrl); toast.success("PayPal order created. Open the copied link, pay, then confirm."); });\n' +
+      '  const confirmPayPal = () => runBusy(async () => { if (!pendingPayPal) throw new Error("No pending PayPal order"); const response = await fetch(`${PAYPAL_SERVER_BASE}/api/paypal/capture-order`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: pendingPayPal.orderId }) }); const data = await response.json(); if (!response.ok || !data.ok || !data.subscription) throw new Error(data.error || "PayPal capture failed"); const sub = data.subscription; const nextWallet = await bridge.invoke<WalletState>("wallet:setPlan", { planId: sub.planId, paidUntil: sub.paidUntil, quotaBytes: sub.quotaBytes, txHash: sub.captureId }); setWallet(nextWallet); localStorage.removeItem("peercloud.pending.paypal"); setPendingPayPal(null); toast.success(`${nextWallet.plan.name} unlocked`); await refreshAll(); });\n';
+    source = source.slice(0, i) + helpers + source.slice(i);
+    mark();
+  }
 }
 
 if (!source.includes('<Tabs value={activeTab} onValueChange={setActiveTab}')) {
-  replaceOnce(
-    '<Tabs defaultValue="files" className="space-y-5">',
-    '<Tabs value={activeTab} onValueChange={setActiveTab} defaultValue="files" className="space-y-5">',
-    'Tabs defaultValue'
-  );
+  source = source.replace('<Tabs defaultValue="files"', '<Tabs value={activeTab} onValueChange={setActiveTab} defaultValue="files"');
+  mark();
 }
 
-// 2) Add a persistent Upgrade button to the header.
-if (!source.includes('>Upgrade</Button><Button variant={advancedMode')) {
-  replaceOnce(
-    '<Button variant="outline" onClick={() => void runBusy(refreshAll)} disabled={busy}><RefreshCw className="size-4" />Refresh</Button><Button variant={advancedMode ? "default" : "outline"} onClick={() => setAdvancedMode((value) => !value)}>',
-    '<Button variant="outline" onClick={() => void runBusy(refreshAll)} disabled={busy}><RefreshCw className="size-4" />Refresh</Button><Button onClick={() => setActiveTab("plans")} disabled={busy}><Zap className="size-4" />Upgrade</Button><Button variant={advancedMode ? "default" : "outline"} onClick={() => setAdvancedMode((value) => !value)}>',
-    'header Refresh button'
-  );
+if (!source.includes('>Upgrade</Button>')) {
+  insertAfter('<Button variant="outline" onClick={() => void runBusy(refreshAll)} disabled={busy}><RefreshCw className="size-4" />Refresh</Button>', '<Button onClick={() => setActiveTab("plans")} disabled={busy}><Zap className="size-4" />Upgrade</Button>', 'header refresh button');
 }
 
-// 3) Add an Upgrade call-to-action inside the storage card.
 if (!source.includes('Manage storage / Upgrade')) {
-  replaceOnce(
-    '<p className="text-xs text-zinc-400">{formatBytes(wallet?.usedBytes ?? 0)} of {formatBytes(wallet?.plan?.quotaBytes ?? 0)} · {wallet?.plan?.name || "Free"}</p></CardContent></Card><Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><FolderOpen className="size-4" />Folders</CardTitle></CardHeader>',
-    '<p className="text-xs text-zinc-400">{formatBytes(wallet?.usedBytes ?? 0)} of {formatBytes(wallet?.plan?.quotaBytes ?? 0)} · {wallet?.plan?.name || "Free"}</p><Button className="w-full" size="sm" onClick={() => setActiveTab("plans")} disabled={busy}><Zap className="size-4" />Manage storage / Upgrade</Button></CardContent></Card><Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><FolderOpen className="size-4" />Folders</CardTitle></CardHeader>',
-    'storage card text'
-  );
+  insertAfter('· {wallet?.plan?.name || "Free"}</p>', '<Button className="w-full" size="sm" onClick={() => setActiveTab("plans")} disabled={busy}><Zap className="size-4" />Manage storage / Upgrade</Button>', 'storage plan text');
 }
 
-// 4) Add a homepage upgrade panel with direct PayPal buttons.
+if (!source.includes('<TabsTrigger value="plans">Plans</TabsTrigger>')) {
+  insertAfter('<TabsTrigger value="upload">Upload</TabsTrigger>', '<TabsTrigger value="plans">Plans</TabsTrigger>', 'upload tab trigger');
+}
+
 if (!source.includes('Upgrade storage with PayPal')) {
-  const upgradePanel = '\n\n        <Card className="rounded-2xl border-zinc-800 bg-gradient-to-br from-zinc-900 to-zinc-950">\n' +
+  const panel = '\n\n        <Card className="rounded-2xl border-zinc-800 bg-gradient-to-br from-zinc-900 to-zinc-950">\n' +
     '          <CardContent className="grid gap-4 p-5 lg:grid-cols-[1fr_auto] lg:items-center">\n' +
-    '            <div>\n' +
-    '              <div className="mb-2 flex flex-wrap items-center gap-2">\n' +
-    '                <Badge variant="secondary"><Zap className="mr-1 size-3" />Upgrade</Badge>\n' +
-    '                <span className="text-xs text-zinc-500">PayPal checkout enabled</span>\n' +
-    '              </div>\n' +
-    '              <h2 className="text-xl font-semibold">Upgrade storage with PayPal</h2>\n' +
-    '              <p className="mt-1 text-sm text-zinc-400">Current plan: {wallet?.plan?.name || "Free"}. Need more space? Pick a paid plan and confirm the PayPal order inside the app.</p>\n' +
-    '            </div>\n' +
+    '            <div><Badge variant="secondary"><Zap className="mr-1 size-3" />Upgrade</Badge><h2 className="mt-2 text-xl font-semibold">Upgrade storage with PayPal</h2><p className="mt-1 text-sm text-zinc-400">Current plan: {wallet?.plan?.name || "Free"}. Choose more space and confirm the PayPal order inside the app.</p></div>\n' +
     '            <div className="flex flex-wrap gap-2 lg:justify-end">\n' +
     '              {!walletConnected && <Button onClick={() => void connectWallet()} disabled={walletConnecting}><Wallet className="size-4" />Connect Wallet</Button>}\n' +
-    '              {(wallet?.plans || []).filter((plan) => plan.id !== "free").slice(0, 2).map((plan) => (\n' +
-    '                <Button key={plan.id} variant={wallet?.planId === plan.id ? "secondary" : "default"} onClick={() => payWithPayPal(plan)} disabled={busy || !walletConnected || wallet?.planId === plan.id}>\n' +
-    '                  {wallet?.planId === plan.id ? "Active" : "Pay $" + plan.priceUsd + "/mo"} · {plan.name}\n' +
-    '                </Button>\n' +
-    '              ))}\n' +
+    '              {(wallet?.plans || []).filter((plan) => plan.id !== "free").slice(0, 2).map((plan) => <Button key={plan.id} onClick={() => payWithPayPal(plan)} disabled={busy || !walletConnected || wallet?.planId === plan.id}>{wallet?.planId === plan.id ? "Active" : "Pay $" + plan.priceUsd + "/mo"} · {plan.name}</Button>)}\n' +
     '              <Button variant="outline" onClick={() => setActiveTab("plans")}>See all plans</Button>\n' +
     '            </div>\n' +
     '          </CardContent>\n' +
     '        </Card>';
+  if (!replace('</section>\n\n        {pendingPayPal &&', `</section>${panel}\n\n        {pendingPayPal &&`, 'before pending PayPal')) {
+    replace('</section>\n\n        <Tabs', `</section>${panel}\n\n        <Tabs`, 'before tabs');
+  }
+}
 
-  replaceOnce(
-    '\n\n        {pendingPayPal &&',
-    `${upgradePanel}\n\n        {pendingPayPal &&`,
-    'pendingPayPal panel insertion point'
-  );
+if (!source.includes('Pending PayPal payment')) {
+  const pending = '\n\n        {pendingPayPal && <Card className="rounded-2xl border-amber-800 bg-amber-950/40"><CardContent className="flex flex-col gap-3 p-5 lg:flex-row lg:items-center lg:justify-between"><div><p className="font-semibold text-amber-100">Pending PayPal payment</p><p className="break-all text-sm text-amber-200/80">Order: {pendingPayPal.orderId}</p></div><div className="flex flex-wrap gap-2"><Button onClick={confirmPayPal} disabled={busy}>Confirm Payment</Button>{pendingPayPal.approveUrl && <Button variant="outline" onClick={() => void runBusy(async () => copyPaymentLink(pendingPayPal.approveUrl))}>Copy Link</Button>}<Button variant="ghost" onClick={() => { localStorage.removeItem("peercloud.pending.paypal"); setPendingPayPal(null); }}>Cancel</Button></div></CardContent></Card>}';
+  replace('<Tabs', `${pending}\n\n        <Tabs`, 'tabs start for pending PayPal card');
+}
+
+if (!source.includes('<TabsContent value="plans"')) {
+  const plans = '\n\n          <TabsContent value="plans"><Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardHeader><CardTitle>Upgrade storage</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{(wallet?.plans || []).map((plan) => <Card key={plan.id} className="rounded-2xl border-zinc-800 bg-zinc-950"><CardContent className="space-y-3 p-5"><div><p className="text-lg font-semibold">{plan.name}</p><p className="text-sm text-zinc-400">{formatBytes(plan.quotaBytes)}</p></div><p className="text-2xl font-bold">${plan.priceUsd}/mo</p>{plan.id === "free" ? <Button variant="outline" disabled={wallet?.planId === plan.id} onClick={() => setPlan("free")}>{wallet?.planId === plan.id ? "Current" : "Use Free"}</Button> : <Button onClick={() => payWithPayPal(plan)} disabled={busy || !walletConnected || wallet?.planId === plan.id}>{wallet?.planId === plan.id ? "Current Plan" : "Pay with PayPal"}</Button>}</CardContent></Card>)}</CardContent></Card></TabsContent>';
+  replace('\n        </Tabs>', `${plans}\n        </Tabs>`, 'tabs close');
 }
 
 if (changed) {
   fs.writeFileSync(appFile, source, 'utf8');
-  console.log('[patch-upgrade-paypal-ui] installed homepage Upgrade + PayPal UI');
+  console.log(`[patch-upgrade-paypal-ui] installed Upgrade + PayPal UI in ${path.relative(process.cwd(), appFile)}`);
 } else {
-  console.log('[patch-upgrade-paypal-ui] already installed or no changes needed');
+  console.log(`[patch-upgrade-paypal-ui] already installed in ${path.relative(process.cwd(), appFile)}`);
 }
