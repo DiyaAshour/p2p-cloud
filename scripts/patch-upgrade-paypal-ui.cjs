@@ -54,6 +54,12 @@ function insertAfter(marker, addition, label) {
   return true;
 }
 
+// Repair older injected output if present.
+if (source.includes('disabled={walletConnecting}')) {
+  source = source.replaceAll('disabled={walletConnecting}', 'disabled={busy}');
+  mark();
+}
+
 if (!source.includes('function safeJson')) {
   const helper = '\nfunction safeJson<T>(key: string, fallback: T): T { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; } }\n';
   if (source.includes('function formatBytes')) {
@@ -139,7 +145,7 @@ if (!source.includes('Upgrade storage with PayPal')) {
     '          <CardContent className="grid gap-4 p-5 lg:grid-cols-[1fr_auto] lg:items-center">\n' +
     '            <div><Badge variant="secondary"><Zap className="mr-1 size-3" />Upgrade</Badge><h2 className="mt-2 text-xl font-semibold">Upgrade storage with PayPal</h2><p className="mt-1 text-sm text-zinc-400">Current plan: {wallet?.plan?.name || "Free"}. Choose more space and confirm the PayPal order inside the app.</p></div>\n' +
     '            <div className="flex flex-wrap gap-2 lg:justify-end">\n' +
-    '              {!walletConnected && <Button onClick={() => void connectWallet()} disabled={walletConnecting}><Wallet className="size-4" />Connect Wallet</Button>}\n' +
+    '              {!walletConnected && <Button onClick={() => void connectWallet()} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button>}\n' +
     '              {(wallet?.plans || []).filter((plan) => plan.id !== "free").slice(0, 2).map((plan) => <Button key={plan.id} onClick={() => payWithPayPal(plan)} disabled={busy || !walletConnected || wallet?.planId === plan.id}>{wallet?.planId === plan.id ? "Active" : "Pay $" + plan.priceUsd + "/mo"} · {plan.name}</Button>)}\n' +
     '              <Button variant="outline" onClick={() => setActiveTab("plans")}>See all plans</Button>\n' +
     '            </div>\n' +
