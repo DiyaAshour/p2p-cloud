@@ -7,6 +7,30 @@ const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
 const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
 const CHUNK_REQUEST_TIMEOUT_MS = Number(process.env.P2P_CHUNK_REQUEST_TIMEOUT_MS || 15000);
 const CHUNK_STORE_ACK_TIMEOUT_MS = Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOUT_MS || 5000);
+const PEER_SUSPECT_AFTER_MS = Number(process.env.P2P_PEER_SUSPECT_AFTER_MS || 5 * 60 * 1000);
+const PEER_DEAD_AFTER_MS = Number(process.env.P2P_PEER_DEAD_AFTER_MS || 30 * 60 * 1000);
+const MIN_REPLICA_HEALTH_SCORE = Number(process.env.P2P_MIN_REPLICA_HEALTH_SCORE || 35);
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value || 0)));
+}
+
+function emptyPeerHealth(peerId) {
+  return {
+    peerId,
+    score: 50,
+    state: 'new',
+    successes: 0,
+    failures: 0,
+    storedChunks: 0,
+    fetchedChunks: 0,
+    lastSeen: null,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    lastLatencyMs: null,
+    lastError: null,
+  };
+}
 
 export class P2PTransportNode {
   constructor({ peerId, port = DEFAULT_PORT, host = DEFAULT_HOST, publicUrl = null, chunkStoreDir = null } = {}) {
@@ -19,6 +43,7 @@ export class P2PTransportNode {
     this.uiClients = new Set();
     this.peerSockets = new Map();
     this.peerInfo = new Map();
+    this.peerHealth = new Map();
     this.localChunks = new Map();
     this.chunkReplicas = new Map();
     this.pendingChunkRequests = new Map();
@@ -63,6 +88,101 @@ export class P2PTransportNode {
     return null;
   }
 
+  getPeerHealth(peerId) {
+    if (!peerId) return null;
+    const current = this.peerHealth.get(peerId) || emptyPeerHealth(peerId);
+    const now = Date.now();
+    const info = this.peerInfo.get(peerId) || {};
+    const lastSeen = current.lastSeen || info.lastSeen || null;
+    let state = current.state;
+
+    if (this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN) state = 'healthy';
+    else if (lastSeen && now - lastSeen > PEER_DEAD_AFTER_MS) state = 'dead';
+    else if (lastSeen && now - lastSeen > PEER_SUSPECT_AFTER_MS) state = 'suspect';
+    else if (info.status === 'error') state = 'suspect';
+    else if (info.status === 'disconnected') state = 'offline';
+
+    const agedPenalty = state === 'dead' ? 45 : state === 'suspect' ? 20 : state === 'offline' ? 10 : 0;
+    const failurePenalty = Math.min(40, current.failures * 8);
+    const successBonus = Math.min(35, current.successes * 4 + current.storedChunks * 2 + current.fetchedChunks * 2);
+    const latencyPenalty = current.lastLatencyMs ? Math.min(15, Math.floor(current.lastLatencyMs / 1000)) : 0;
+    const connectedBonus = state === 'healthy' ? 25 : 0;
+    const score = clamp(50 + successBonus + connectedBonus - failurePenalty - agedPenalty - latencyPenalty, 0, 100);
+    const next = { ...current, state, score, lastSeen };
+    this.peerHealth.set(peerId, next);
+    return next;
+  }
+
+  markPeerOnline(peerId) {
+    if (!peerId || peerId === this.peerId) return;
+    const now = Date.now();
+    const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId);
+    this.peerHealth.set(peerId, { ...current, state: 'healthy', lastSeen: now, lastError: null });
+  }
+
+  markPeerOffline(peerId, error = null) {
+    if (!peerId || peerId === this.peerId) return;
+    const now = Date.now();
+    const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId);
+    this.peerHealth.set(peerId, {
+      ...current,
+      state: error ? 'suspect' : 'offline',
+      lastSeen: current.lastSeen || now,
+      lastFailureAt: error ? now : current.lastFailureAt,
+      failures: error ? current.failures + 1 : current.failures,
+      lastError: error ? String(error) : current.lastError,
+    });
+  }
+
+  notePeerSuccess(peerId, type = 'generic', latencyMs = null) {
+    if (!peerId || peerId === this.peerId) return;
+    const now = Date.now();
+    const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId);
+    this.peerHealth.set(peerId, {
+      ...current,
+      state: 'healthy',
+      successes: current.successes + 1,
+      storedChunks: type === 'store' ? current.storedChunks + 1 : current.storedChunks,
+      fetchedChunks: type === 'fetch' ? current.fetchedChunks + 1 : current.fetchedChunks,
+      lastSeen: now,
+      lastSuccessAt: now,
+      lastLatencyMs: latencyMs ?? current.lastLatencyMs,
+      lastError: null,
+    });
+  }
+
+  notePeerFailure(peerId, error = null) {
+    if (!peerId || peerId === this.peerId) return;
+    const now = Date.now();
+    const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId);
+    const nextFailures = current.failures + 1;
+    this.peerHealth.set(peerId, {
+      ...current,
+      state: nextFailures >= 3 ? 'suspect' : current.state,
+      failures: nextFailures,
+      lastFailureAt: now,
+      lastError: error ? String(error) : current.lastError,
+    });
+  }
+
+  isPeerHealthy(peerId, minScore = MIN_REPLICA_HEALTH_SCORE) {
+    const health = this.getPeerHealth(peerId);
+    return Boolean(health && health.state !== 'dead' && health.score >= minScore);
+  }
+
+  sortedConnectedPeerIds() {
+    return this.connectedPeerIds().sort((a, b) => {
+      const ah = this.getPeerHealth(a);
+      const bh = this.getPeerHealth(b);
+      return (bh?.score || 0) - (ah?.score || 0);
+    });
+  }
+
+  peerHealthSummary() {
+    const peers = new Set([...this.peerInfo.keys(), ...this.peerHealth.keys(), ...this.connectedPeerIds()]);
+    return Array.from(peers).map((peerId) => ({ ...(this.peerInfo.get(peerId) || { peerId }), health: this.getPeerHealth(peerId) }));
+  }
+
   start() {
     if (this.server) {
       return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl };
@@ -76,6 +196,7 @@ export class P2PTransportNode {
 
       socket.on('pong', () => {
         socket.isAlive = true;
+        if (socket.remotePeerId) this.markPeerOnline(socket.remotePeerId);
       });
 
       socket.on('message', (raw) => {
@@ -87,6 +208,7 @@ export class P2PTransportNode {
         for (const [peerId, peerSocket] of this.peerSockets.entries()) {
           if (peerSocket === socket) {
             this.peerSockets.delete(peerId);
+            this.markPeerOffline(peerId);
             this.peerInfo.set(peerId, {
               ...(this.peerInfo.get(peerId) || { peerId }),
               status: 'disconnected',
@@ -108,6 +230,7 @@ export class P2PTransportNode {
     this.heartbeat = setInterval(() => {
       this.server?.clients.forEach((socket) => {
         if (socket.isAlive === false) {
+          if (socket.remotePeerId) this.markPeerOffline(socket.remotePeerId, 'heartbeat timeout');
           socket.terminate();
           return;
         }
@@ -149,12 +272,14 @@ export class P2PTransportNode {
   healthyReplicaIds(chunkHash) {
     const known = this.chunkReplicas.get(chunkHash) || new Set();
     const online = new Set(this.connectedPeerIds());
-    return Array.from(known).filter((peerId) => online.has(peerId));
+    return Array.from(known).filter((peerId) => online.has(peerId) && this.isPeerHealthy(peerId));
   }
 
   selectReplicaTargets({ exclude = [], limit = 3 } = {}) {
     const excluded = new Set(exclude);
-    return this.connectedPeerIds().filter((peerId) => !excluded.has(peerId)).slice(0, limit);
+    return this.sortedConnectedPeerIds()
+      .filter((peerId) => !excluded.has(peerId) && this.isPeerHealthy(peerId))
+      .slice(0, limit);
   }
 
   connectPeer({ peerId, url }) {
@@ -163,6 +288,7 @@ export class P2PTransportNode {
 
     const existing = this.peerSockets.get(peerId);
     if (existing && existing.readyState === WebSocket.OPEN) {
+      this.markPeerOnline(peerId);
       return { peerId, status: 'connected', url };
     }
 
@@ -173,6 +299,7 @@ export class P2PTransportNode {
 
     socket.on('open', () => {
       this.peerSockets.set(peerId, socket);
+      this.markPeerOnline(peerId);
       this.peerInfo.set(peerId, { peerId, url, status: 'connected', lastSeen: Date.now() });
       this.send(socket, {
         type: 'peer:hello',
@@ -186,10 +313,12 @@ export class P2PTransportNode {
     socket.on('message', (raw) => this.handleSocketMessage(socket, raw));
     socket.on('close', () => {
       this.peerSockets.delete(peerId);
+      this.markPeerOffline(peerId);
       this.peerInfo.set(peerId, { peerId, url, status: 'disconnected', lastSeen: Date.now() });
       this.broadcastToUi({ type: 'peer:disconnected', peerId });
     });
     socket.on('error', (error) => {
+      this.markPeerOffline(peerId, error.message);
       this.peerInfo.set(peerId, { peerId, url, status: 'error', error: error.message, lastSeen: Date.now() });
       this.broadcastToUi({ type: 'peer:error', peerId, url, error: error.message });
     });
@@ -197,10 +326,10 @@ export class P2PTransportNode {
     return { peerId, status: 'connecting', url };
   }
 
-  async putChunkOnNetwork(chunk, replicaPeerIds = this.connectedPeerIds()) {
+  async putChunkOnNetwork(chunk, replicaPeerIds = this.selectReplicaTargets({ limit: 3 })) {
     if (!chunk?.hash) throw new Error('chunk.hash is required');
-    const targets = replicaPeerIds.filter((peerId) => this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN);
-    if (!targets.length) throw new Error('No connected P2P peers available');
+    const targets = replicaPeerIds.filter((peerId) => this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN && this.isPeerHealthy(peerId));
+    if (!targets.length) throw new Error('No healthy connected P2P peers available');
 
     const replicaSet = this.chunkReplicas.get(chunk.hash) || new Set();
     const ackPromises = [];
@@ -209,15 +338,17 @@ export class P2PTransportNode {
       const socket = this.peerSockets.get(peerId);
       const messageId = crypto.randomUUID();
       const fallbackKey = `${chunk.hash}:${peerId}`;
+      const startedAt = Date.now();
 
       const ackPromise = new Promise((resolve) => {
         const timeout = setTimeout(() => {
           this.pendingChunkAcks.delete(messageId);
           this.pendingChunkAcks.delete(fallbackKey);
+          this.notePeerFailure(peerId, 'chunk:stored-ack timeout');
           resolve({ ok: false, peerId, chunkHash: chunk.hash, error: 'chunk:stored-ack timeout' });
         }, CHUNK_STORE_ACK_TIMEOUT_MS);
 
-        const pending = { resolve, timeout, peerId, chunkHash: chunk.hash };
+        const pending = { resolve, timeout, peerId, chunkHash: chunk.hash, startedAt };
         this.pendingChunkAcks.set(messageId, pending);
         this.pendingChunkAcks.set(fallbackKey, pending);
       });
@@ -244,6 +375,7 @@ export class P2PTransportNode {
         stored.push(result.peerId);
       } else if (result?.peerId) {
         failed.push(result);
+        this.notePeerFailure(result.peerId, result.error);
       }
     }
 
@@ -259,16 +391,17 @@ export class P2PTransportNode {
     if (localChunk) return Promise.resolve(localChunk);
 
     const knownReplicas = this.healthyReplicaIds(chunkHash);
-    const peers = knownReplicas.length ? knownReplicas : this.connectedPeerIds();
-    if (!peers.length) return Promise.reject(new Error('No connected P2P peers available'));
+    const peers = knownReplicas.length ? knownReplicas : this.sortedConnectedPeerIds().filter((peerId) => this.isPeerHealthy(peerId));
+    if (!peers.length) return Promise.reject(new Error('No healthy connected P2P peers available'));
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingChunkRequests.delete(chunkHash);
+        for (const peerId of peers) this.notePeerFailure(peerId, `Chunk not found on the network: ${chunkHash}`);
         reject(new Error(`Chunk not found on the network: ${chunkHash}`));
       }, CHUNK_REQUEST_TIMEOUT_MS);
 
-      this.pendingChunkRequests.set(chunkHash, { resolve, reject, timeout });
+      this.pendingChunkRequests.set(chunkHash, { resolve, reject, timeout, requestedFrom: peers, startedAt: Date.now() });
 
       for (const peerId of peers) {
         const socket = this.peerSockets.get(peerId);
@@ -294,13 +427,15 @@ export class P2PTransportNode {
       return;
     }
 
+    if (message.fromPeerId && message.fromPeerId !== this.peerId) this.markPeerOnline(message.fromPeerId);
+
     if (message.type === 'ui:hello') {
       socket.role = 'ui';
       this.uiClients.add(socket);
       this.send(socket, {
         type: 'ui:ready',
         peerId: this.peerId,
-        peers: Array.from(this.peerInfo.values()),
+        peers: this.peerHealthSummary(),
       });
       return;
     }
@@ -309,6 +444,7 @@ export class P2PTransportNode {
       socket.role = 'peer';
       socket.remotePeerId = message.fromPeerId;
       this.peerSockets.set(message.fromPeerId, socket);
+      this.markPeerOnline(message.fromPeerId);
       this.peerInfo.set(message.fromPeerId, {
         peerId: message.fromPeerId,
         url: message.payload?.url,
@@ -333,6 +469,7 @@ export class P2PTransportNode {
       const chunk = message.payload?.chunk;
       if (chunk?.hash) {
         this.storeLocalChunk(chunk);
+        this.notePeerSuccess(message.fromPeerId, 'store');
         this.send(socket, {
           id: crypto.randomUUID(),
           type: 'chunk:stored-ack',
@@ -363,6 +500,7 @@ export class P2PTransportNode {
         this.pendingChunkAcks.delete(ackKey);
         if (chunkHash && fromPeerId) this.pendingChunkAcks.delete(`${chunkHash}:${fromPeerId}`);
         if (ackTo) this.pendingChunkAcks.delete(ackTo);
+        this.notePeerSuccess(fromPeerId, 'store', Date.now() - (pending.startedAt || Date.now()));
         pending.resolve({ ok: true, peerId: fromPeerId, chunkHash });
       }
       return;
@@ -398,6 +536,10 @@ export class P2PTransportNode {
         clearTimeout(pending.timeout);
         this.pendingChunkRequests.delete(chunk.hash);
         this.storeLocalChunk(chunk);
+        this.notePeerSuccess(message.fromPeerId, 'fetch', Date.now() - (pending.startedAt || Date.now()));
+        for (const peerId of pending.requestedFrom || []) {
+          if (peerId !== message.fromPeerId) this.notePeerSuccess(peerId, 'generic');
+        }
         pending.resolve(chunk);
         return;
       }
