@@ -15,6 +15,7 @@ This branch adds scaling guardrails for larger peer networks and safer big-file 
 - Token-bucket upload throttling per peer and globally.
 - Retry cooldown with jitter to reduce reconnect storms.
 - Bootstrap stress runner via `pnpm run stress:p2p`.
+- Malicious peer stress runner via `pnpm run stress:p2p:malicious`.
 
 ## Main env settings
 
@@ -50,17 +51,25 @@ Recommended starting point per node:
 - inbound peers: 64
 - chunk lookup fanout: 8
 
-## Stress test
+## Stress tests
 
 Start the bootstrap server, then run:
 
 `pnpm run stress:p2p`
 
+For malicious input simulation, also start the Electron transport node, then run:
+
+`pnpm run stress:p2p:malicious`
+
 Useful settings:
 
 - P2P_STRESS_BOOTSTRAP_URL
+- P2P_STRESS_TRANSPORT_URL
 - P2P_STRESS_PEERS
 - P2P_STRESS_CONCURRENCY
 - P2P_STRESS_HOLD_MS
+- P2P_MALICIOUS_ROUNDS
+- P2P_MALICIOUS_CONCURRENCY
+- P2P_MALICIOUS_OVERSIZED_BYTES
 
-Next steps: add malicious peer simulation, persistent reputation, and full multi-node transfer stress tests.
+Next steps: add persistent reputation and full multi-node transfer stress tests.
