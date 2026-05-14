@@ -1,35 +1,31 @@
 import { app, ipcMain } from 'electron';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { WebSocket } from 'ws';
 
 const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4));
 const MIN_CONFIRMED_REPLICAS = Math.max(3, Number(process.env.P2P_UPLOAD_MIN_CONFIRMED_REPLICAS || 3));
+const MAX_REPLICA_ATTEMPTS = Math.max(4, Number(process.env.P2P_UPLOAD_MAX_REPLICA_ATTEMPTS || 8));
+const ACK_TIMEOUT_MS = Math.max(2000, Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOUT_MS || 7000));
+const MAX_MESSAGE_BYTES = Math.max(1024 * 1024, Number(process.env.P2P_MAX_MESSAGE_BYTES || 8 * 1024 * 1024));
 
-function dataDir() {
-  return path.join(app.getPath('userData'), 'native-p2p-storage');
-}
+function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
+function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
+function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
+function chunkPath(chunkHash) { return path.join(chunkStoreDir(), `${String(chunkHash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
+function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 
-function manifestsPath() {
-  return path.join(dataDir(), 'manifests.json');
+function readJson(filePath, fallback) {
+  try { if (!fs.existsSync(filePath)) return fallback; return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return fallback; }
 }
-
-function readManifests() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(manifestsPath(), 'utf8'));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+function writeJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
 }
-
-function writeManifests(manifests) {
-  fs.mkdirSync(path.dirname(manifestsPath()), { recursive: true });
-  fs.writeFileSync(manifestsPath(), JSON.stringify(manifests, null, 2), 'utf8');
-}
-
-function unique(values = []) {
-  return Array.from(new Set(values.filter(Boolean)));
-}
+function readManifests() { const parsed = readJson(manifestsPath(), []); return Array.isArray(parsed) ? parsed : []; }
+function writeManifests(manifests) { writeJson(manifestsPath(), manifests); }
+function readLocalChunk(hash) { return readJson(chunkPath(hash), null); }
 
 function classifyChunk(chunk = {}) {
   const replicas = unique(chunk.replicas || []);
@@ -37,43 +33,99 @@ function classifyChunk(chunk = {}) {
   const hasSafety = replicas.includes('aws-safety-peer');
   const protectedEnough = confirmed >= TARGET_REPLICAS;
   const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hasSafety && confirmed >= MIN_CONFIRMED_REPLICAS - 1);
+  return { ...chunk, replicas, confirmedReplicas: confirmed, targetReplicas: TARGET_REPLICAS, minimumConfirmedReplicas: MIN_CONFIRMED_REPLICAS, replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair' };
+}
 
+function peerTargets(summary = {}, knownReplicas = []) {
+  const blocked = new Set(unique([summary.peerId, ...knownReplicas]));
+  return unique(Array.from(summary.peers || []).map((peer) => peer?.peerId))
+    .map((peerId) => Array.from(summary.peers || []).find((peer) => peer?.peerId === peerId))
+    .filter((peer) => peer?.peerId && peer.url && /^wss?:\/\//i.test(peer.url))
+    .filter((peer) => !blocked.has(peer.peerId))
+    .filter((peer) => peer.status === 'connected' || peer.status === 'connecting' || !peer.status)
+    .slice(0, MAX_REPLICA_ATTEMPTS);
+}
+
+function putChunkWithAck({ peer, chunk, fromPeerId }) {
+  return new Promise((resolve) => {
+    const messageId = crypto.randomUUID();
+    const socket = new WebSocket(peer.url, { maxPayload: MAX_MESSAGE_BYTES });
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch {}
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ ok: false, peerId: peer.peerId, error: 'chunk:stored-ack timeout' }), ACK_TIMEOUT_MS);
+
+    socket.on('open', () => {
+      socket.send(JSON.stringify({ type: 'peer:hello', fromPeerId, toPeerId: peer.peerId, payload: { peerId: fromPeerId, url: null } }));
+      socket.send(JSON.stringify({ id: messageId, type: 'chunk:put', fromPeerId, toPeerId: peer.peerId, createdAt: Date.now(), payload: { chunk } }));
+    });
+    socket.on('message', (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.type !== 'chunk:stored-ack') return;
+      if (message.payload?.ackTo && message.payload.ackTo !== messageId) return;
+      if (message.payload?.chunkHash && message.payload.chunkHash !== chunk.hash) return;
+      if (message.payload?.ok === false) return finish({ ok: false, peerId: peer.peerId, error: message.payload?.error || 'chunk rejected' });
+      finish({ ok: true, peerId: peer.peerId });
+    });
+    socket.on('error', (error) => finish({ ok: false, peerId: peer.peerId, error: error?.message || String(error) }));
+    socket.on('close', () => {});
+  });
+}
+
+async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
+  const initial = classifyChunk(chunkMeta);
+  if (initial.confirmedReplicas >= TARGET_REPLICAS) return initial;
+
+  const chunk = readLocalChunk(initial.hash);
+  if (!chunk?.data) return { ...initial, replicationStatus: 'needs-repair', error: 'local chunk missing' };
+
+  const replicas = new Set(initial.replicas.filter((id) => id !== 'aws-safety-peer'));
+  replicas.add(summary.peerId || 'desktop-client');
+  const hadSafety = initial.replicas.includes('aws-safety-peer');
+  const failedReplicas = [];
+
+  for (const peer of peerTargets(summary, Array.from(replicas))) {
+    if (replicas.size >= TARGET_REPLICAS) break;
+    const result = await putChunkWithAck({ peer, chunk, fromPeerId: summary.peerId || 'desktop-client' });
+    if (result.ok) replicas.add(peer.peerId);
+    else failedReplicas.push(result);
+  }
+
+  const confirmed = replicas.size;
+  const protectedEnough = confirmed >= TARGET_REPLICAS;
+  const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hadSafety && confirmed >= MIN_CONFIRMED_REPLICAS - 1);
   return {
-    ...chunk,
-    replicas,
+    ...initial,
+    replicas: unique([...replicas, hadSafety ? 'aws-safety-peer' : null]),
     confirmedReplicas: confirmed,
-    targetReplicas: TARGET_REPLICAS,
-    minimumConfirmedReplicas: MIN_CONFIRMED_REPLICAS,
+    failedReplicas,
     replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair',
   };
 }
 
-function markFileProtection(file = {}) {
-  const chunks = Array.isArray(file.chunks) ? file.chunks.map(classifyChunk) : [];
+async function protectFile(file = {}, summary = {}) {
+  const chunks = [];
+  for (const chunk of Array.isArray(file.chunks) ? file.chunks : []) chunks.push(await replicateChunkToConfirmedPeers({ chunkMeta: chunk, summary }));
   const protectedChunks = chunks.filter((chunk) => chunk.replicationStatus === 'protected').length;
   const repairChunks = chunks.filter((chunk) => chunk.replicationStatus === 'needs-repair').length;
-  const replicationStatus = repairChunks > 0 ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting';
   const replicas = unique(chunks.flatMap((chunk) => chunk.replicas || []));
-
-  return {
-    ...file,
-    chunks,
-    replicas,
-    uploadStatus: 'available',
-    replicationStatus,
-    protectedChunks,
-    needsRepairChunks: repairChunks,
-    replicationUpdatedAt: new Date().toISOString(),
-  };
+  return { ...file, chunks, replicas, uploadStatus: 'available', replicationStatus: repairChunks > 0 ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting', protectedChunks, needsRepairChunks: repairChunks, replicationUpdatedAt: new Date().toISOString() };
 }
 
-function updateStoredManifests(files = []) {
+async function updateStoredManifests(files = [], summary = {}) {
   if (!files.length) return files;
-  const map = new Map(files.map((file) => [file.hash, markFileProtection(file)]));
-  const manifests = readManifests();
-  const next = manifests.map((manifest) => map.has(manifest.hash) ? { ...manifest, ...map.get(manifest.hash) } : manifest);
+  const protectedFiles = [];
+  for (const file of files) protectedFiles.push(await protectFile(file, summary));
+  const map = new Map(protectedFiles.map((file) => [file.hash, file]));
+  const next = readManifests().map((manifest) => map.has(manifest.hash) ? { ...manifest, ...map.get(manifest.hash) } : manifest);
   writeManifests(next);
-  return files.map((file) => map.get(file.hash) || file);
+  return protectedFiles;
 }
 
 function installProtectedUploadStatusOverride() {
@@ -81,16 +133,14 @@ function installProtectedUploadStatusOverride() {
   const oldUploadFiles = handlers?.get?.('p2p:uploadFiles');
   const oldUploadPath = handlers?.get?.('p2p:uploadPath');
   const oldSummary = handlers?.get?.('p2p:networkSummary');
-  if (!oldUploadFiles) {
-    console.warn('[protected-upload] base p2p:uploadFiles handler missing; skipped');
-    return;
-  }
+  if (!oldUploadFiles) { console.warn('[protected-upload] base p2p:uploadFiles handler missing; skipped'); return; }
 
   try { ipcMain.removeHandler('p2p:uploadFiles'); } catch {}
   ipcMain.handle('p2p:uploadFiles', async (event, payload = {}) => {
     const result = await oldUploadFiles(event, payload);
     if (result?.cancelled || !Array.isArray(result?.files)) return result;
-    const files = updateStoredManifests(result.files);
+    const summaryBefore = oldSummary ? await oldSummary(event, {}) : result.summary;
+    const files = await updateStoredManifests(result.files, summaryBefore || {});
     const summary = oldSummary ? await oldSummary(event, {}) : result.summary;
     return { ...result, files, summary };
   });
@@ -100,13 +150,14 @@ function installProtectedUploadStatusOverride() {
     ipcMain.handle('p2p:uploadPath', async (event, payload = {}) => {
       const result = await oldUploadPath(event, payload);
       if (!result?.file) return result;
-      const [file] = updateStoredManifests([result.file]);
+      const summaryBefore = oldSummary ? await oldSummary(event, {}) : result.summary;
+      const [file] = await updateStoredManifests([result.file], summaryBefore || {});
       const summary = oldSummary ? await oldSummary(event, {}) : result.summary;
       return { ...result, file, summary };
     });
   }
 
-  console.log('[protected-upload] status override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS });
+  console.log('[protected-upload] ack replication override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS, maxAttempts: MAX_REPLICA_ATTEMPTS });
 }
 
 installProtectedUploadStatusOverride();
