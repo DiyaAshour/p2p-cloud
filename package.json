@@ -21,6 +21,7 @@
     "storage:peer": "node server/storage-peer.js",
     "stress:p2p": "node scripts/stress-p2p-bootstrap.mjs",
     "stress:p2p:malicious": "node scripts/stress-p2p-malicious.mjs",
+    "stress:p2p:transfer": "node scripts/stress-p2p-transfer.mjs",
     "maintenance": "pnpm repair:manifests",
     "repair:manifests": "node scripts/repair-encrypted-manifests.js && node scripts/remove-bad-encrypted-manifests.js",
     "repair:electron": "node node_modules/electron/install.js",
