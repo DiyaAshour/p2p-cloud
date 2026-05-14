@@ -8,6 +8,7 @@ const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4)
 const MIN_CONFIRMED_REPLICAS = Math.max(3, Number(process.env.P2P_UPLOAD_MIN_CONFIRMED_REPLICAS || 3));
 const MAX_REPLICA_ATTEMPTS = Math.max(4, Number(process.env.P2P_UPLOAD_MAX_REPLICA_ATTEMPTS || 8));
 const ACK_TIMEOUT_MS = Math.max(2000, Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOUT_MS || 7000));
+const HEALTH_TIMEOUT_MS = Math.max(1000, Number(process.env.P2P_PEER_HEALTH_QUERY_TIMEOUT_MS || 2500));
 const MAX_MESSAGE_BYTES = Math.max(1024 * 1024, Number(process.env.P2P_MAX_MESSAGE_BYTES || 8 * 1024 * 1024));
 
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
@@ -36,13 +37,61 @@ function classifyChunk(chunk = {}) {
   return { ...chunk, replicas, confirmedReplicas: confirmed, targetReplicas: TARGET_REPLICAS, minimumConfirmedReplicas: MIN_CONFIRMED_REPLICAS, replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair' };
 }
 
-function peerTargets(summary = {}, knownReplicas = []) {
+function queryPeerHealth(summary = {}) {
+  return new Promise((resolve) => {
+    const port = Number(summary.port || 8787);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_MESSAGE_BYTES });
+    let settled = false;
+    const finish = (peers = []) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch {}
+      resolve(Array.isArray(peers) ? peers : []);
+    };
+    const timer = setTimeout(() => finish([]), HEALTH_TIMEOUT_MS);
+    socket.on('open', () => socket.send(JSON.stringify({ type: 'ui:hello' })));
+    socket.on('message', (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.type === 'ui:ready') finish(message.peers || []);
+    });
+    socket.on('error', () => finish([]));
+  });
+}
+
+function bucketWeight(bucket = '') {
+  return ({ fast: 100, stable: 75, probation: 20, new: 10, congested: -30, quarantine: -80, offline: -90, dead: -100 })[bucket] ?? 0;
+}
+
+function scorePeer(peer = {}) {
+  const health = peer.health || {};
+  const pressure = peer.pressure || {};
+  const remoteStorage = peer.remoteStorage || {};
+  const storageBonus = remoteStorage.acceptingChunks === true ? 10 : remoteStorage.acceptingChunks === false ? -80 : 0;
+  const pressurePenalty = pressure.overloaded ? 40 : 0;
+  return Number(health.score || 0) + bucketWeight(health.bucket) + storageBonus - pressurePenalty;
+}
+
+function mergePeerInfo(summaryPeers = [], healthPeers = []) {
+  const byId = new Map();
+  for (const peer of summaryPeers || []) if (peer?.peerId) byId.set(peer.peerId, { ...peer });
+  for (const peer of healthPeers || []) {
+    if (!peer?.peerId) continue;
+    byId.set(peer.peerId, { ...(byId.get(peer.peerId) || {}), ...peer });
+  }
+  return Array.from(byId.values());
+}
+
+async function peerTargets(summary = {}, knownReplicas = []) {
+  const healthPeers = await queryPeerHealth(summary);
   const blocked = new Set(unique([summary.peerId, ...knownReplicas]));
-  return unique(Array.from(summary.peers || []).map((peer) => peer?.peerId))
-    .map((peerId) => Array.from(summary.peers || []).find((peer) => peer?.peerId === peerId))
+  return mergePeerInfo(summary.peers || [], healthPeers)
     .filter((peer) => peer?.peerId && peer.url && /^wss?:\/\//i.test(peer.url))
     .filter((peer) => !blocked.has(peer.peerId))
     .filter((peer) => peer.status === 'connected' || peer.status === 'connecting' || !peer.status)
+    .filter((peer) => !['dead', 'offline', 'quarantine', 'congested'].includes(peer.health?.bucket))
+    .sort((a, b) => scorePeer(b) - scorePeer(a))
     .slice(0, MAX_REPLICA_ATTEMPTS);
 }
 
@@ -71,9 +120,9 @@ function putChunkWithAck({ peer, chunk, fromPeerId }) {
       if (message.payload?.ackTo && message.payload.ackTo !== messageId) return;
       if (message.payload?.chunkHash && message.payload.chunkHash !== chunk.hash) return;
       if (message.payload?.ok === false) return finish({ ok: false, peerId: peer.peerId, error: message.payload?.error || 'chunk rejected' });
-      finish({ ok: true, peerId: peer.peerId });
+      finish({ ok: true, peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' });
     });
-    socket.on('error', (error) => finish({ ok: false, peerId: peer.peerId, error: error?.message || String(error) }));
+    socket.on('error', (error) => finish({ ok: false, peerId: peer.peerId, error: error?.message || String(error), score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' }));
     socket.on('close', () => {});
   });
 }
@@ -89,8 +138,9 @@ async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
   replicas.add(summary.peerId || 'desktop-client');
   const hadSafety = initial.replicas.includes('aws-safety-peer');
   const failedReplicas = [];
+  const selectedPeers = await peerTargets(summary, Array.from(replicas));
 
-  for (const peer of peerTargets(summary, Array.from(replicas))) {
+  for (const peer of selectedPeers) {
     if (replicas.size >= TARGET_REPLICAS) break;
     const result = await putChunkWithAck({ peer, chunk, fromPeerId: summary.peerId || 'desktop-client' });
     if (result.ok) replicas.add(peer.peerId);
@@ -104,6 +154,7 @@ async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
     ...initial,
     replicas: unique([...replicas, hadSafety ? 'aws-safety-peer' : null]),
     confirmedReplicas: confirmed,
+    selectedPeers: selectedPeers.map((peer) => ({ peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' })),
     failedReplicas,
     replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair',
   };
@@ -157,7 +208,7 @@ function installProtectedUploadStatusOverride() {
     });
   }
 
-  console.log('[protected-upload] ack replication override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS, maxAttempts: MAX_REPLICA_ATTEMPTS });
+  console.log('[protected-upload] scored ack replication override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS, maxAttempts: MAX_REPLICA_ATTEMPTS });
 }
 
 installProtectedUploadStatusOverride();
