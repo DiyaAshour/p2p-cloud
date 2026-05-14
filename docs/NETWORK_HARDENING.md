@@ -16,6 +16,7 @@ This branch adds scaling guardrails for larger peer networks and safer big-file 
 - Persistent peer reputation across restarts.
 - Bootstrap stress runner via `pnpm run stress:p2p`.
 - Malicious peer stress runner via `pnpm run stress:p2p:malicious`.
+- Multi-node transfer stress runner via `pnpm run stress:p2p:transfer`.
 
 ## Main env settings
 
@@ -45,14 +46,22 @@ This branch adds scaling guardrails for larger peer networks and safer big-file 
 
 ## Stress tests
 
-Start bootstrap, then run `pnpm run stress:p2p`.
+Bootstrap registration load:
 
-Start bootstrap and the Electron transport node, then run `pnpm run stress:p2p:malicious`.
+`pnpm run stress:p2p`
 
-Useful stress settings: P2P_STRESS_BOOTSTRAP_URL, P2P_STRESS_TRANSPORT_URL, P2P_STRESS_PEERS, P2P_STRESS_CONCURRENCY, P2P_MALICIOUS_ROUNDS, P2P_MALICIOUS_CONCURRENCY.
+Malicious input simulation, with bootstrap and Electron transport running:
+
+`pnpm run stress:p2p:malicious`
+
+Local multi-node transfer test:
+
+`pnpm run stress:p2p:transfer`
+
+Useful transfer settings: P2P_TRANSFER_STRESS_NODES, P2P_TRANSFER_STRESS_CHUNKS, P2P_TRANSFER_STRESS_CHUNK_BYTES, P2P_TRANSFER_STRESS_REPLICAS.
 
 ## 1000-peer rule
 
 Do not create a full mesh. Keep each node on a bounded peer set, then rely on discovery, adaptive routing, replication, repair, and reputation.
 
-Next steps: add full multi-node transfer stress tests.
+Next steps: run these tests locally, fix any runtime errors, then add CI-safe smaller versions.
