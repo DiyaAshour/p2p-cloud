@@ -1,10 +1,17 @@
+const DEFAULT_TARGET_REPLICAS = 4;
+
 function unique(values = []) {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
-export function getTargetReplicaCount(node, configuredTargetReplicas = 3) {
+function configuredReplicaCount(configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
+  const configured = Number(configuredTargetReplicas || DEFAULT_TARGET_REPLICAS);
+  return Math.max(DEFAULT_TARGET_REPLICAS, Number.isFinite(configured) ? configured : DEFAULT_TARGET_REPLICAS);
+}
+
+export function getTargetReplicaCount(node, configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
   const connectedPeers = node?.connectedPeerIds?.() || [];
-  return Math.max(1, Math.min(Number(configuredTargetReplicas || 3), 1 + connectedPeers.length));
+  return Math.max(1, Math.min(configuredReplicaCount(configuredTargetReplicas), 1 + connectedPeers.length));
 }
 
 export function getHealthyReplicas(node, chunkHash, knownReplicas = []) {
@@ -25,7 +32,7 @@ export function getHealthyReplicas(node, chunkHash, knownReplicas = []) {
   return unique(Array.from(replicas));
 }
 
-export function replicateChunk(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = 3) {
+export function replicateChunk(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
   if (!node) throw new Error('P2P node is required for replication');
   if (!chunkPayload?.hash) throw new Error('chunk.hash is required for replication');
 
@@ -70,7 +77,39 @@ export function replicateChunk(node, chunkPayload, existingReplicas = [], config
   return unique(Array.from(replicas));
 }
 
-export function countUnderReplicatedChunks(node, manifests = [], configuredTargetReplicas = 3) {
+async function replicateChunkConfirmed(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
+  if (!node) throw new Error('P2P node is required for confirmed replication');
+  if (!chunkPayload?.hash) throw new Error('chunk.hash is required for confirmed replication');
+
+  const targetReplicaCount = getTargetReplicaCount(node, configuredTargetReplicas);
+  const replicas = new Set(unique([node.peerId, ...existingReplicas]));
+
+  node.storeLocalChunk?.(chunkPayload);
+
+  const needed = Math.max(0, targetReplicaCount - replicas.size);
+  if (needed <= 0) return unique(Array.from(replicas));
+
+  const targets = node.selectReplicaTargets?.({
+    exclude: Array.from(replicas),
+    limit: needed,
+  }) || [];
+
+  if (!targets.length) return unique(Array.from(replicas));
+
+  try {
+    const result = await node.putChunkOnNetwork?.(chunkPayload, targets);
+    for (const peerId of result?.replicas || []) replicas.add(peerId);
+    if (result?.failedReplicas?.length) {
+      console.warn('[repair] failed confirmed replicas:', chunkPayload.hash, result.failedReplicas.map((entry) => `${entry.peerId}:${entry.error || 'unknown'}`).join(', '));
+    }
+  } catch (error) {
+    console.warn('[repair] confirmed replication failed:', chunkPayload.hash, error?.message || error);
+  }
+
+  return unique(Array.from(replicas));
+}
+
+export function countUnderReplicatedChunks(node, manifests = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
   const targetReplicaCount = getTargetReplicaCount(node, configuredTargetReplicas);
   let count = 0;
 
@@ -84,7 +123,7 @@ export function countUnderReplicatedChunks(node, manifests = [], configuredTarge
   return count;
 }
 
-export async function repairManifests({ node, manifests = [], configuredTargetReplicas = 3, persistManifests, syncPush }) {
+export async function repairManifests({ node, manifests = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS, persistManifests, syncPush }) {
   if (!node) throw new Error('P2P node is required for repair');
 
   const targetReplicaCount = getTargetReplicaCount(node, configuredTargetReplicas);
@@ -110,7 +149,7 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
       let after = before;
 
       if (chunk) {
-        after = replicateChunk(node, chunk, before, configuredTargetReplicas);
+        after = await replicateChunkConfirmed(node, chunk, before, configuredTargetReplicas);
         const oldKey = unique(chunkMeta.replicas || []).sort().join('|');
         const newKey = unique(after).sort().join('|');
         if (oldKey !== newKey) {
