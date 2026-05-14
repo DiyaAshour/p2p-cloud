@@ -12,7 +12,9 @@ This branch adds scaling guardrails for larger peer networks and safer big-file 
 - Bounded chunk lookup fanout instead of flooding all peers.
 - Backpressure for pending chunk requests and pending chunk acknowledgements.
 - Socket bufferedAmount protection.
+- Token-bucket upload throttling per peer and globally.
 - Retry cooldown with jitter to reduce reconnect storms.
+- Bootstrap stress runner via `pnpm run stress:p2p`.
 
 ## Main env settings
 
@@ -25,6 +27,10 @@ This branch adds scaling guardrails for larger peer networks and safer big-file 
 - P2P_MAX_PENDING_CHUNK_ACKS
 - P2P_MAX_BUFFERED_BYTES_PER_PEER
 - P2P_MAX_MESSAGE_BYTES
+- P2P_PEER_UPLOAD_BYTES_PER_SEC
+- P2P_PEER_UPLOAD_BURST_BYTES
+- P2P_GLOBAL_UPLOAD_BYTES_PER_SEC
+- P2P_GLOBAL_UPLOAD_BURST_BYTES
 - P2P_RECONNECT_BASE_MS
 - P2P_RECONNECT_MAX_MS
 - P2P_BOOTSTRAP_MAX_PEERS
@@ -44,4 +50,17 @@ Recommended starting point per node:
 - inbound peers: 64
 - chunk lookup fanout: 8
 
-Next steps: add token-bucket bandwidth shaping, persistent reputation, and automated stress tests.
+## Stress test
+
+Start the bootstrap server, then run:
+
+`pnpm run stress:p2p`
+
+Useful settings:
+
+- P2P_STRESS_BOOTSTRAP_URL
+- P2P_STRESS_PEERS
+- P2P_STRESS_CONCURRENCY
+- P2P_STRESS_HOLD_MS
+
+Next steps: add malicious peer simulation, persistent reputation, and full multi-node transfer stress tests.
