@@ -10,6 +10,10 @@ export const P2P_NETWORK_LIMITS = {
   maxMessageBytes: Number(process.env.P2P_MAX_MESSAGE_BYTES || 8 * 1024 * 1024),
   reconnectBaseMs: Number(process.env.P2P_RECONNECT_BASE_MS || 1000),
   reconnectMaxMs: Number(process.env.P2P_RECONNECT_MAX_MS || 60 * 1000),
+  peerUploadBytesPerSecond: Number(process.env.P2P_PEER_UPLOAD_BYTES_PER_SEC || 4 * 1024 * 1024),
+  peerUploadBurstBytes: Number(process.env.P2P_PEER_UPLOAD_BURST_BYTES || 8 * 1024 * 1024),
+  globalUploadBytesPerSecond: Number(process.env.P2P_GLOBAL_UPLOAD_BYTES_PER_SEC || 32 * 1024 * 1024),
+  globalUploadBurstBytes: Number(process.env.P2P_GLOBAL_UPLOAD_BURST_BYTES || 64 * 1024 * 1024),
 };
 
 export function peerBucket(health, socket = null) {
@@ -36,6 +40,8 @@ export function nextRetryDelayMs(failures = 0) {
 export function queuePressure(socket) {
   return {
     bufferedAmount: socket?.bufferedAmount || 0,
-    overloaded: (socket?.bufferedAmount || 0) > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer,
+    queuedMessages: socket?.sendQueue?.length || 0,
+    queuedBytes: socket?.queuedBytes || 0,
+    overloaded: (socket?.bufferedAmount || 0) + (socket?.queuedBytes || 0) > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer,
   };
 }
