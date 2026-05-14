@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createTokenBucket, spendAll } from './p2p-bandwidth.js';
 import { P2P_NETWORK_LIMITS, isPeerRoutable, nextRetryDelayMs, peerBucket, queuePressure } from './p2p-network-limits.js';
 
 const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
@@ -11,6 +12,7 @@ const CHUNK_STORE_ACK_TIMEOUT_MS = Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOU
 const PEER_SUSPECT_AFTER_MS = Number(process.env.P2P_PEER_SUSPECT_AFTER_MS || 5 * 60 * 1000);
 const PEER_DEAD_AFTER_MS = Number(process.env.P2P_PEER_DEAD_AFTER_MS || 30 * 60 * 1000);
 const MIN_REPLICA_HEALTH_SCORE = Number(process.env.P2P_MIN_REPLICA_HEALTH_SCORE || 35);
+const MAX_SEND_QUEUE_MESSAGES = Number(process.env.P2P_MAX_SEND_QUEUE_MESSAGES || 512);
 
 function clamp(value, min, max) { return Math.max(min, Math.min(max, Number(value || 0))); }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
@@ -25,6 +27,7 @@ export class P2PTransportNode {
     this.chunkStoreDir = chunkStoreDir || null;
     this.server = null;
     this.heartbeat = null;
+    this.flushTimer = null;
     this.uiClients = new Set();
     this.peerSockets = new Map();
     this.peerInfo = new Map();
@@ -33,6 +36,7 @@ export class P2PTransportNode {
     this.chunkReplicas = new Map();
     this.pendingChunkRequests = new Map();
     this.pendingChunkAcks = new Map();
+    this.globalUploadBucket = createTokenBucket({ bytesPerSecond: P2P_NETWORK_LIMITS.globalUploadBytesPerSecond, burstBytes: P2P_NETWORK_LIMITS.globalUploadBurstBytes });
     this.ensureChunkStore();
   }
 
@@ -44,7 +48,7 @@ export class P2PTransportNode {
   connectedPeerIds() { return Array.from(this.peerSockets.entries()).filter(([, socket]) => socket.readyState === WebSocket.OPEN).map(([peerId]) => peerId); }
   connectedPeerCount(direction = null) { return Array.from(this.peerSockets.values()).filter((socket) => socket.readyState === WebSocket.OPEN && (!direction || socket.direction === direction)).length; }
   canAcceptPeer(direction = 'inbound') { if (this.connectedPeerCount() >= P2P_NETWORK_LIMITS.maxTotalPeers) return false; if (direction === 'outbound' && this.connectedPeerCount('outbound') >= P2P_NETWORK_LIMITS.maxOutboundPeers) return false; if (direction === 'inbound' && this.connectedPeerCount('inbound') >= P2P_NETWORK_LIMITS.maxInboundPeers) return false; return true; }
-  networkLimits() { return { ...P2P_NETWORK_LIMITS }; }
+  networkLimits() { return { ...P2P_NETWORK_LIMITS, maxSendQueueMessages: MAX_SEND_QUEUE_MESSAGES }; }
 
   getPeerHealth(peerId) {
     if (!peerId) return null;
@@ -76,21 +80,32 @@ export class P2PTransportNode {
   notePeerSuccess(peerId, type = 'generic', latencyMs = null) { if (!peerId || peerId === this.peerId) return; const now = Date.now(); const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId); this.peerHealth.set(peerId, { ...current, state: 'healthy', successes: current.successes + 1, storedChunks: type === 'store' ? current.storedChunks + 1 : current.storedChunks, fetchedChunks: type === 'fetch' ? current.fetchedChunks + 1 : current.fetchedChunks, lastSeen: now, lastSuccessAt: now, lastLatencyMs: latencyMs ?? current.lastLatencyMs, lastError: null, nextRetryAt: null }); }
   notePeerFailure(peerId, error = null) { if (!peerId || peerId === this.peerId) return; const now = Date.now(); const current = this.getPeerHealth(peerId) || emptyPeerHealth(peerId); const failures = current.failures + 1; this.peerHealth.set(peerId, { ...current, state: failures >= 3 ? 'suspect' : current.state, bucket: failures >= 3 ? 'quarantine' : current.bucket, failures, lastFailureAt: now, lastError: error ? String(error) : current.lastError, nextRetryAt: now + nextRetryDelayMs(failures) }); }
   isPeerHealthy(peerId, minScore = MIN_REPLICA_HEALTH_SCORE) { const health = this.getPeerHealth(peerId); const socket = this.peerSockets.get(peerId); return Boolean(health && health.score >= minScore && isPeerRoutable(health, socket)); }
-  routeScore(peerId) { const health = this.getPeerHealth(peerId); const socket = this.peerSockets.get(peerId); const bucketBonus = { fast: 30, stable: 15, probation: -5, congested: -40, quarantine: -100, dead: -100, offline: -50, new: 0 }; return (health?.score || 0) + (bucketBonus[health?.bucket] || 0) - Math.floor((socket?.bufferedAmount || 0) / (1024 * 1024)); }
+  routeScore(peerId) { const health = this.getPeerHealth(peerId); const socket = this.peerSockets.get(peerId); const bucketBonus = { fast: 30, stable: 15, probation: -5, congested: -40, quarantine: -100, dead: -100, offline: -50, new: 0 }; return (health?.score || 0) + (bucketBonus[health?.bucket] || 0) - Math.floor(((socket?.bufferedAmount || 0) + (socket?.queuedBytes || 0)) / (1024 * 1024)); }
   sortedConnectedPeerIds() { return this.connectedPeerIds().sort((a, b) => this.routeScore(b) - this.routeScore(a)); }
   selectRoutePeerIds(peers = [], limit = P2P_NETWORK_LIMITS.maxChunkGetFanout) { return unique(peers).filter((peerId) => this.peerSockets.get(peerId)?.readyState === WebSocket.OPEN).filter((peerId) => this.isPeerHealthy(peerId)).sort((a, b) => this.routeScore(b) - this.routeScore(a)).slice(0, limit); }
   peerHealthSummary() { const peers = new Set([...this.peerInfo.keys(), ...this.peerHealth.keys(), ...this.connectedPeerIds()]); return Array.from(peers).map((peerId) => ({ ...(this.peerInfo.get(peerId) || { peerId }), health: this.getPeerHealth(peerId), pressure: queuePressure(this.peerSockets.get(peerId)) })); }
   healthyReplicaIds(chunkHash) { const known = this.chunkReplicas.get(chunkHash) || new Set(); const online = new Set(this.connectedPeerIds()); return this.selectRoutePeerIds(Array.from(known).filter((peerId) => online.has(peerId))); }
   selectReplicaTargets({ exclude = [], limit = 3 } = {}) { const excluded = new Set(exclude); return this.selectRoutePeerIds(this.connectedPeerIds().filter((peerId) => !excluded.has(peerId)), limit); }
 
-  initSocket(socket, { role = 'unknown', direction = 'inbound', remotePeerId = null } = {}) { socket.isAlive = true; socket.role = role; socket.direction = direction; socket.remotePeerId = remotePeerId; socket.on('pong', () => { socket.isAlive = true; if (socket.remotePeerId) this.markPeerOnline(socket.remotePeerId); }); }
-  cleanupSocket(socket) { this.uiClients.delete(socket); for (const [peerId, peerSocket] of this.peerSockets.entries()) { if (peerSocket === socket) { this.peerSockets.delete(peerId); this.markPeerOffline(peerId); this.peerInfo.set(peerId, { ...(this.peerInfo.get(peerId) || { peerId }), status: 'disconnected', lastSeen: Date.now() }); this.broadcastToUi({ type: 'peer:disconnected', peerId }); } } }
+  initSocket(socket, { role = 'unknown', direction = 'inbound', remotePeerId = null } = {}) {
+    socket.isAlive = true;
+    socket.role = role;
+    socket.direction = direction;
+    socket.remotePeerId = remotePeerId;
+    socket.sendQueue = [];
+    socket.queuedBytes = 0;
+    socket.uploadBucket = createTokenBucket({ bytesPerSecond: P2P_NETWORK_LIMITS.peerUploadBytesPerSecond, burstBytes: P2P_NETWORK_LIMITS.peerUploadBurstBytes });
+    socket.on('pong', () => { socket.isAlive = true; if (socket.remotePeerId) this.markPeerOnline(socket.remotePeerId); });
+  }
+
+  cleanupSocket(socket) { this.uiClients.delete(socket); socket.sendQueue = []; socket.queuedBytes = 0; for (const [peerId, peerSocket] of this.peerSockets.entries()) { if (peerSocket === socket) { this.peerSockets.delete(peerId); this.markPeerOffline(peerId); this.peerInfo.set(peerId, { ...(this.peerInfo.get(peerId) || { peerId }), status: 'disconnected', lastSeen: Date.now() }); this.broadcastToUi({ type: 'peer:disconnected', peerId }); } } }
 
   start() {
     if (this.server) return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl, limits: this.networkLimits() };
     this.server = new WebSocketServer({ host: this.host, port: this.port, maxPayload: P2P_NETWORK_LIMITS.maxMessageBytes });
     this.server.on('connection', (socket) => { this.initSocket(socket, { direction: 'inbound' }); socket.on('message', (raw) => this.handleSocketMessage(socket, raw)); socket.on('close', () => this.cleanupSocket(socket)); socket.on('error', (error) => { if (socket.remotePeerId) this.markPeerOffline(socket.remotePeerId, error.message); }); this.send(socket, { type: 'transport:ready', peerId: this.peerId, port: this.port, publicUrl: this.publicUrl, limits: this.networkLimits() }); });
     this.heartbeat = setInterval(() => { this.server?.clients.forEach((socket) => { if (socket.isAlive === false) { if (socket.remotePeerId) this.markPeerOffline(socket.remotePeerId, 'heartbeat timeout'); socket.terminate(); return; } socket.isAlive = false; socket.ping(); }); }, 30000);
+    this.flushTimer = setInterval(() => this.flushAllQueues(), 100);
     console.log(`[p2p-transport] listening on ws://${this.host}:${this.port} as ${this.peerId}`);
     console.log('[p2p-transport] limits', this.networkLimits());
     if (this.publicUrl) console.log(`[p2p-transport] advertising ${this.publicUrl}`);
@@ -98,7 +113,7 @@ export class P2PTransportNode {
     return { peerId: this.peerId, port: this.port, host: this.host, publicUrl: this.publicUrl, limits: this.networkLimits() };
   }
 
-  stop() { if (this.heartbeat) clearInterval(this.heartbeat); for (const pending of this.pendingChunkRequests.values()) { clearTimeout(pending.timeout); pending.reject(new Error('P2P node stopped')); } this.pendingChunkRequests.clear(); for (const pending of this.pendingChunkAcks.values()) { clearTimeout(pending.timeout); pending.resolve({ ok: false, peerId: pending.peerId, chunkHash: pending.chunkHash, error: 'P2P node stopped' }); } this.pendingChunkAcks.clear(); for (const socket of this.peerSockets.values()) socket.close(); for (const socket of this.uiClients.values()) socket.close(); this.server?.close(); this.server = null; }
+  stop() { if (this.heartbeat) clearInterval(this.heartbeat); if (this.flushTimer) clearInterval(this.flushTimer); for (const pending of this.pendingChunkRequests.values()) { clearTimeout(pending.timeout); pending.reject(new Error('P2P node stopped')); } this.pendingChunkRequests.clear(); for (const pending of this.pendingChunkAcks.values()) { clearTimeout(pending.timeout); pending.resolve({ ok: false, peerId: pending.peerId, chunkHash: pending.chunkHash, error: 'P2P node stopped' }); } this.pendingChunkAcks.clear(); for (const socket of this.peerSockets.values()) socket.close(); for (const socket of this.uiClients.values()) socket.close(); this.server?.close(); this.server = null; }
 
   connectPeer({ peerId, url }) {
     if (!peerId || !url) throw new Error('peerId and url are required');
@@ -170,7 +185,45 @@ export class P2PTransportNode {
 
   forwardOrDeliver(sourceSocket, message) { if (message.toPeerId && message.toPeerId !== this.peerId) { const peerSocket = this.peerSockets.get(message.toPeerId); if (peerSocket?.readyState === WebSocket.OPEN) { this.send(peerSocket, message); return; } } this.broadcastToUi(message); if (!message.toPeerId) { for (const peerId of this.selectRoutePeerIds(this.connectedPeerIds(), P2P_NETWORK_LIMITS.maxChunkGetFanout)) { const peerSocket = this.peerSockets.get(peerId); if (peerSocket !== sourceSocket && peerSocket?.readyState === WebSocket.OPEN) this.send(peerSocket, message); } } }
   broadcastToUi(message) { for (const socket of this.uiClients) if (socket.readyState === WebSocket.OPEN) this.send(socket, message); }
-  send(socket, message) { if (socket?.readyState !== WebSocket.OPEN) return false; if ((socket.bufferedAmount || 0) > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer) { if (socket.remotePeerId) this.notePeerFailure(socket.remotePeerId, 'socket backpressure'); return false; } const payload = JSON.stringify(message); if (Buffer.byteLength(payload) > P2P_NETWORK_LIMITS.maxMessageBytes) return false; socket.send(payload); return true; }
+
+  enqueue(socket, payload, bytes) {
+    socket.sendQueue = socket.sendQueue || [];
+    socket.queuedBytes = socket.queuedBytes || 0;
+    if (socket.sendQueue.length >= MAX_SEND_QUEUE_MESSAGES || socket.queuedBytes + bytes > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer) return false;
+    socket.sendQueue.push({ payload, bytes });
+    socket.queuedBytes += bytes;
+    return true;
+  }
+
+  flushSocketQueue(socket) {
+    if (socket?.readyState !== WebSocket.OPEN || !socket.sendQueue?.length) return;
+    while (socket.sendQueue.length) {
+      const next = socket.sendQueue[0];
+      if ((socket.bufferedAmount || 0) > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer) return;
+      if (!spendAll([socket.uploadBucket, this.globalUploadBucket], next.bytes)) return;
+      socket.sendQueue.shift();
+      socket.queuedBytes = Math.max(0, (socket.queuedBytes || 0) - next.bytes);
+      socket.send(next.payload);
+    }
+  }
+
+  flushAllQueues() {
+    for (const socket of this.peerSockets.values()) this.flushSocketQueue(socket);
+    for (const socket of this.uiClients.values()) this.flushSocketQueue(socket);
+  }
+
+  send(socket, message) {
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    if ((socket.bufferedAmount || 0) > P2P_NETWORK_LIMITS.maxBufferedBytesPerPeer) { if (socket.remotePeerId) this.notePeerFailure(socket.remotePeerId, 'socket backpressure'); return false; }
+    const payload = JSON.stringify(message);
+    const bytes = Buffer.byteLength(payload);
+    if (bytes > P2P_NETWORK_LIMITS.maxMessageBytes) return false;
+    socket.uploadBucket ||= createTokenBucket({ bytesPerSecond: P2P_NETWORK_LIMITS.peerUploadBytesPerSecond, burstBytes: P2P_NETWORK_LIMITS.peerUploadBurstBytes });
+    if (!socket.sendQueue?.length && spendAll([socket.uploadBucket, this.globalUploadBucket], bytes)) { socket.send(payload); return true; }
+    const queued = this.enqueue(socket, payload, bytes);
+    if (!queued && socket.remotePeerId) this.notePeerFailure(socket.remotePeerId, 'send queue overflow');
+    return queued;
+  }
 }
 
 export function startP2PTransport(options = {}) { const node = new P2PTransportNode(options); node.start(); return node; }
