@@ -1,4 +1,5 @@
 const DEFAULT_TARGET_REPLICAS = 4;
+const DEFAULT_MAX_REPLICA_ATTEMPTS = 8;
 
 function unique(values = []) {
   return Array.from(new Set(values.filter(Boolean)));
@@ -77,36 +78,85 @@ export function replicateChunk(node, chunkPayload, existingReplicas = [], config
   return unique(Array.from(replicas));
 }
 
-async function replicateChunkConfirmed(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
+export async function replicateChunkUntilConfirmed({
+  node,
+  chunkPayload,
+  existingReplicas = [],
+  configuredTargetReplicas = DEFAULT_TARGET_REPLICAS,
+  minimumConfirmedReplicas = null,
+  maxAttempts = DEFAULT_MAX_REPLICA_ATTEMPTS,
+} = {}) {
   if (!node) throw new Error('P2P node is required for confirmed replication');
   if (!chunkPayload?.hash) throw new Error('chunk.hash is required for confirmed replication');
 
   const targetReplicaCount = getTargetReplicaCount(node, configuredTargetReplicas);
+  const minimumConfirmed = Math.max(1, Math.min(targetReplicaCount, Number(minimumConfirmedReplicas || targetReplicaCount)));
   const replicas = new Set(unique([node.peerId, ...existingReplicas]));
+  const attempted = new Set([node.peerId, ...existingReplicas]);
+  const failedReplicas = [];
+  const startedAt = Date.now();
+  let attempts = 0;
 
   node.storeLocalChunk?.(chunkPayload);
 
-  const needed = Math.max(0, targetReplicaCount - replicas.size);
-  if (needed <= 0) return unique(Array.from(replicas));
+  while (replicas.size < targetReplicaCount && attempts < Math.max(1, Number(maxAttempts || DEFAULT_MAX_REPLICA_ATTEMPTS))) {
+    const remainingAttempts = Math.max(0, Number(maxAttempts || DEFAULT_MAX_REPLICA_ATTEMPTS) - attempts);
+    const needed = Math.max(0, targetReplicaCount - replicas.size);
+    const limit = Math.max(1, Math.min(needed, remainingAttempts));
+    const targets = node.selectReplicaTargets?.({
+      exclude: unique([...replicas, ...attempted]),
+      limit,
+    }) || [];
 
-  const targets = node.selectReplicaTargets?.({
-    exclude: Array.from(replicas),
-    limit: needed,
-  }) || [];
+    if (!targets.length) break;
+    for (const peerId of targets) attempted.add(peerId);
+    attempts += targets.length;
 
-  if (!targets.length) return unique(Array.from(replicas));
-
-  try {
-    const result = await node.putChunkOnNetwork?.(chunkPayload, targets);
-    for (const peerId of result?.replicas || []) replicas.add(peerId);
-    if (result?.failedReplicas?.length) {
-      console.warn('[repair] failed confirmed replicas:', chunkPayload.hash, result.failedReplicas.map((entry) => `${entry.peerId}:${entry.error || 'unknown'}`).join(', '));
+    try {
+      const result = await node.putChunkOnNetwork?.(chunkPayload, targets);
+      for (const peerId of result?.replicas || []) replicas.add(peerId);
+      for (const failure of result?.failedReplicas || []) failedReplicas.push(failure);
+    } catch (error) {
+      for (const peerId of targets) failedReplicas.push({ peerId, chunkHash: chunkPayload.hash, error: error?.message || String(error) });
+      console.warn('[replication] confirmed upload attempt failed:', chunkPayload.hash, targets.join(', '), error?.message || error);
     }
-  } catch (error) {
-    console.warn('[repair] confirmed replication failed:', chunkPayload.hash, error?.message || error);
   }
 
-  return unique(Array.from(replicas));
+  const confirmedReplicas = unique(Array.from(replicas));
+  const complete = confirmedReplicas.length >= targetReplicaCount;
+  const minimumSafe = confirmedReplicas.length >= minimumConfirmed;
+
+  return {
+    ok: minimumSafe,
+    complete,
+    underReplicated: !complete,
+    replicas: confirmedReplicas,
+    failedReplicas,
+    confirmedReplicas: confirmedReplicas.length,
+    targetReplicas: targetReplicaCount,
+    minimumConfirmedReplicas: minimumConfirmed,
+    attemptedReplicas: unique(Array.from(attempted)),
+    attempts,
+    durationMs: Date.now() - startedAt,
+    status: complete ? 'protected' : minimumSafe ? 'protecting' : 'failed',
+  };
+}
+
+async function replicateChunkConfirmed(node, chunkPayload, existingReplicas = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
+  const result = await replicateChunkUntilConfirmed({
+    node,
+    chunkPayload,
+    existingReplicas,
+    configuredTargetReplicas,
+    minimumConfirmedReplicas: configuredTargetReplicas,
+    maxAttempts: DEFAULT_MAX_REPLICA_ATTEMPTS,
+  });
+
+  if (result.failedReplicas?.length) {
+    console.warn('[repair] failed confirmed replicas:', chunkPayload.hash, result.failedReplicas.map((entry) => `${entry.peerId}:${entry.error || 'unknown'}`).join(', '));
+  }
+
+  return result.replicas;
 }
 
 export function countUnderReplicatedChunks(node, manifests = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
@@ -154,6 +204,9 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
         const newKey = unique(after).sort().join('|');
         if (oldKey !== newKey) {
           chunkMeta.replicas = unique(after);
+          chunkMeta.replicationStatus = unique(after).length >= targetReplicaCount ? 'protected' : 'protecting';
+          chunkMeta.confirmedReplicas = unique(after).length;
+          chunkMeta.targetReplicas = targetReplicaCount;
           changed = true;
         }
         for (const peerId of after) fileReplicas.add(peerId);
@@ -177,6 +230,18 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
     if (oldFileKey !== newFileKey) {
       manifest.replicas = nextFileReplicas;
       changed = true;
+    }
+
+    const chunks = manifest.chunks || [];
+    if (chunks.length) {
+      const protectedChunks = chunks.filter((chunk) => unique(chunk.replicas || []).length >= targetReplicaCount).length;
+      const nextStatus = protectedChunks === chunks.length ? 'protected' : 'protecting';
+      if (manifest.replicationStatus !== nextStatus || manifest.protectedChunks !== protectedChunks) {
+        manifest.replicationStatus = nextStatus;
+        manifest.protectedChunks = protectedChunks;
+        manifest.replicationUpdatedAt = new Date().toISOString();
+        changed = true;
+      }
     }
   }
 
