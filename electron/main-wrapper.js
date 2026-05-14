@@ -19,7 +19,6 @@ console.log('[main-wrapper] starting', {
   dev: IS_DEV_WRAPPER,
 });
 
-// In dev, never let a stale hidden/tray instance silently block the window.
 const gotSingleInstanceLock = IS_DEV_WRAPPER ? true : app.requestSingleInstanceLock();
 console.log('[main-wrapper] single-instance lock', gotSingleInstanceLock);
 
@@ -170,6 +169,8 @@ async function importMainWhenReady() {
   try {
     await import('./main-stable.js');
     console.log('[main-wrapper] main-stable.js import finished');
+    await import('./protected-upload-override.js');
+    console.log('[main-wrapper] protected upload override import finished');
     await import('./download-to-path-override.js');
     console.log('[main-wrapper] download override import finished');
     setTimeout(() => createFallbackWindow('main-stable imported but no BrowserWindow appeared'), 3000);
