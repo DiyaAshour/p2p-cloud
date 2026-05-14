@@ -1,7 +1,8 @@
 import { WebSocket } from 'ws';
 
-const DEFAULT_SAFETY_PEER_URL = 'ws://54.166.171.208:8787';
+const DEFAULT_SAFETY_PEER_URL = '';
 const SAFETY_PEER_TIMEOUT_MS = Number(process.env.P2P_SAFETY_PEER_TIMEOUT_MS || 15000);
+const SAFETY_PEER_MODE = String(process.env.P2P_SAFETY_PEER_MODE || 'emergency').trim().toLowerCase();
 
 export function safetyPeerUrl() {
   return String(
@@ -13,7 +14,13 @@ export function safetyPeerUrl() {
 }
 
 export function isSafetyPeerEnabled() {
-  return /^wss?:\/\//i.test(safetyPeerUrl());
+  return /^wss?:\/\//i.test(safetyPeerUrl()) && SAFETY_PEER_MODE !== 'off' && SAFETY_PEER_MODE !== 'disabled';
+}
+
+export function shouldUseSafetyPeer(chunk = {}) {
+  if (!isSafetyPeerEnabled()) return false;
+  if (SAFETY_PEER_MODE === 'always') return true;
+  return Boolean(chunk.forceSafetyPeer || chunk.emergencySafety || chunk.safetyRequired);
 }
 
 function waitForOpen(socket, timeoutMs = SAFETY_PEER_TIMEOUT_MS) {
@@ -67,7 +74,7 @@ async function withSafetySocket(work) {
 }
 
 export async function putChunkToSafetyPeer(chunk, fromPeerId = 'desktop-client') {
-  if (!isSafetyPeerEnabled()) return { ok: false, skipped: true, reason: 'safety-peer-not-configured' };
+  if (!shouldUseSafetyPeer(chunk)) return { ok: false, skipped: true, reason: `safety-peer-${SAFETY_PEER_MODE}-not-required` };
   if (!chunk?.hash || !chunk?.data) throw new Error('Invalid chunk for safety peer put');
   return withSafetySocket(async (socket) => {
     socket.send(JSON.stringify({ type: 'peer:hello', fromPeerId }));
