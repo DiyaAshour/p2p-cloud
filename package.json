@@ -51,6 +51,7 @@
     "@walletconnect/types": "^2.21.0",
     "@walletconnect/utils": "^2.21.0",
     "abitype": "^1.1.0",
+    "argon2": "^0.44.0",
     "base64-js": "^1.5.1",
     "bn.js": "^5.2.2",
     "buffer": "^6.0.3",
@@ -92,7 +93,7 @@
   },
   "main": "electron/main-wrapper.js",
   "homepage": "./",
-  "pnpm": { "onlyBuiltDependencies": ["electron", "esbuild"] },
+  "pnpm": { "onlyBuiltDependencies": ["electron", "esbuild", "argon2"] },
   "build": {
     "appId": "io.chunknet.app",
     "productName": "Chunknet",
