@@ -13,6 +13,7 @@ const allowedChannels = new Set([
   'p2p:bootstrapNow',
   'p2p:connectPeer',
   'p2p:repair',
+  'p2p:protectionRetryNow',
   'p2p:prepareProof',
   'p2p:cancelTransfer',
   'wallet:status',
