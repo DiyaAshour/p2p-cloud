@@ -16,7 +16,26 @@ function writeJson(filePath, value) { fs.mkdirSync(path.dirname(filePath), { rec
 function decodeChunknetToken(token = '') { const match = String(token || '').trim().match(/^chunknet:\/\/([^/]+)\/(.+)$/); if (!match) throw new Error('Invalid Chunknet token.'); const [, kind, encoded] = match; return { kind, payload: JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) }; }
 function encodeChunknetToken(kind, payload) { return `chunknet://${kind}/${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`; }
 
-function storeCompanyObject({ kind, token, payload = null, workspaceId = '', note = '' } = {}) {
+function transportNode() {
+  return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null;
+}
+
+async function replicateCompanyObjectChunk(chunkPayload, { replicas = 3 } = {}) {
+  const node = transportNode();
+  if (!node?.putChunkOnNetwork || !node?.selectReplicaTargets) {
+    return { attempted: false, reason: 'P2P transport node is not globally exposed yet.' };
+  }
+  try {
+    const targets = node.selectReplicaTargets({ exclude: [], limit: replicas });
+    if (!targets?.length) return { attempted: true, ok: false, reason: 'No healthy connected peers available.' };
+    const result = await node.putChunkOnNetwork(chunkPayload, targets);
+    return { attempted: true, ok: true, targets, result };
+  } catch (error) {
+    return { attempted: true, ok: false, error: error?.message || String(error) };
+  }
+}
+
+async function storeCompanyObject({ kind, token, payload = null, workspaceId = '', note = '', replicate = true } = {}) {
   const parsed = token ? decodeChunknetToken(token) : null;
   const objectKind = kind || parsed?.kind || payload?.kind || 'company-object';
   const objectPayload = payload || parsed?.payload || token;
@@ -34,25 +53,43 @@ function storeCompanyObject({ kind, token, payload = null, workspaceId = '', not
   const chunkPayload = { hash, data: data.toString('base64'), index: 0, size: data.length, ownerWallet: 'company-object', encrypted: false, objectType: object.objectType, kind: object.kind, workspaceId: object.workspaceId };
   writeJson(objectPath(hash), { ...object, hash, size: data.length });
   writeJson(chunkPath(hash), { ...chunkPayload, storedAt: now() });
-  return { ok: true, hash, uri: `chunknet://object/${hash}`, object: { ...object, hash, size: data.length }, chunk: chunkPayload };
+  const replication = replicate ? await replicateCompanyObjectChunk(chunkPayload) : { attempted: false, reason: 'Replication disabled by caller.' };
+  return { ok: true, hash, uri: `chunknet://object/${hash}`, object: { ...object, hash, size: data.length }, chunk: chunkPayload, replication };
 }
 
-function readCompanyObject({ hashOrUri } = {}) {
+async function fetchCompanyObjectFromTransport(hash) {
+  const node = transportNode();
+  if (!node?.fetchChunkFromNetwork) return { attempted: false, reason: 'P2P transport node is not globally exposed yet.' };
+  try {
+    const chunk = await node.fetchChunkFromNetwork(hash);
+    if (chunk?.data) {
+      writeJson(chunkPath(hash), { ...chunk, storedAt: now() });
+      return { attempted: true, ok: true, chunk };
+    }
+    return { attempted: true, ok: false, reason: 'No chunk data returned.' };
+  } catch (error) {
+    return { attempted: true, ok: false, error: error?.message || String(error) };
+  }
+}
+
+async function readCompanyObject({ hashOrUri, fetchFromPeers = true } = {}) {
   const raw = String(hashOrUri || '').trim();
   const hash = raw.startsWith('chunknet://object/') ? raw.replace('chunknet://object/', '') : raw;
   if (!safeHash(hash)) throw new Error('Object hash is required.');
   const localPath = objectPath(hash);
   if (fs.existsSync(localPath)) return { ok: true, source: 'object-store', object: readJson(localPath) };
-  const cp = chunkPath(hash);
-  if (!fs.existsSync(cp)) throw new Error('Company object not found locally yet. Connect peers or import token manually.');
+  let cp = chunkPath(hash);
+  let peerFetch = null;
+  if (!fs.existsSync(cp) && fetchFromPeers) peerFetch = await fetchCompanyObjectFromTransport(hash);
+  if (!fs.existsSync(cp)) throw new Error(peerFetch?.reason || peerFetch?.error || 'Company object not found locally yet. Connect peers or import token manually.');
   const chunk = readJson(cp);
   const object = JSON.parse(Buffer.from(chunk.data, 'base64').toString('utf8'));
   writeJson(localPath, { ...object, hash, size: chunk.size });
-  return { ok: true, source: 'chunk-store', object: { ...object, hash, size: chunk.size } };
+  return { ok: true, source: 'chunk-store', object: { ...object, hash, size: chunk.size }, peerFetch };
 }
 
-function tokenFromCompanyObject({ hashOrUri } = {}) {
-  const result = readCompanyObject({ hashOrUri });
+async function tokenFromCompanyObject({ hashOrUri } = {}) {
+  const result = await readCompanyObject({ hashOrUri });
   return { ok: true, token: result.object.token, object: result.object };
 }
 
