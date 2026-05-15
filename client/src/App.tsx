@@ -4,6 +4,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import NativeP2PAppLive from "./NativeP2PAppLive";
 import TransferProgressOverlay from "./TransferProgressOverlay";
+import CompanyOfflineJoinDock from "./CompanyOfflineJoinDock";
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         <TooltipProvider>
           <Toaster />
           <NativeP2PAppLive />
+          <CompanyOfflineJoinDock />
           <TransferProgressOverlay />
         </TooltipProvider>
       </ThemeProvider>
