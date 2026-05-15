@@ -35,4 +35,5 @@ replaceOnce(
 );
 
 fs.writeFileSync(file, s, 'utf8');
-console.log('[seed-auth-state-signature] signed and verified device-scoped cooldown state');
+require('./patch-seed-network-time.cjs');
+console.log('[seed-auth-state-signature] signed and verified device-scoped cooldown state; network time patch chained');
