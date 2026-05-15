@@ -80,6 +80,8 @@ function configureNetworkRuntime() {
   if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
   if (!process.env.P2P_AUTO_REPAIR_INTERVAL_MS) process.env.P2P_AUTO_REPAIR_INTERVAL_MS = String(3 * 60 * 60 * 1000);
   if (!process.env.P2P_AUTO_REPAIR_START_DELAY_MS) process.env.P2P_AUTO_REPAIR_START_DELAY_MS = String(5 * 60 * 1000);
+  if (!process.env.P2P_PROTECTION_RETRY_INTERVAL_MS) process.env.P2P_PROTECTION_RETRY_INTERVAL_MS = String(5 * 60 * 1000);
+  if (!process.env.P2P_PROTECTION_RETRY_START_DELAY_MS) process.env.P2P_PROTECTION_RETRY_START_DELAY_MS = String(45 * 1000);
 
   if (!process.env.P2P_PUBLIC_URL && !process.env.VITE_P2P_PUBLIC_URL) {
     const ip = chooseLanAddress();
@@ -96,6 +98,8 @@ function configureNetworkRuntime() {
     downloadConcurrency: process.env.P2P_DOWNLOAD_CONCURRENCY,
     autoRepairIntervalMs: process.env.P2P_AUTO_REPAIR_INTERVAL_MS,
     autoRepairStartDelayMs: process.env.P2P_AUTO_REPAIR_START_DELAY_MS,
+    protectionRetryIntervalMs: process.env.P2P_PROTECTION_RETRY_INTERVAL_MS,
+    protectionRetryStartDelayMs: process.env.P2P_PROTECTION_RETRY_START_DELAY_MS,
   });
 }
 
@@ -171,6 +175,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] main-stable.js import finished');
     await import('./protected-upload-override.js');
     console.log('[main-wrapper] protected upload override import finished');
+    await import('./protection-retry-loop.js');
+    console.log('[main-wrapper] protection retry loop import finished');
     await import('./download-to-path-override.js');
     console.log('[main-wrapper] download override import finished');
     setTimeout(() => createFallbackWindow('main-stable imported but no BrowserWindow appeared'), 3000);
