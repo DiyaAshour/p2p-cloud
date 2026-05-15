@@ -13,4 +13,6 @@ if (!s.includes('globalThis.__chunknetSeedSession?.get?.(identity)')) {
   s = s.replace(oldBlock, newBlock);
   fs.writeFileSync(file, s, 'utf8');
 }
-console.log('[main-seed-session-read] main-stable reads seed session from memory cache');
+
+require('./patch-seed-auth-state-signature.cjs');
+console.log('[main-seed-session-read] main-stable reads seed session from memory cache; seed auth state signature patch chained');
