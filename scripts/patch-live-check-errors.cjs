@@ -17,6 +17,14 @@ function ensureLineAfter(source, anchor, line) {
   return source.replace(anchor, `${anchor}${line}\n`);
 }
 
+function replaceAny(source, replacements, label) {
+  for (const [from, to] of replacements) {
+    if (source.includes(from)) return source.replace(from, to);
+  }
+  console.warn(`[patch-live-check-errors] replacement anchor not found: ${label}`);
+  return source;
+}
+
 let live = readLive();
 
 const looksBrokenSeedInjection = live.includes('Recovery seed — save it now') || live.includes('Wrong password attempts cool down this device only');
@@ -28,6 +36,10 @@ if (looksBrokenSeedInjection) {
   } catch (error) {
     console.warn('[patch-live-check-errors] could not restore NativeP2PAppLive.tsx from git:', error?.message || error);
   }
+}
+
+if (!live.includes('import CompanyOfflineJoinPanel from "./CompanyOfflineJoinPanel";')) {
+  live = live.replace('import { toast } from "sonner";', 'import { toast } from "sonner";\nimport CompanyOfflineJoinPanel from "./CompanyOfflineJoinPanel";');
 }
 
 live = live.replace(
@@ -76,10 +88,16 @@ live = live.replace(
   '<Tabs value={activeTab} onValueChange={(tab) => { const nextTab = tab as "files" | "upload" | "admin"; setActiveTab(nextTab); if (nextTab === "admin") setView("admin"); }}>'
 );
 
-live = live.replace(
-  '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];\n  }, [fileFolders, activeWorkspace]);',
-  '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalFolderKeys = new Set(personalFiles.map((file) => file.hash));\n    const localFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("folder:") || personalFolderKeys.has(key)).map(([, folder]) => folder).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : localFolders;\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);'
-);
+const folderBlock = '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalFolderKeys = new Set(personalFiles.map((file) => file.hash));\n    const personalScopedFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFolderKeys.has(key)).map(([, folder]) => folder).filter(Boolean);\n    const companyScopedPrefix = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:` : "company:none:folder:";\n    const companyScopedFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith(companyScopedPrefix)).map(([, folder]) => folder).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? [...workspaceFolders, ...companyScopedFolders] : personalScopedFolders;\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);';
+
+live = replaceAny(live, [
+  ['    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];\n  }, [fileFolders, activeWorkspace]);', folderBlock],
+  ['    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalFolderKeys = new Set(personalFiles.map((file) => file.hash));\n    const localFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("folder:") || personalFolderKeys.has(key)).map(([, folder]) => folder).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : localFolders;\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);', folderBlock],
+], 'folder scope block');
+
+live = replaceAny(live, [
+  ['  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    setFileFolders((current) => ({ ...current, [`folder:${folder}`]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };', '  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    const key = (view === "company" || view === "admin") && activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `personal:folder:${folder}`;\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };'],
+], 'createFolder scoped storage');
 
 if (!live.includes('const importSharedLink = () => run(async () =>')) {
   live = live.replace(
@@ -114,6 +132,13 @@ if (!live.includes('Delete company')) {
   );
 }
 
+if (!live.includes('CompanyOfflineJoinPanel api={api as never}')) {
+  live = live.replace(
+    '</TabsContent>\n          </Tabs>',
+    '<Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardHeader><CardTitle>Offline invitations</CardTitle></CardHeader><CardContent><CompanyOfflineJoinPanel api={api as never} activeWorkspace={activeWorkspace} busy={busy} onDone={refresh} /></CardContent></Card>\n            </TabsContent>\n          </Tabs>'
+  );
+}
+
 fs.writeFileSync(livePath, live, 'utf8');
 
 const tsconfigPath = path.join(process.cwd(), 'tsconfig.json');
@@ -126,4 +151,4 @@ if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
   fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
 }
 
-console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, separated folder scopes, channel types, bridge invoke, and excluded old stable app from TS check');
+console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, scoped folders, offline company join panel, channel types, bridge invoke, and excluded old stable app from TS check');
