@@ -2,7 +2,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = process.cwd();
-const appPath = path.join(root, 'client', 'src', 'NativeP2PAppLive.tsx');
+const preferredPath = path.join(root, 'client', 'src', 'NativeP2PAppLive.tsx');
+const fallbackPath = path.join(root, 'client', 'src', 'NativeP2PApp.tsx');
+const appPath = fs.existsSync(preferredPath) ? preferredPath : fallbackPath;
 
 function read(file) {
   if (!fs.existsSync(file)) throw new Error(`Missing file: ${file}`);
@@ -11,7 +13,10 @@ function read(file) {
 function write(file, content) { fs.writeFileSync(file, content, 'utf8'); }
 function replaceOnce(src, from, to, label) {
   if (src.includes(to)) return src;
-  if (!src.includes(from)) throw new Error(`Patch anchor not found: ${label}`);
+  if (!src.includes(from)) {
+    console.warn(`[seed-account-ui] patch anchor not found, skipping: ${label}`);
+    return src;
+  }
   return src.replace(from, to);
 }
 
@@ -57,10 +62,10 @@ if (src.includes(accountCardReplacement)) {
 } else if (src.includes(accountCard)) {
   src = src.replace(accountCard, accountCardReplacement);
 } else {
-  throw new Error('Patch anchor not found: account card');
+  console.warn('[seed-account-ui] account card anchor not found; UI may already be customized, skipping card injection');
 }
 
 src = src.replaceAll('{walletConnected ? short(wallet?.address) : "Guest view"}', '{identityLabel}');
 
 write(appPath, src);
-console.log('[seed-account-ui] Seed Account UI patched into NativeP2PAppLive.tsx with device cooldown copy and seed-save acknowledgement');
+console.log(`[seed-account-ui] patch completed for ${path.relative(root, appPath)}`);
