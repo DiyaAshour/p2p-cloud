@@ -18,6 +18,7 @@ function verifyPayload(publicKeyPem, value, signature) { try { return crypto.ver
 function roleCanManage(role) { return MANAGE_ROLES.has(role); }
 function roleCanUpload(role) { return UPLOAD_ROLES.has(role); }
 function roleCanDelete(role) { return DELETE_ROLES.has(role); }
+function isActiveWorkspace(workspace = {}) { return !workspace.deleted && workspace.status !== 'deleted' && workspace.status !== 'archived'; }
 
 export class CompanyWorkspaceStore {
   constructor({ dataDir }) {
@@ -62,11 +63,12 @@ export class CompanyWorkspaceStore {
     return verifyPayload(workspace.signedByPublicKeyPem || workspace.ownerDevicePublicKeyPem, withoutSignatures(workspace), workspace.signature);
   }
 
-  listWorkspaces() { return this.workspaces.map((workspace) => ({ ...workspace, signatureValid: this.verifyWorkspace(workspace) })); }
-  findWorkspace(workspaceId) { return this.workspaces.find((workspace) => workspace.workspaceId === workspaceId) || null; }
+  listWorkspaces({ includeDeleted = false } = {}) { return this.workspaces.filter((workspace) => includeDeleted || isActiveWorkspace(workspace)).map((workspace) => ({ ...workspace, signatureValid: this.verifyWorkspace(workspace) })); }
+  findWorkspace(workspaceId, { includeDeleted = false } = {}) { const workspace = this.workspaces.find((item) => item.workspaceId === workspaceId) || null; if (!workspace) return null; if (!includeDeleted && !isActiveWorkspace(workspace)) return null; return workspace; }
   localMember(workspace) { const identity = this.getOrCreateIdentity(); return workspace?.members?.find((member) => member.deviceId === identity.deviceId) || null; }
   localRole(workspace) { return this.localMember(workspace)?.role || null; }
   assertCanManage(workspace) { if (!roleCanManage(this.localRole(workspace))) throw new Error('Your company role cannot manage this workspace.'); }
+  assertCanDeleteWorkspace(workspace) { if (this.localRole(workspace) !== 'owner') throw new Error('Only the company owner can delete this workspace.'); }
 
   createWorkspace({ name, ownerWallet = '', companyPlanId = 'company-local' } = {}) {
     const cleanName = String(name || '').trim();
@@ -90,6 +92,23 @@ export class CompanyWorkspaceStore {
     this.workspaces.push(workspace);
     this.saveWorkspaces();
     return workspace;
+  }
+
+  deleteWorkspace({ workspaceId } = {}) {
+    const workspace = this.findWorkspace(workspaceId);
+    if (!workspace) throw new Error('Workspace not found.');
+    this.assertCanDeleteWorkspace(workspace);
+    const identity = this.getOrCreateIdentity();
+    const next = this.signWorkspace({
+      ...workspace,
+      status: 'deleted',
+      deleted: true,
+      deletedAt: now(),
+      deletedByDeviceId: identity.deviceId,
+      audit: [...(workspace.audit || []), { at: now(), action: 'workspace:delete', byDeviceId: identity.deviceId, role: 'owner', mode: 'soft-delete' }],
+    });
+    this.replaceWorkspace(next, { includeDeleted: true });
+    return { ok: true, workspace: next };
   }
 
   inviteMember({ workspaceId, email = '', displayName = '', role = 'viewer' } = {}) {
@@ -198,8 +217,10 @@ export class CompanyWorkspaceStore {
     return { ok: true, deviceIdentity: this.publicIdentity(), workspaces: this.listWorkspaces(), permissions: { roles: Array.from(ROLES), manageRoles: Array.from(MANAGE_ROLES), uploadRoles: Array.from(UPLOAD_ROLES), deleteRoles: Array.from(DELETE_ROLES) } };
   }
 
-  replaceWorkspace(workspace) {
-    this.workspaces = this.workspaces.map((item) => item.workspaceId === workspace.workspaceId ? workspace : item);
+  replaceWorkspace(workspace, { includeDeleted = false } = {}) {
+    const exists = this.workspaces.some((item) => item.workspaceId === workspace.workspaceId);
+    if (!exists && includeDeleted) this.workspaces.push(workspace);
+    else this.workspaces = this.workspaces.map((item) => item.workspaceId === workspace.workspaceId ? workspace : item);
     this.saveWorkspaces();
   }
 }
