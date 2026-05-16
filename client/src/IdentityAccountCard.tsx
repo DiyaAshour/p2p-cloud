@@ -7,7 +7,8 @@ import { Wallet } from "lucide-react";
 import { toast } from "sonner";
 import { connectWalletWithWalletConnect } from "./walletConnect";
 
-type WalletState = { connected: boolean; address: string; accountId?: string; authMode?: "wallet" | "seed" | null; username?: string | null; usedBytes: number; remainingBytes: number; plan: { id: string; name: string; quotaBytes: number; priceUsd: number }; plans: unknown[]; minDrivePasswordLength?: number };
+type Plan = { id: string; name: string; quotaBytes: number; priceUsd: number };
+type WalletState = { connected: boolean; address: string; accountId?: string; authMode?: "wallet" | "seed" | null; username?: string | null; seedFingerprint?: string | null; usedBytes: number; remainingBytes: number; plan: Plan; plans: Plan[]; minDrivePasswordLength?: number };
 type Bridge = { invoke: <T>(channel: string, payload?: unknown) => Promise<T> };
 
 type Props = { api: Bridge; busy: boolean; identityLabel: string; walletConnected: boolean; onWallet: (wallet: WalletState) => void; onRefresh: () => Promise<void>; onDisconnect: () => void };
@@ -33,7 +34,12 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
 
   const connectManualWallet = () => run(async () => {
     const address = walletAddress.trim();
-    if (!address) throw new Error("Enter wallet address first.");
+    if (!address) {
+      const session = await connectWalletWithWalletConnect();
+      const wallet = await api.invoke<WalletState>("wallet:connect", session);
+      onWallet(wallet); setCreatedCode(""); setSaved(false); await onRefresh();
+      return;
+    }
     const wallet = await api.invoke<WalletState>("wallet:connect", { address });
     onWallet(wallet); setWalletAddress(""); setCreatedCode(""); setSaved(false); await onRefresh();
   });
@@ -54,7 +60,7 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
       <CardContent className="space-y-4 p-5">
         <p className="text-sm text-zinc-400">Identity</p>
         <p className="truncate font-medium">{identityLabel}</p>
-        {walletConnected ? <Button variant="outline" onClick={onDisconnect} disabled={busy || working}>Disconnect</Button> : <div className="space-y-2"><Button className="w-full" onClick={connectWallet} disabled={busy || working}><Wallet className="size-4" />Connect Wallet / QR</Button><button type="button" onClick={() => setManualOpen((value) => !value)} className="text-xs text-zinc-500 hover:text-zinc-300">Manual address fallback</button>{manualOpen && <div className="space-y-2"><Input value={walletAddress} onChange={(e) => setWalletAddress(e.target.value)} placeholder="Wallet address 0x..." /><Button className="w-full" variant="outline" onClick={connectManualWallet} disabled={busy || working}>Use manual address</Button></div>}</div>}
+        {walletConnected ? <Button variant="outline" onClick={onDisconnect} disabled={busy || working}>Disconnect</Button> : <div className="space-y-2"><Button className="w-full" onClick={connectWallet} disabled={busy || working}><Wallet className="size-4" />Connect Wallet / QR</Button><button type="button" onClick={() => setManualOpen((value) => !value)} className="text-xs text-zinc-500 hover:text-zinc-300">Manual address fallback</button>{manualOpen && <div className="space-y-2"><Input value={walletAddress} onChange={(e) => setWalletAddress(e.target.value)} placeholder="Optional wallet address 0x..." /><Button className="w-full" variant="outline" onClick={connectManualWallet} disabled={busy || working}>{walletAddress.trim() ? "Use manual address" : "Open QR instead"}</Button></div>}</div>}
         <div className="border-t border-zinc-800 pt-4">
           <p className="mb-2 text-sm font-medium">Username Account</p>
           <div className="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-zinc-950 p-1 text-xs">{(["login", "create", "recover"] as const).map((item) => <button key={item} type="button" onClick={() => setMode(item)} className={`rounded-lg px-2 py-2 ${mode === item ? "bg-zinc-800" : "text-zinc-500"}`}>{item}</button>)}</div>
