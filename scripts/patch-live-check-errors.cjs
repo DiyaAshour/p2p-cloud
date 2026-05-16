@@ -38,6 +38,11 @@ live = live.replace(
 live = ensureLineAfter(live, '  | "p2p:uploadFiles"\n', '  | "p2p:importSharedLink"');
 live = ensureLineAfter(live, '  | "company:createWorkspace"\n', '  | "company:deleteWorkspace"');
 
+live = live.replace(
+  'type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };',
+  'type Bridge = { invoke: <T>(channel: string, payload?: unknown) => Promise<T> };'
+);
+
 if (!live.includes('function encodeSharedManifest')) {
   live = live.replace(
     'function protection(file: P2PFile) {',
@@ -121,4 +126,4 @@ if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
   fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
 }
 
-console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, separated folder scopes, channel types, and excluded old stable app from TS check');
+console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, separated folder scopes, channel types, bridge invoke, and excluded old stable app from TS check');
