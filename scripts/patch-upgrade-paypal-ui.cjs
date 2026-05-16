@@ -14,6 +14,32 @@ function walk(dir) {
   return files;
 }
 
+function patchCheckErrors() {
+  const livePath = path.join(srcDir, 'NativeP2PAppLive.tsx');
+  if (fs.existsSync(livePath)) {
+    let live = fs.readFileSync(livePath, 'utf8');
+    const oldWallet = 'type WalletState = { connected: boolean; address: string; usedBytes: number; remainingBytes: number; plan: Plan; plans: Plan[]; minDrivePasswordLength?: number };';
+    const newWallet = 'type WalletState = { connected: boolean; address: string; planId?: string; accountId?: string; authMode?: "wallet" | "seed" | null; username?: string | null; seedFingerprint?: string | null; usedBytes: number; remainingBytes: number; plan: Plan; plans: Plan[]; minDrivePasswordLength?: number };';
+    if (live.includes(oldWallet)) live = live.replace(oldWallet, newWallet);
+    if (!live.includes('const runBusy = run;') && live.includes('const run = async (work: () => Promise<void>) =>')) {
+      const line = '  const run = async (work: () => Promise<void>) => { setBusy(true); try { await work(); } catch (e) { toast.error(err(e)); } finally { setBusy(false); } };';
+      live = live.replace(line, `${line}\n  const runBusy = run;`);
+    }
+    fs.writeFileSync(livePath, live, 'utf8');
+  }
+
+  const tsconfigPath = path.join(process.cwd(), 'tsconfig.json');
+  if (fs.existsSync(tsconfigPath)) {
+    let tsconfig = fs.readFileSync(tsconfigPath, 'utf8');
+    if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
+      tsconfig = tsconfig.replace('"client/src/NativeP2PApp.tsx"', '"client/src/NativeP2PApp.tsx", "client/src/NativeP2PAppStable.tsx"');
+      fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
+    }
+  }
+}
+
+patchCheckErrors();
+
 const candidates = walk(srcDir)
   .map((file) => ({ file, source: fs.readFileSync(file, 'utf8') }))
   .filter(({ source }) =>
@@ -165,6 +191,8 @@ if (!source.includes('<TabsContent value="plans"')) {
   const plans = '\n\n          <TabsContent value="plans"><Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardHeader><CardTitle>Upgrade storage</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{(wallet?.plans || []).map((plan) => <Card key={plan.id} className="rounded-2xl border-zinc-800 bg-zinc-950"><CardContent className="space-y-3 p-5"><div><p className="text-lg font-semibold">{plan.name}</p><p className="text-sm text-zinc-400">{formatBytes(plan.quotaBytes)}</p></div><p className="text-2xl font-bold">${plan.priceUsd}/mo</p>{plan.id === "free" ? <Button variant="outline" disabled={wallet?.planId === plan.id} onClick={() => setPlan("free")}>{wallet?.planId === plan.id ? "Current" : "Use Free"}</Button> : <Button onClick={() => payWithPayPal(plan)} disabled={busy || !walletConnected || wallet?.planId === plan.id}>{wallet?.planId === plan.id ? "Current Plan" : "Pay with PayPal"}</Button>}</CardContent></Card>)}</CardContent></Card></TabsContent>';
   replace('\n        </Tabs>', `${plans}\n        </Tabs>`, 'tabs close');
 }
+
+patchCheckErrors();
 
 if (changed) {
   fs.writeFileSync(appFile, source, 'utf8');
