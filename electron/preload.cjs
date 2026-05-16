@@ -23,6 +23,7 @@ const allowedChannels = new Set([
   'company:state',
   'company:deviceIdentity',
   'company:createWorkspace',
+  'company:deleteWorkspace',
   'company:inviteMember',
   'company:createJoinRequest',
   'company:approveJoinRequest',
