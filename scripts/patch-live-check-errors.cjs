@@ -8,6 +8,15 @@ function readLive() {
   return fs.existsSync(livePath) ? fs.readFileSync(livePath, 'utf8') : '';
 }
 
+function ensureLineAfter(source, anchor, line) {
+  if (source.includes(line)) return source;
+  if (!source.includes(anchor)) {
+    console.warn(`[patch-live-check-errors] anchor not found for line: ${line}`);
+    return source;
+  }
+  return source.replace(anchor, `${anchor}${line}\n`);
+}
+
 let live = readLive();
 
 const looksBrokenSeedInjection = live.includes('Recovery seed — save it now') || live.includes('Wrong password attempts cool down this device only');
@@ -26,19 +35,8 @@ live = live.replace(
   'type WalletState = { connected: boolean; address: string; planId?: string; accountId?: string; authMode?: "wallet" | "seed" | null; username?: string | null; seedFingerprint?: string | null; usedBytes: number; remainingBytes: number; plan: Plan; plans: Plan[]; minDrivePasswordLength?: number };'
 );
 
-if (!live.includes('| "p2p:importSharedLink"')) {
-  live = live.replace(
-    '  | "p2p:uploadFiles"\n',
-    '  | "p2p:uploadFiles"\n  | "p2p:importSharedLink"\n'
-  );
-}
-
-if (!live.includes('| "company:deleteWorkspace"')) {
-  live = live.replace(
-    '  | "company:createWorkspace"\n',
-    '  | "company:createWorkspace"\n  | "company:deleteWorkspace"\n'
-  );
-}
+live = ensureLineAfter(live, '  | "p2p:uploadFiles"\n', '  | "p2p:importSharedLink"');
+live = ensureLineAfter(live, '  | "company:createWorkspace"\n', '  | "company:deleteWorkspace"');
 
 if (!live.includes('function encodeSharedManifest')) {
   live = live.replace(
@@ -123,4 +121,4 @@ if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
   fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
 }
 
-console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, separated folder scopes, and excluded old stable app from TS check');
+console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, separated folder scopes, channel types, and excluded old stable app from TS check');
