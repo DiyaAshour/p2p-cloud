@@ -41,6 +41,8 @@ function patchMainWrapperLazySeed() {
   if (!source.includes('try { installLazySeedIpc(); await import')) {
     source = source.replace('try { await import', 'try { installLazySeedIpc(); await import');
   }
+  source = source.replace(" await import('./seed-auth-cooldown-ipc.js'); console.log('[main-wrapper] seed auth cooldown IPC import finished');", " console.log('[main-wrapper] seed auth cooldown IPC deferred until first seed action');");
+  source = source.replace("await import('./seed-auth-cooldown-ipc.js'); console.log('[main-wrapper] seed auth cooldown IPC import finished');", "console.log('[main-wrapper] seed auth cooldown IPC deferred until first seed action');");
   fs.writeFileSync(mainWrapperPath, source, 'utf8');
   console.log('[main-stable-startup] ensured lazy seed IPC in main-wrapper.js');
 }
