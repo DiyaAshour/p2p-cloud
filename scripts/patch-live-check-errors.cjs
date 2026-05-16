@@ -83,6 +83,13 @@ if (!live.includes('const [sharedLinkInput, setSharedLinkInput] = useState(" ".t
   );
 }
 
+if (!live.includes('const [walletAddressInput, setWalletAddressInput] = useState(" ".trim());')) {
+  live = live.replace(
+    '  const [drivePassword, setDrivePassword] = useState("");',
+    '  const [drivePassword, setDrivePassword] = useState("");\n  const [walletAddressInput, setWalletAddressInput] = useState(" ".trim());\n  const [seedMode, setSeedMode] = useState<"login" | "create" | "recover">("login");\n  const [seedUsername, setSeedUsername] = useState(" ".trim());\n  const [seedPassword, setSeedPassword] = useState(" ".trim());\n  const [seedRecovery, setSeedRecovery] = useState(" ".trim());\n  const [generatedSeed, setGeneratedSeed] = useState(" ".trim());\n  const [seedSaved, setSeedSaved] = useState(false);'
+  );
+}
+
 live = live.replace(
   '<Tabs value={view === "admin" ? "admin" : "files"} onValueChange={(tab) => { if (tab === "admin") setView("admin"); }}>',
   '<Tabs value={activeTab} onValueChange={(tab) => { const nextTab = tab as "files" | "upload" | "admin"; setActiveTab(nextTab); if (nextTab === "admin") setView("admin"); }}>'
@@ -98,6 +105,17 @@ live = replaceAny(live, [
 live = replaceAny(live, [
   ['  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    setFileFolders((current) => ({ ...current, [`folder:${folder}`]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };', '  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    const key = (view === "company" || view === "admin") && activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `personal:folder:${folder}`;\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };'],
 ], 'createFolder scoped storage');
+
+live = replaceAny(live, [
+  ['  const connectWallet = () => run(async () => {\n    const address = window.prompt("Wallet address 0x...")?.trim();\n    if (!address) return;\n    setWallet(await api.invoke<WalletState>("wallet:connect", { address }));\n    await refresh();\n  });', '  const connectWallet = () => run(async () => {\n    const address = walletAddressInput.trim();\n    if (!address) throw new Error("Enter wallet address first.");\n    setWallet(await api.invoke<WalletState>("wallet:connect", { address }));\n    setWalletAddressInput("");\n    setGeneratedSeed("");\n    setSeedSaved(false);\n    await refresh();\n  });'],
+], 'wallet prompt removal');
+
+if (!live.includes('const seedAuth = () => run(async () =>')) {
+  live = live.replace(
+    '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
+    '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    setGeneratedSeed("");\n    setSeedSaved(false);\n    await refresh();\n  });\n  const seedAuth = () => run(async () => {\n    const username = seedUsername.trim();\n    const password = seedPassword.trim();\n    if (!username || !password) throw new Error("Username and password are required.");\n    if (generatedSeed && !seedSaved) throw new Error("Save and confirm your recovery seed first.");\n    const channel = seedMode === "create" ? "seed:create" : seedMode === "recover" ? "seed:recover" : "seed:login";\n    const payload = seedMode === "recover" ? { username, password, seed: seedRecovery.trim() } : { username, password };\n    if (seedMode === "recover" && !seedRecovery.trim()) throw new Error("Recovery seed is required.");\n    const result = await api.invoke<WalletState & { seed?: string; created?: boolean }>(channel, payload);\n    setWallet(result);\n    setGeneratedSeed(result.seed || "");\n    setSeedSaved(false);\n    if (!result.seed) { setSeedPassword(""); setSeedRecovery(""); }\n    await refresh();\n    toast.success(seedMode === "create" ? "Seed Account created. Save your recovery seed." : seedMode === "recover" ? "Seed Account recovered." : "Signed in with Seed Account.");\n  });'
+  );
+}
 
 if (!live.includes('const importSharedLink = () => run(async () =>')) {
   live = live.replace(
@@ -125,6 +143,13 @@ live = live.replace(
   '  const share = (file: P2PFile) => {\n    const root = file.rootHash || file.hash;\n    const link = file.isEncrypted ? `chunknet://file/${root}` : `chunknet://file/${root}?manifest=${encodeSharedManifest(file)}`;\n    void navigator.clipboard.writeText(link).then(() => toast.success(file.isEncrypted ? "Private link copied. Share Key support comes next." : "Share link copied with manifest"));\n  };'
 );
 
+if (!live.includes('Seed Account')) {
+  live = live.replace(
+    '<Card className="rounded-2xl border-zinc-800 bg-zinc-900">\n            <CardContent className="space-y-4 p-5">\n              <p className="text-sm text-zinc-400">Identity</p>\n              <p className="truncate font-medium">{identityLabel}</p>\n              {walletConnected ? (\n                <Button variant="outline" onClick={disconnectWallet} disabled={busy}>Disconnect</Button>\n              ) : (\n                <Button onClick={connectWallet} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button>\n              )}\n            </CardContent>\n          </Card>',
+    '<Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardContent className="space-y-4 p-5"><p className="text-sm text-zinc-400">Identity</p><p className="truncate font-medium">{identityLabel}</p>{walletConnected ? <Button variant="outline" onClick={disconnectWallet} disabled={busy}>Disconnect</Button> : <div className="space-y-2"><Input value={walletAddressInput} onChange={(event) => setWalletAddressInput(event.target.value)} placeholder="Wallet address 0x..." /><Button className="w-full" onClick={connectWallet} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button></div>}<div className="border-t border-zinc-800 pt-4"><p className="mb-2 text-sm font-medium">Seed Account</p><div className="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-zinc-950 p-1 text-xs"><button type="button" onClick={() => setSeedMode("login")} className={`rounded-lg px-2 py-2 ${seedMode === "login" ? "bg-zinc-800" : "text-zinc-500"}`}>Login</button><button type="button" onClick={() => setSeedMode("create")} className={`rounded-lg px-2 py-2 ${seedMode === "create" ? "bg-zinc-800" : "text-zinc-500"}`}>Create</button><button type="button" onClick={() => setSeedMode("recover")} className={`rounded-lg px-2 py-2 ${seedMode === "recover" ? "bg-zinc-800" : "text-zinc-500"}`}>Recover</button></div><div className="space-y-2"><Input value={seedUsername} onChange={(event) => setSeedUsername(event.target.value)} placeholder="Username" /><Input type="password" value={seedPassword} onChange={(event) => setSeedPassword(event.target.value)} placeholder={seedMode === "recover" ? "New password" : "Password"} />{seedMode === "recover" && <Input value={seedRecovery} onChange={(event) => setSeedRecovery(event.target.value)} placeholder="Recovery seed" />}{generatedSeed && <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3"><p className="text-xs font-medium text-amber-200">Recovery seed — save it now</p><p className="mt-2 break-all rounded-lg bg-zinc-950 p-2 text-xs">{generatedSeed}</p><Button className="mt-2 w-full" size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(generatedSeed).then(() => toast.success("Seed copied"))}>Copy seed</Button><label className="mt-3 flex items-start gap-2 text-xs text-amber-100"><Checkbox checked={seedSaved} onCheckedChange={(value) => setSeedSaved(Boolean(value))} /><span>I saved this recovery seed.</span></label></div>}<Button className="w-full" variant="outline" onClick={seedAuth} disabled={busy || Boolean(generatedSeed && !seedSaved)}>{generatedSeed && !seedSaved ? "Confirm seed saved first" : seedMode === "create" ? "Create Seed Account" : seedMode === "recover" ? "Recover Seed Account" : "Login with Seed"}</Button><p className="text-xs text-zinc-500">Wrong password cooldown is device-scoped and doubles after 5 failed attempts.</p></div></div></CardContent></Card>'
+  );
+}
+
 if (!live.includes('Delete company')) {
   live = live.replace(
     '<div className="flex flex-col gap-2 md:flex-row"><Input value={workspaceNameInput} onChange={(event) => setWorkspaceNameInput(event.target.value)} placeholder="Company name" /><Button onClick={createWorkspace}><Building2 className="size-4" />Create company</Button></div>',
@@ -151,4 +176,4 @@ if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
   fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
 }
 
-console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, scoped folders, offline company join panel, channel types, bridge invoke, and excluded old stable app from TS check');
+console.log('[patch-live-check-errors] fixed wallet address UI, seed account UI, WalletState.planId, runBusy alias, upload tab state, shared link import UI, delete company UI, scoped folders, offline company join panel, channel types, bridge invoke, and excluded old stable app from TS check');
