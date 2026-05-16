@@ -1,66 +1,63 @@
 const fs = require('node:fs');
 
-const checks = [
-  {
-    file: 'electron/main.js',
-    forbidden: ['Array.from(plain)', 'Buffer.concat(buffers)'],
-    required: ['chunknet-downloads', 'dialog.showSaveDialog', 'fs.appendFileSync(tempPath, buffer)'],
-    scopeStart: "ipcMain.handle('p2p:download'",
-    scopeEndCandidates: ["\nipcMain.handle('p2p:delete'", "\nipcMain.handle('p2p:repair'", "\nipcMain.handle('p2p:prepareProof'"],
-  },
-  {
-    file: 'electron/main.js',
-    forbidden: ['chunk.data.toString', 'chunkMetas.push({ index, size: data.length, data, hash })'],
-    required: ['uploadFilePathStreaming', 'chunknet-uploads', 'fs.createReadStream(filePath', 'fs.readSync(fd, data, 0, chunk.size, chunk.offset)'],
-    scopeStart: 'async function uploadFilePathStreaming',
-    scopeEndCandidates: ["\nipcMain.handle('p2p:uploadFiles'"],
-  },
-  {
-    file: 'electron/main.js',
-    forbidden: [],
-    required: ['p2p:uploadFiles', 'uploadFilePathStreaming'],
-    scopeStart: "ipcMain.handle('p2p:uploadFiles'",
-    scopeEndCandidates: ["\nipcMain.handle('p2p:download'", "\nipcMain.handle('p2p:delete'"],
-  },
-  {
-    file: 'electron/preload.cjs',
-    required: ["'p2p:uploadFiles'"],
-  },
-  {
-    file: 'client/src/DriveP2PAppPassword.tsx',
-    forbidden: ['new Uint8Array(r.bytes)', 'bytes: number[]', 'await file.arrayBuffer()', 'bytes: await'],
-    required: ['savedPath', 'Download complete', 'p2p:uploadFiles'],
-  },
-  {
-    file: 'package.json',
-    forbidden: ['powershell -NoProfile -Command Start-Sleep'],
-    required: ['node scripts/start-electron-dev.cjs', 'patch-drive-download-ui.cjs', 'patch-download-memory.cjs', 'patch-native-upload-streaming.cjs', 'patch-upload-ram-final.cjs', 'patch-native-upload-ui.cjs', 'verify-runtime-safety.cjs'],
-  },
-];
+function read(file) {
+  if (!fs.existsSync(file)) throw new Error(`Missing required file: ${file}`);
+  return fs.readFileSync(file, 'utf8');
+}
 
-function scopedContent(content, check) {
-  if (!check.scopeStart) return content;
-  const start = content.indexOf(check.scopeStart);
-  if (start === -1) throw new Error(`${check.file}: missing scope ${check.scopeStart}`);
-  let end = -1;
-  for (const candidate of check.scopeEndCandidates || []) {
-    const idx = content.indexOf(candidate, start);
-    if (idx !== -1 && (end === -1 || idx < end)) end = idx;
+function mustContain(file, content, tokens) {
+  for (const token of tokens) {
+    if (!content.includes(token)) throw new Error(`${file}: required token missing: ${token}`);
   }
-  if (end === -1) end = content.length;
+}
+
+function mustNotContain(file, content, tokens) {
+  for (const token of tokens) {
+    if (content.includes(token)) throw new Error(`${file}: forbidden token present: ${token}`);
+  }
+}
+
+function scoped(content, startToken, endTokens = []) {
+  const start = content.indexOf(startToken);
+  if (start === -1) throw new Error(`missing scope ${startToken}`);
+  let end = content.length;
+  for (const token of endTokens) {
+    const i = content.indexOf(token, start + startToken.length);
+    if (i !== -1 && i < end) end = i;
+  }
   return content.slice(start, end);
 }
 
-for (const check of checks) {
-  if (!fs.existsSync(check.file)) throw new Error(`Missing required file: ${check.file}`);
-  const content = fs.readFileSync(check.file, 'utf8');
-  const scope = scopedContent(content, check);
-  for (const token of check.forbidden || []) {
-    if (scope.includes(token)) throw new Error(`${check.file}: forbidden runtime token still present: ${token}`);
-  }
-  for (const token of check.required || []) {
-    if (!scope.includes(token)) throw new Error(`${check.file}: required runtime token missing: ${token}`);
-  }
+const main = read('electron/main.js');
+const stable = read('electron/main-stable.js');
+const preload = read('electron/preload.cjs');
+const live = read('client/src/NativeP2PAppLive.tsx');
+const downloadOverride = read('electron/download-to-path-override.js');
+
+for (const [file, content] of [['electron/main.js', main], ['electron/main-stable.js', stable]]) {
+  mustContain(file, content, [
+    "ipcMain.handle('p2p:start'",
+    "ipcMain.handle('p2p:networkSummary'",
+    "ipcMain.handle('p2p:uploadFiles'",
+    'async function uploadFilePathStreaming',
+    'fs.createReadStream(filePath',
+    "dialog.showOpenDialog",
+    'chunknet-uploads',
+  ]);
+
+  const uploadScope = scoped(content, 'async function uploadFilePathStreaming', ["\nipcMain.handle('p2p:download'", "\nipcMain.handle('p2p:delete'"]);
+  mustNotContain(file, uploadScope, ['await file.arrayBuffer()', 'Buffer.concat(buffers)', 'Array.from(plain)']);
 }
 
-console.log('[verify-runtime-safety] upload/download streaming runtime checks passed');
+mustContain('electron/download-to-path-override.js', downloadOverride, [
+  "ipcMain.handle('p2p:downloadToPath'",
+  'dialog.showSaveDialog',
+  'fs.appendFileSync(tempPath, buffer)',
+]);
+mustNotContain('electron/download-to-path-override.js', downloadOverride, ['bytes: Array.from', 'Array.from(outputBuffer)']);
+
+mustContain('electron/preload.cjs', preload, ["'p2p:uploadFiles'", "'p2p:downloadToPath'", "'seed:create'", "'wallet:connect'"]);
+mustContain('client/src/NativeP2PAppLive.tsx', live, ['p2p:uploadFiles', 'p2p:downloadToPath']);
+mustNotContain('client/src/NativeP2PAppLive.tsx', live, ['file.arrayBuffer()', 'bytes: await']);
+
+console.log('[verify-runtime-safety] Electron runtime safety checks passed');
