@@ -8,21 +8,36 @@ function readLive() { return fs.existsSync(livePath) ? fs.readFileSync(livePath,
 function ensureLineAfter(source, anchor, line) { if (source.includes(line)) return source; if (!source.includes(anchor)) return source; return source.replace(anchor, `${anchor}${line}\n`); }
 function replaceAny(source, replacements) { for (const [from, to] of replacements) if (source.includes(from)) return source.replace(from, to); return source; }
 
-function replaceIdentityCard(source) {
-  const marker = '<p className="text-sm text-zinc-400">Identity</p>';
-  const markerIndex = source.indexOf(marker);
-  if (markerIndex < 0) return source;
-  const cardStart = source.lastIndexOf('<Card className="rounded-2xl border-zinc-800 bg-zinc-900">', markerIndex);
-  const nextCard = source.indexOf('<Card className="rounded-2xl border-zinc-800 bg-zinc-900">', markerIndex + marker.length);
-  if (cardStart < 0 || nextCard < 0) return source;
-  const replacement = '<IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={walletConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />\n\n          ';
-  return source.slice(0, cardStart) + replacement + source.slice(nextCard);
+function restoreCleanLive() {
+  try {
+    execFileSync('git', ['checkout', '--', 'client/src/NativeP2PAppLive.tsx'], { cwd: process.cwd(), stdio: 'ignore' });
+    console.log('[patch-live-check-errors] restored NativeP2PAppLive.tsx from git before patching');
+  } catch (error) {
+    console.warn('[patch-live-check-errors] could not restore NativeP2PAppLive.tsx:', error?.message || error);
+  }
 }
 
-let live = readLive();
-if (live.includes('Recovery seed — save it now') || live.includes('Wrong password attempts cool down this device only')) {
-  try { execFileSync('git', ['checkout', '--', 'client/src/NativeP2PAppLive.tsx'], { cwd: process.cwd(), stdio: 'ignore' }); live = readLive(); } catch {}
+function replaceIdentityCard(source) {
+  if (source.includes('<IdentityAccountCard api={api}')) return source;
+  const original = `          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
+            <CardContent className="space-y-4 p-5">
+              <p className="text-sm text-zinc-400">Identity</p>
+              <p className="truncate font-medium">{identityLabel}</p>
+              {walletConnected ? (
+                <Button variant="outline" onClick={disconnectWallet} disabled={busy}>Disconnect</Button>
+              ) : (
+                <Button onClick={connectWallet} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button>
+              )}
+            </CardContent>
+          </Card>`;
+  const replacement = `          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={walletConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />`;
+  if (source.includes(original)) return source.replace(original, replacement);
+  console.warn('[patch-live-check-errors] exact Identity card block not found; leaving live UI unchanged');
+  return source;
 }
+
+restoreCleanLive();
+let live = readLive();
 
 if (!live.includes('import CompanyOfflineJoinPanel from "./CompanyOfflineJoinPanel";')) live = live.replace('import { toast } from "sonner";', 'import { toast } from "sonner";\nimport CompanyOfflineJoinPanel from "./CompanyOfflineJoinPanel";');
 if (!live.includes('import IdentityAccountCard from "./IdentityAccountCard";')) live = live.replace('import { toast } from "sonner";', 'import { toast } from "sonner";\nimport IdentityAccountCard from "./IdentityAccountCard";');
@@ -45,7 +60,16 @@ const end = start >= 0 ? live.indexOf(endMarker, start) : -1;
 if (start >= 0 && end > start) live = live.slice(0, start) + '  const connectWallet = () => run(async () => { throw new Error("Use the Identity card wallet input."); });' + live.slice(end);
 
 live = live.replace('<Tabs value={view === "admin" ? "admin" : "files"} onValueChange={(tab) => { if (tab === "admin") setView("admin"); }}>', '<Tabs value={activeTab} onValueChange={(tab) => { const nextTab = tab as "files" | "upload" | "admin"; setActiveTab(nextTab); if (nextTab === "admin") setView("admin"); }}>');
+
+const folderBlock = '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalFolderKeys = new Set(personalFiles.map((file) => file.hash));\n    const personalScopedFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFolderKeys.has(key)).map(([, folder]) => folder).filter(Boolean);\n    const companyScopedPrefix = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:` : "company:none:folder:";\n    const companyScopedFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith(companyScopedPrefix)).map(([, folder]) => folder).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? [...workspaceFolders, ...companyScopedFolders] : personalScopedFolders;\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);';
+live = replaceAny(live, [[
+'    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];\n  }, [fileFolders, activeWorkspace]);', folderBlock
+], [
+'    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalFolderKeys = new Set(personalFiles.map((file) => file.hash));\n    const localFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("folder:") || personalFolderKeys.has(key)).map(([, folder]) => folder).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : localFolders;\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);', folderBlock
+]]);
+
 live = replaceAny(live, [['  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    setFileFolders((current) => ({ ...current, [`folder:${folder}`]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };', '  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    const key = (view === "company" || view === "admin") && activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `personal:folder:${folder}`;\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };']]);
+
 if (!live.includes('const importSharedLink = () => run(async () =>')) live = live.replace('  const upload = () => run(async () => {', '  const importSharedLink = () => run(async () => {\n    if (!walletConnected) throw new Error("Connect wallet before importing a shared link.");\n    const link = sharedLinkInput.trim();\n    if (!link) throw new Error("Paste a Chunknet share link first.");\n    const result = await api.invoke<{ file?: P2PFile }>("p2p:importSharedLink", { link });\n    setSharedLinkInput("");\n    setView("personal");\n    setActiveTab("files");\n    await refresh();\n    toast.success(result?.file?.name ? `${result.file.name} saved to My Drive` : "Shared file saved to My Drive");\n  });\n  const upload = () => run(async () => {');
 if (!live.includes('const deleteWorkspace = () => run(async () =>')) live = live.replace('  const inviteMember = () => run(async () => {', '  const deleteWorkspace = () => run(async () => {\n    if (!activeWorkspace) throw new Error("Select a company first");\n    if (localRole !== "owner") throw new Error("Only the company owner can delete this workspace.");\n    if (workspaceNameInput.trim() !== activeWorkspace.name) throw new Error("Type the company name in the Company name field before deleting.");\n    await api.invoke("company:deleteWorkspace", { workspaceId: activeWorkspace.workspaceId });\n    setWorkspaceNameInput("");\n    setActiveWorkspaceId("");\n    setView("personal");\n    setActiveTab("files");\n    await refresh();\n    toast.success("Company archived. Encrypted chunks were not deleted.");\n  });\n  const inviteMember = () => run(async () => {');
 live = live.replace('const confirmName = window.prompt(`Type ${activeWorkspace.name} to delete this company. Files/chunks will stay encrypted; only the workspace manifest is archived.`)?.trim();\n    if (confirmName !== activeWorkspace.name) throw new Error("Company delete cancelled. Name did not match.");', 'if (workspaceNameInput.trim() !== activeWorkspace.name) throw new Error("Type the company name in the Company name field before deleting.");');
@@ -60,4 +84,4 @@ fs.writeFileSync(livePath, live, 'utf8');
 const tsconfigPath = path.join(process.cwd(), 'tsconfig.json');
 let tsconfig = fs.readFileSync(tsconfigPath, 'utf8');
 if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) { tsconfig = tsconfig.replace('"client/src/NativeP2PApp.tsx"', '"client/src/NativeP2PApp.tsx", "client/src/NativeP2PAppStable.tsx"'); fs.writeFileSync(tsconfigPath, tsconfig, 'utf8'); }
-console.log('[patch-live-check-errors] rendered IdentityAccountCard with wallet + username login');
+console.log('[patch-live-check-errors] patched clean NativeP2PAppLive with IdentityAccountCard');
