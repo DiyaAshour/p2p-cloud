@@ -32,6 +32,9 @@ function installCompanyWorkspaceIpc() {
     return companyStore().createWorkspace({ ...payload, ownerWallet });
   });
 
+  try { ipcMain.removeHandler('company:deleteWorkspace'); } catch {}
+  ipcMain.handle('company:deleteWorkspace', async (_event, payload = {}) => companyStore().deleteWorkspace(payload));
+
   try { ipcMain.removeHandler('company:inviteMember'); } catch {}
   ipcMain.handle('company:inviteMember', async (_event, payload = {}) => companyStore().inviteMember(payload));
 
