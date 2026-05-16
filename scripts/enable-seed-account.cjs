@@ -16,18 +16,34 @@ function write(file, content) {
 
 function replaceOnce(src, from, to, label) {
   if (src.includes(to)) return src;
-  if (!src.includes(from)) throw new Error(`Patch anchor not found: ${label}`);
+  if (!src.includes(from)) {
+    console.warn(`[seed-account] patch anchor not found, skipping: ${label}`);
+    return src;
+  }
   return src.replace(from, to);
+}
+
+function ensureAfter(src, marker, addition, label) {
+  if (src.includes(addition.trim().slice(0, 80))) return src;
+  const index = src.indexOf(marker);
+  if (index < 0) {
+    console.warn(`[seed-account] insertion marker not found, skipping: ${label}`);
+    return src;
+  }
+  return src.slice(0, index + marker.length) + addition + src.slice(index + marker.length);
 }
 
 function patchMainStable() {
   let src = mustRead(mainPath);
 
-  src = replaceOnce(src,
-    "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';\nconst KDF_ALGORITHM = 'pbkdf2-sha256';",
-    "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';\nconst SEED_ACCOUNT_KEY_SOURCE = 'seed-account-v1';\nconst SEED_ACCOUNT_PREFIX = 'seed:';\nconst KDF_ALGORITHM = 'pbkdf2-sha256';",
-    'seed constants'
-  );
+  if (!src.includes("const SEED_ACCOUNT_KEY_SOURCE = 'seed-account-v1';")) {
+    src = ensureAfter(
+      src,
+      "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';",
+      "\nconst SEED_ACCOUNT_KEY_SOURCE = 'seed-account-v1';\nconst SEED_ACCOUNT_PREFIX = 'seed:';",
+      'seed constants'
+    );
+  }
 
   src = replaceOnce(src,
     "let walletPath = null;\nlet manifests = [];",
@@ -84,12 +100,6 @@ function patchMainStable() {
   );
 
   src = replaceOnce(src,
-    "function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }",
-    "function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }\nfunction loadSeedAccounts() { ensureDataDir(); try { const parsed = JSON.parse(fs.readFileSync(seedAccountsPath, 'utf8')); return Array.isArray(parsed?.accounts) ? parsed.accounts : []; } catch { return []; } }\nfunction saveSeedAccounts(accounts = []) { ensureDataDir(); fs.writeFileSync(seedAccountsPath, JSON.stringify({ version: 1, accounts }, null, 2), 'utf8'); }\nfunction findSeedAccountByUsername(username = '') { const normalized = normalizeUsername(username); return loadSeedAccounts().find((account) => account.username === normalized) || null; }\nfunction passwordKey(password, salt) { return crypto.pbkdf2Sync(validateDrivePassword(password), Buffer.from(String(salt || ''), 'base64'), KDF_ITERATIONS, 32, 'sha256'); }\nfunction encryptSeedVault(seed, password) { const salt = crypto.randomBytes(16); const iv = crypto.randomBytes(12); const key = passwordKey(password, salt.toString('base64')); const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv); const ciphertext = Buffer.concat([cipher.update(normalizeSeed(seed), 'utf8'), cipher.final()]); return { algorithm: ENCRYPTION_ALGORITHM, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') }; }\nfunction decryptSeedVault(account, password) { const vault = account?.seedVault; if (!vault?.ciphertext || !vault?.salt || !vault?.iv || !vault?.authTag) throw new Error('Seed account vault is missing or corrupted'); const key = passwordKey(password, vault.salt); const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(vault.iv, 'base64')); decipher.setAuthTag(Buffer.from(vault.authTag, 'base64')); return normalizeSeed(Buffer.concat([decipher.update(Buffer.from(vault.ciphertext, 'base64')), decipher.final()]).toString('utf8')); }\nfunction createSeedAccountSession({ username, seed, created = false }) { const normalizedSeed = normalizeSeed(seed); const fingerprint = seedFingerprint(normalizedSeed); const accountId = `${SEED_ACCOUNT_PREFIX}${fingerprint}`; walletState = { ...walletState, connected: true, verified: true, authMode: 'seed', address: '', accountId, username: normalizeUsername(username), seedFingerprint: fingerprint, connectedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), encryptionSecret: normalizedSeed, encryptionKeySource: SEED_ACCOUNT_KEY_SOURCE, planId: PLANS[walletState.planId] ? walletState.planId : 'free' }; persistWallet(); return { ...walletSummary(), created, seed: null, recoveryRequired: false }; }\nfunction generateSeedPhrase() { return crypto.randomBytes(32).toString('hex'); }",
-    'seed vault helpers'
-  );
-
-  src = replaceOnce(src,
     "function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }",
     "function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: walletState.encryptionKeySource || keySourceForIdentity(), minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, accountId: activeWallet(), plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }",
     'wallet summary seed account'
@@ -97,7 +107,7 @@ function patchMainStable() {
 
   src = replaceOnce(src,
     "function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {\n  const wallet = normalizeWallet(ownerWallet);\n  if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');\n  const password = validateDrivePassword(drivePassword);\n  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');\n  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');\n}",
-    "function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {\n  const identity = normalizeWallet(ownerWallet);\n  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');\n  if (isSeedAccountId(identity)) {\n    if (!walletState.encryptionSecret || activeWallet() !== identity) throw new Error('Seed Account is locked. Sign in with username + password, or recover with seed.');\n    return crypto.pbkdf2Sync(`${identity}:${walletState.encryptionSecret}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');\n  }\n  if (!isValidWallet(identity)) throw new Error('Valid wallet or seed account required for private file encryption.');\n  const password = validateDrivePassword(drivePassword);\n  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');\n}",
+    "function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {\n  const identity = normalizeWallet(ownerWallet);\n  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');\n  if (isSeedAccountId(identity)) {\n    const seedSessionSecret = globalThis.__chunknetSeedSession?.get?.(identity) || walletState.encryptionSecret;\n    if (!seedSessionSecret || activeWallet() !== identity) throw new Error('Seed Account is locked. Sign in with username + password, or recover with seed.');\n    return crypto.pbkdf2Sync(`${identity}:${seedSessionSecret}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');\n  }\n  if (!isValidWallet(identity)) throw new Error('Valid wallet or seed account required for private file encryption.');\n  const password = validateDrivePassword(drivePassword);\n  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');\n}",
     'derive drive key seed account'
   );
 
@@ -105,12 +115,6 @@ function patchMainStable() {
     "      keySource: ENCRYPTION_KEY_SOURCE,",
     "      keySource: keySourceForIdentity(ownerWallet),",
     'dynamic encrypted file key source'
-  );
-
-  src = replaceOnce(src,
-    "ipcMain.handle('wallet:status', async () => { ensureDataDir(); loadWallet(); loadManifests(); return walletSummary(); });",
-    "ipcMain.handle('seed:status', async () => { ensureDataDir(); loadWallet(); return { ok: true, available: true, accounts: loadSeedAccounts().map((account) => ({ username: account.username, accountId: account.accountId, seedFingerprint: account.seedFingerprint, createdAt: account.createdAt })), wallet: walletSummary() }; });\nipcMain.handle('seed:create', async (_event, payload = {}) => { ensureDataDir(); const username = normalizeUsername(payload.username); if (!username || username.length < 3) throw new Error('Username must be at least 3 characters.'); const password = validateDrivePassword(payload.password); const accounts = loadSeedAccounts(); if (accounts.some((account) => account.username === username)) throw new Error('Username already exists on this device. Use login or recover.'); const seed = normalizeSeed(payload.seed || generateSeedPhrase()); const accountId = seedAccountIdFromSeed(seed); const account = { username, accountId, seedFingerprint: seedFingerprint(seed), seedVault: encryptSeedVault(seed, password), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), keySource: SEED_ACCOUNT_KEY_SOURCE }; accounts.push(account); saveSeedAccounts(accounts); createSeedAccountSession({ username, seed, created: true }); return { ...walletSummary(), created: true, seed }; });\nipcMain.handle('seed:login', async (_event, payload = {}) => { ensureDataDir(); const username = normalizeUsername(payload.username); const account = findSeedAccountByUsername(username); if (!account) throw new Error('Seed account not found on this device. Use recover/import with your seed.'); const seed = decryptSeedVault(account, payload.password); return createSeedAccountSession({ username, seed }); });\nipcMain.handle('seed:recover', async (_event, payload = {}) => { ensureDataDir(); const username = normalizeUsername(payload.username); if (!username || username.length < 3) throw new Error('Username must be at least 3 characters.'); const password = validateDrivePassword(payload.password); const seed = normalizeSeed(payload.seed); if (!seed || seed.length < 32) throw new Error('Recovery seed is required.'); const accountId = seedAccountIdFromSeed(seed); const nextAccount = { username, accountId, seedFingerprint: seedFingerprint(seed), seedVault: encryptSeedVault(seed, password), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), keySource: SEED_ACCOUNT_KEY_SOURCE }; const accounts = loadSeedAccounts().filter((account) => account.username !== username && account.accountId !== accountId); accounts.push(nextAccount); saveSeedAccounts(accounts); return createSeedAccountSession({ username, seed }); });\nipcMain.handle('wallet:status', async () => { ensureDataDir(); loadWallet(); loadManifests(); return walletSummary(); });",
-    'seed ipc handlers'
   );
 
   src = replaceOnce(src,
@@ -141,4 +145,4 @@ function patchPreload() {
 
 patchMainStable();
 patchPreload();
-console.log('[seed-account] enabled username + password + recovery seed identity layer');
+console.log('[seed-account] patch completed');
