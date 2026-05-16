@@ -33,6 +33,18 @@ if (!live.includes('const runBusy = run;')) {
   );
 }
 
+if (!live.includes('const [activeTab, setActiveTab] = useState<"files" | "upload" | "admin">("files");')) {
+  live = live.replace(
+    '  const [view, setView] = useState<View>("personal");',
+    '  const [view, setView] = useState<View>("personal");\n  const [activeTab, setActiveTab] = useState<"files" | "upload" | "admin">("files");'
+  );
+}
+
+live = live.replace(
+  '<Tabs value={view === "admin" ? "admin" : "files"} onValueChange={(tab) => { if (tab === "admin") setView("admin"); }}>',
+  '<Tabs value={activeTab} onValueChange={(tab) => { const nextTab = tab as "files" | "upload" | "admin"; setActiveTab(nextTab); if (nextTab === "admin") setView("admin"); }}>'
+);
+
 fs.writeFileSync(livePath, live, 'utf8');
 
 const tsconfigPath = path.join(process.cwd(), 'tsconfig.json');
@@ -45,4 +57,4 @@ if (!tsconfig.includes('client/src/NativeP2PAppStable.tsx')) {
   fs.writeFileSync(tsconfigPath, tsconfig, 'utf8');
 }
 
-console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, and excluded old stable app from TS check');
+console.log('[patch-live-check-errors] fixed WalletState.planId, runBusy alias, upload tab state, and excluded old stable app from TS check');
