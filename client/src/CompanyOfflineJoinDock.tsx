@@ -1,11 +1,8 @@
 import { useEffect, useState } from "react";
 import CompanyOfflineJoinPanel from "./CompanyOfflineJoinPanel";
 
-type Bridge = { invoke: <T>(channel: string, payload?: unknown) => Promise<T> };
 type Workspace = { workspaceId: string; name: string };
 type CompanyState = { workspaces?: Workspace[] };
-
-declare global { interface Window { electron?: Bridge } }
 
 export default function CompanyOfflineJoinDock() {
   const [company, setCompany] = useState<CompanyState | null>(null);
