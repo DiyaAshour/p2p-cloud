@@ -29,13 +29,15 @@ function removeIdentityHelpers(source) {
   return next;
 }
 
-const deriveDriveKeyReplacement = `function deriveDriveKey({ ownerWallet = activeIdentity(), drivePassword, salt }) {
-  const wallet = normalizeIdentity(ownerWallet || activeIdentity());
-  if (!isValidIdentity(wallet)) throw new Error('Valid wallet or seed identity required for private file encryption.');
-  const password = validateDrivePassword(drivePassword);
-  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');
-  return crypto.pbkdf2Sync(`${'${wallet}:${password}'}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
-}`;
+const deriveDriveKeyReplacement = [
+  'function deriveDriveKey({ ownerWallet = activeIdentity(), drivePassword, salt }) {',
+  '  const wallet = normalizeIdentity(ownerWallet || activeIdentity());',
+  "  if (!isValidIdentity(wallet)) throw new Error('Valid wallet or seed identity required for private file encryption.');",
+  '  const password = validateDrivePassword(drivePassword);',
+  "  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');",
+  "  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');",
+  '}'
+].join('\n');
 
 for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   if (!fs.existsSync(file)) continue;
