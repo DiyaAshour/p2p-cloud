@@ -6,32 +6,21 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "node scripts/patch-seed-identity-actions.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/patch-upgrade-paypal-ui.cjs && vite --host 127.0.0.1 --port 3000",
-    "dev:electron": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && concurrently \"pnpm dev\" \"pnpm paypal:server\" \"electron .\"",
-    "electron:dev": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && concurrently \"pnpm dev\" \"pnpm paypal:server\" \"electron .\"",
-    "start": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && electron .",
-    "build": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && vite build",
-    "build:electron": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && vite build && electron-builder",
-    "electron:build": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && pnpm build && electron-builder",
-    "check": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/verify-runtime-safety.cjs && tsc -p tsconfig.json --noEmit --target ES2020 --downlevelIteration",
+    "dev": "node scripts/patch-seed-identity-actions.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/patch-live-folder-actions.cjs && node scripts/patch-upgrade-paypal-ui.cjs && vite --host 127.0.0.1 --port 3000",
+    "electron:dev": "node scripts/patch-native-upload-streaming.cjs && node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-main-stable-startup.cjs && node scripts/patch-network-summary-safe.cjs && node scripts/patch-replication-memory-safe.cjs && node scripts/patch-upgrade-paypal-ui.cjs && pnpm run apply:download-streaming && pnpm run apply:seed-account && pnpm run apply:seed-ui && pnpm run apply:seed-session && node scripts/patch-shared-link-import.cjs && node scripts/patch-live-check-errors.cjs && node scripts/fix-live-clicks.cjs && node scripts/patch-ui-folder-scope.cjs && node scripts/patch-live-folder-actions.cjs && node scripts/verify-runtime-safety.cjs && concurrently \"pnpm dev\" \"pnpm paypal:server\" \"electron .\"",
+    "dev:electron": "pnpm run electron:dev",
+    "start": "pnpm run electron:dev",
+    "build": "node scripts/patch-ui-folder-scope.cjs && node scripts/patch-live-folder-actions.cjs && vite build",
     "test": "vitest run",
     "format": "prettier --write .",
     "paypal:server": "node server/paypal-checkout.js",
     "sync:manifests": "node server/manifest-sync.js",
     "storage:peer": "node server/storage-peer.js",
-    "stress:p2p": "node scripts/stress-p2p-bootstrap.mjs",
-    "stress:p2p:malicious": "node scripts/stress-p2p-malicious.mjs",
-    "stress:p2p:transfer": "node scripts/stress-p2p-transfer.mjs",
-    "maintenance": "pnpm repair:manifests",
-    "repair:manifests": "node scripts/repair-encrypted-manifests.js && node scripts/remove-bad-encrypted-manifests.js",
     "repair:electron": "node node_modules/electron/install.js",
     "apply:download-streaming": "node scripts/apply-download-streaming-to-path.cjs",
     "apply:seed-account": "node scripts/enable-seed-account.cjs",
     "apply:seed-ui": "node scripts/patch-seed-account-ui.cjs",
-    "apply:seed-session": "node scripts/patch-seed-session-cache.cjs && node scripts/patch-main-seed-session-read.cjs",
-    "apply:drive-ui": "echo Drive UI integrated in NativeP2PAppLive.tsx",
-    "fix:commercial": "node scripts/fix-commercial-critical-issues.cjs && node scripts/patch-native-ui-upload-streaming.cjs && node scripts/fix-native-upload-button.cjs",
-    "patch:ui-upload": "pnpm run fix:commercial"
+    "apply:seed-session": "node scripts/patch-seed-session-cache.cjs && node scripts/patch-main-seed-session-read.cjs"
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.1",
@@ -94,21 +83,5 @@
   },
   "main": "electron/main-wrapper.js",
   "homepage": "./",
-  "pnpm": { "onlyBuiltDependencies": ["electron", "esbuild", "argon2"] },
-  "build": {
-    "appId": "io.chunknet.app",
-    "productName": "Chunknet",
-    "artifactName": "Chunknet-${version}-setup.${ext}",
-    "files": ["dist/**/*", "electron/**/*", "assets/**/*", "node_modules/**/*", "server/paypal-checkout.js"],
-    "directories": { "buildResources": "assets" },
-    "win": { "target": "nsis", "icon": "assets/icon.ico" },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "uninstallDisplayName": "Chunknet",
-      "license": "build/license.txt"
-    }
-  }
+  "pnpm": { "onlyBuiltDependencies": ["electron", "esbuild", "argon2"] }
 }
