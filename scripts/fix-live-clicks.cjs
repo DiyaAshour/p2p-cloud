@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+
 const p = 'client/src/NativeP2PAppLive.tsx';
 let s = fs.readFileSync(p, 'utf8');
 const before = s;
@@ -11,7 +12,20 @@ s = s.replace('<Tabs value={view === "admin" ? "admin" : "files"} onValueChange=
 s = s.replaceAll('walletConnected={walletConnected}', 'walletConnected={identityConnected}');
 s = s.replaceAll('!walletConnected', '!identityConnected');
 s = s.replace('  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });', '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });');
-
 fs.writeFileSync(p, s, 'utf8');
-console.log(s === before ? '[fix-live-clicks] already patched' : '[fix-live-clicks] patched upload tab, upload button, and disconnect');
+console.log(s === before ? '[fix-live-clicks] UI already patched' : '[fix-live-clicks] patched upload tab, upload button, and disconnect UI');
 if (s.includes('<Tabs value={view === "admin" ? "admin" : "files"}') || s.includes('!walletConnected') || s.includes('const identityLabel = wallet?.authMode === "seed"')) process.exit(1);
+
+for (const file of ['electron/main.js', 'electron/main-stable.js']) {
+  if (!fs.existsSync(file)) continue;
+  let m = fs.readFileSync(file, 'utf8');
+  const oldLine = "walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };";
+  const newLine = "walletState = { connected: false, verified: false, address: '', accountId: '', authMode: null, username: null, seedFingerprint: null, planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };";
+  if (m.includes(oldLine)) {
+    m = m.replace(oldLine, newLine);
+    fs.writeFileSync(file, m, 'utf8');
+    console.log(`[fix-live-clicks] patched ${file} disconnect seed cleanup`);
+  } else {
+    console.log(`[fix-live-clicks] ${file} disconnect cleanup already safe or handler not present`);
+  }
+}
