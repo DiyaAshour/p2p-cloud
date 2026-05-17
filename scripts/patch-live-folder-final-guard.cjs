@@ -9,6 +9,9 @@ if (!fs.existsSync(file)) {
 let s = fs.readFileSync(file, 'utf8');
 let changed = false;
 
+function markChange(next) {
+  if (next !== s) { s = next; changed = true; }
+}
 function patch(regex, replacement, label) {
   if (regex.test(s)) {
     s = s.replace(regex, replacement);
@@ -66,10 +69,10 @@ if (!s.includes('const folderIdentityReady =')) {
   );
 }
 // Strengthen older injected expression.
-s = s.replace(
+markChange(s.replace(
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);',
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");'
-);
+));
 
 if (!s.includes('final logged-out folder guard')) {
   patch(
@@ -79,7 +82,7 @@ if (!s.includes('final logged-out folder guard')) {
   );
 }
 // Repair older injected guards that used walletConnected.
-s = s.replace('if (!walletConnected && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];', 'if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];');
+markChange(s.replace('if (!walletConnected && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];', 'if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];'));
 
 if (!s.includes('final folder state clear guard')) {
   const addedAfterWorkspaceEffect = patch(
@@ -96,16 +99,20 @@ if (!s.includes('final folder state clear guard')) {
   }
 }
 // Repair older injected guard dependencies/conditions.
-s = s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\n      setFolderParents\(\{\}\);\n      setActiveFolder\(ALL_FILES\);\n    \}\n  \}, \[walletConnected\]\);/g, 'if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);');
+markChange(s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\n      setFolderParents\(\{\}\);\n      setActiveFolder\(ALL_FILES\);\n    \}\n  \}, \[walletConnected\]\);/g, 'if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);'));
 
 // Force New folder to work after verify-runtime-safety restores NativeP2PAppLive.
 // Always replace it, even if a previous final marker exists, because earlier final versions may be stale.
 patch(
   /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
   `  const createFolder = () => {
-    // final network createFolder v2
+    // final network createFolder v3
     const folder = newFolder.trim();
-    if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) return;
+    console.log('[folders] create clicked', { folder, view, folderIdentityReady, busy });
+    if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) {
+      toast.error('Folder name is required');
+      return;
+    }
     const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);
     const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";
     const nextFolders = { ...fileFolders, [key]: folder };
@@ -127,9 +134,13 @@ patch(
   'createFolder final replace'
 );
 
+// Make the + folder button clickable even when startup refresh leaves busy=true.
+markChange(s.replace(/<Button onClick=\{createFolder\} disabled=\{busy\}>\+<\/Button>/g, '<Button onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>'));
+markChange(s.replace(/<Button onClick=\{createFolder\}>\+<\/Button>/g, '<Button onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>'));
+
 // Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
-s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [folderIdentityReady]);');
-s = s.replace(/\}, \[walletConnected\]\);/g, '}, [folderIdentityReady]);');
+markChange(s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [folderIdentityReady]);'));
+markChange(s.replace(/\}, \[walletConnected\]\);/g, '}, [folderIdentityReady]);'));
 
 if (!s.includes('const [fileFolders, setFileFolders]')) {
   console.error('[patch-live-folder-final-guard] failed to inject fileFolders state');
@@ -143,10 +154,10 @@ if (!s.includes('const folderIdentityReady =')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderIdentityReady');
   process.exit(1);
 }
-if (!s.includes('final network createFolder v2')) {
+if (!s.includes('final network createFolder v3')) {
   console.error('[patch-live-folder-final-guard] failed to patch createFolder');
   process.exit(1);
 }
 
 fs.writeFileSync(file, s, 'utf8');
-console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder v2' : '[patch-live-folder-final-guard] already applied');
+console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder v3' : '[patch-live-folder-final-guard] already applied');
