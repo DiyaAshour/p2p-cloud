@@ -70,6 +70,7 @@ markChange(s.replace(
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);',
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");'
 ));
+markChange(s.replace(/identityLabel !== "Guest" \|\| /g, ''));
 
 if (!s.includes('final logged-out folder guard')) {
   patch(
@@ -99,14 +100,14 @@ markChange(s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\
 patch(
   /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
   `  const createFolder = () => {
-    // final network createFolder v5
+    // final network createFolder v6
     const folder = newFolder.trim();
     console.log('[folders] create clicked', { folder, view, folderIdentityReady, busy });
     if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) {
       toast.error('Folder name is required');
       return;
     }
-    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);
+    const key = (view === "company" || view === "admin") && activeWorkspace ? ("company:" + activeWorkspace.workspaceId + ":folder:" + folder) : ("personal:folder:" + folder);
     const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";
     const nextFolders = { ...fileFolders, [key]: folder };
     const nextParents = { ...folderParents, [folder]: parent };
@@ -132,7 +133,6 @@ const nativeFolderBlock = `          <div className="flex gap-2">
             <button type="button" onMouseDown={(event) => { event.preventDefault(); createFolder(); }} onClick={(event) => { event.preventDefault(); createFolder(); }} className="inline-flex h-10 min-w-12 items-center justify-center rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-500">+</button>
           </div>`;
 
-// Exact one-line block from the known-good UI restored by patch-live-network-folders.
 markChange(s.replace(
   '          <div className="flex gap-2"><Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="New folder" /><Button onClick={createFolder}>+</Button></div>',
   nativeFolderBlock
@@ -167,7 +167,7 @@ if (!s.includes('const folderIdentityReady =')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderIdentityReady');
   process.exit(1);
 }
-if (!s.includes('final network createFolder v5')) {
+if (!s.includes('final network createFolder v6')) {
   console.error('[patch-live-folder-final-guard] failed to patch createFolder');
   process.exit(1);
 }
@@ -175,6 +175,10 @@ if (!s.includes('onMouseDown={(event) => { event.preventDefault(); createFolder(
   console.error('[patch-live-folder-final-guard] failed to patch new folder button');
   process.exit(1);
 }
+if (s.includes('personalFolderKey(') || s.includes('companyFolderKey(') || s.includes('identityLabel !== "Guest"')) {
+  console.error('[patch-live-folder-final-guard] unsafe helper or identityLabel dependency remains');
+  process.exit(1);
+}
 
 fs.writeFileSync(file, s, 'utf8');
-console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and native createFolder v5' : '[patch-live-folder-final-guard] already applied');
+console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and native createFolder v6' : '[patch-live-folder-final-guard] already applied');
