@@ -24,6 +24,7 @@ const DOWNLOAD_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.P2P_DOW
 const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
+function keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }
 const KDF_ALGORITHM = 'pbkdf2-sha256';
 const KDF_ITERATIONS = 310000;
 const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
