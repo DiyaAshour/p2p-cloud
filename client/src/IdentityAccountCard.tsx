@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Wallet } from "lucide-react";
+import { Wallet, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { connectWalletWithWalletConnect } from "./walletConnect";
 
@@ -21,13 +21,15 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
   const [createdCode, setCreatedCode] = useState("");
   const [saved, setSaved] = useState(false);
   const [working, setWorking] = useState(false);
+  const isSignedIn = Boolean(walletConnected);
+  const isSeedIdentity = identityLabel.toLowerCase().startsWith("seed:") || identityLabel.toLowerCase().startsWith("user:") || (!identityLabel.startsWith("0x") && identityLabel !== "Guest");
 
   async function run(task: () => Promise<void>) { setWorking(true); try { await task(); } catch (error) { toast.error(error instanceof Error ? error.message : "Operation failed"); } finally { setWorking(false); } }
 
   const connectWallet = () => run(async () => {
     const session = await connectWalletWithWalletConnect();
     const wallet = await api.invoke<WalletState>("wallet:connect", session);
-    onWallet(wallet); setCreatedCode(""); setSaved(false); await onRefresh();
+    onWallet(wallet); setCreatedCode(""); setSaved(false); setUsername(""); setPassword(""); setRecovery(""); await onRefresh();
   });
 
   const submitAccount = () => run(async () => {
@@ -37,7 +39,7 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
     const channel = mode === "create" ? "seed:create" : mode === "recover" ? "seed:recover" : "seed:login";
     const payload = mode === "recover" ? { username: username.trim(), password: password.trim(), seed: recovery.trim() } : { username: username.trim(), password: password.trim() };
     const wallet = await api.invoke<WalletState & { seed?: string }>(channel, payload);
-    onWallet(wallet); setCreatedCode(wallet.seed || ""); setSaved(false); if (!wallet.seed) { setPassword(""); setRecovery(""); } await onRefresh();
+    onWallet(wallet); setCreatedCode(wallet.seed || ""); setSaved(false); if (!wallet.seed) { setUsername(""); setPassword(""); setRecovery(""); } await onRefresh();
     toast.success(mode === "create" ? "Account created. Save your recovery code." : mode === "recover" ? "Account recovered." : "Signed in.");
   });
 
@@ -46,12 +48,24 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
       <CardContent className="space-y-4 p-5">
         <p className="text-sm text-zinc-400">Identity</p>
         <p className="truncate font-medium">{identityLabel}</p>
-        {walletConnected ? <Button variant="outline" onClick={onDisconnect} disabled={busy || working}>Disconnect</Button> : <div className="space-y-2"><Button className="w-full" onClick={connectWallet} disabled={busy || working}><Wallet className="size-4" />Connect Wallet / QR</Button><p className="text-xs text-zinc-500">Wallet login requires QR/signature verification. Manual address login is disabled.</p></div>}
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="mb-2 text-sm font-medium">Username Account</p>
-          <div className="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-zinc-950 p-1 text-xs">{(["login", "create", "recover"] as const).map((item) => <button key={item} type="button" onClick={() => setMode(item)} className={`rounded-lg px-2 py-2 ${mode === item ? "bg-zinc-800" : "text-zinc-500"}`}>{item}</button>)}</div>
-          <div className="space-y-2"><Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" /><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === "recover" ? "New password" : "Password"} />{mode === "recover" && <Input value={recovery} onChange={(e) => setRecovery(e.target.value)} placeholder="Recovery code" />}{createdCode && <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3"><p className="text-xs font-medium text-amber-200">Recovery code — save it now</p><p className="mt-2 break-all rounded-lg bg-zinc-950 p-2 text-xs">{createdCode}</p><Button className="mt-2 w-full" size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(createdCode).then(() => toast.success("Copied"))}>Copy</Button><label className="mt-3 flex items-start gap-2 text-xs text-amber-100"><Checkbox checked={saved} onCheckedChange={(v) => setSaved(Boolean(v))} /><span>I saved it.</span></label></div>}<Button className="w-full" variant="outline" onClick={submitAccount} disabled={busy || working || Boolean(createdCode && !saved)}>{createdCode && !saved ? "Confirm saved first" : mode === "create" ? "Create Account" : mode === "recover" ? "Recover Account" : "Login"}</Button></div>
-        </div>
+        {isSignedIn ? (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-400">
+              {isSeedIdentity ? <UserRound className="mr-2 inline size-4" /> : <Wallet className="mr-2 inline size-4" />}
+              Active identity: {isSeedIdentity ? "Username Account" : "Wallet"}
+            </div>
+            <Button variant="outline" onClick={onDisconnect} disabled={busy || working}>Disconnect</Button>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2"><Button className="w-full" onClick={connectWallet} disabled={busy || working}><Wallet className="size-4" />Connect Wallet / QR</Button><p className="text-xs text-zinc-500">Wallet login requires QR/signature verification. Manual address login is disabled.</p></div>
+            <div className="border-t border-zinc-800 pt-4">
+              <p className="mb-2 text-sm font-medium">Username Account</p>
+              <div className="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-zinc-950 p-1 text-xs">{(["login", "create", "recover"] as const).map((item) => <button key={item} type="button" onClick={() => setMode(item)} className={`rounded-lg px-2 py-2 ${mode === item ? "bg-zinc-800" : "text-zinc-500"}`}>{item}</button>)}</div>
+              <div className="space-y-2"><Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" /><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === "recover" ? "New password" : "Password"} />{mode === "recover" && <Input value={recovery} onChange={(e) => setRecovery(e.target.value)} placeholder="Recovery code" />}{createdCode && <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3"><p className="text-xs font-medium text-amber-200">Recovery code — save it now</p><p className="mt-2 break-all rounded-lg bg-zinc-950 p-2 text-xs">{createdCode}</p><Button className="mt-2 w-full" size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(createdCode).then(() => toast.success("Copied"))}>Copy</Button><label className="mt-3 flex items-start gap-2 text-xs text-amber-100"><Checkbox checked={saved} onCheckedChange={(v) => setSaved(Boolean(v))} /><span>I saved it.</span></label></div>}<Button className="w-full" variant="outline" onClick={submitAccount} disabled={busy || working || Boolean(createdCode && !saved)}>{createdCode && !saved ? "Confirm saved first" : mode === "create" ? "Create Account" : mode === "recover" ? "Recover Account" : "Login"}</Button></div>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );
