@@ -13,17 +13,43 @@ function patch(regex, replacement, label) {
   if (regex.test(s)) {
     s = s.replace(regex, replacement);
     changed = true;
-  } else {
-    console.warn('[patch-live-folder-final-guard] marker not found:', label);
+    return true;
   }
+  if (label) console.warn('[patch-live-folder-final-guard] marker not found:', label);
+  return false;
+}
+function insertBefore(regex, insertion, label) {
+  if (s.includes(insertion.trim())) return true;
+  if (regex.test(s)) {
+    s = s.replace(regex, insertion + '$&');
+    changed = true;
+    return true;
+  }
+  if (label) console.warn('[patch-live-folder-final-guard] marker not found:', label);
+  return false;
+}
+
+if (!s.includes('const [fileFolders, setFileFolders]')) {
+  insertBefore(
+    /  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/,
+    '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n',
+    'inject missing fileFolders before activeWorkspaceId'
+  );
 }
 
 if (!s.includes('const [folderParents, setFolderParents]')) {
-  patch(
-    /(  const \[fileFolders, setFileFolders\] = useState<Record<string, string>>\(\{\}\);\r?\n)/,
+  const insertedAfterFileFolders = patch(
+    /(  const \[fileFolders, setFileFolders\][^\n]*\r?\n)/,
     '$1  const [folderParents, setFolderParents] = useState<Record<string, string>>({});\n',
-    'fileFolders state'
+    ''
   );
+  if (!insertedAfterFileFolders) {
+    insertBefore(
+      /  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/,
+      '  const [folderParents, setFolderParents] = useState<Record<string, string>>({});\n',
+      'inject folderParents before activeWorkspaceId'
+    );
+  }
 }
 
 if (!s.includes('final logged-out folder guard')) {
@@ -35,13 +61,24 @@ if (!s.includes('final logged-out folder guard')) {
 }
 
 if (!s.includes('final folder state clear guard')) {
-  patch(
+  const addedAfterWorkspaceEffect = patch(
     /(  useEffect\(\(\) => \{\r?\n    localStorage\.setItem\(ACTIVE_WORKSPACE_KEY, JSON\.stringify\(activeWorkspace\?\.workspaceId \|\| ""\)\);\r?\n  \}, \[activeWorkspace\?\.workspaceId\]\);\r?\n)/,
     '$1\n  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected, folderStorageKey]);\n',
-    'active workspace effect'
+    ''
   );
+  if (!addedAfterWorkspaceEffect) {
+    insertBefore(
+      /  const run = async \(work: \(\) => Promise<void>\) => \{\r?\n/,
+      '  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected, folderStorageKey]);\n\n',
+      'insert guard before run'
+    );
+  }
 }
 
+if (!s.includes('const [fileFolders, setFileFolders]')) {
+  console.error('[patch-live-folder-final-guard] failed to inject fileFolders state');
+  process.exit(1);
+}
 if (!s.includes('const [folderParents, setFolderParents]')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderParents state');
   process.exit(1);
