@@ -4,8 +4,9 @@ const { execFileSync } = require('node:child_process');
 try {
   execFileSync(process.execPath, ['scripts/patch-live-network-folders.cjs'], { stdio: 'inherit' });
   execFileSync(process.execPath, ['scripts/patch-seed-identity-actions.cjs'], { stdio: 'inherit' });
+  execFileSync(process.execPath, ['scripts/fix-live-clicks.cjs'], { stdio: 'inherit' });
 } catch (error) {
-  throw new Error(`[verify-runtime-safety] failed to apply live UI safety patches: ${error?.message || error}`);
+  throw new Error(`[verify-runtime-safety] failed to apply final runtime/UI patches: ${error?.message || error}`);
 }
 
 function read(file) {
@@ -36,6 +37,10 @@ function scoped(content, startToken, endTokens = []) {
   return content.slice(start, end);
 }
 
+for (const file of ['electron/main.js', 'electron/main-stable.js', 'electron/main-wrapper.js']) {
+  execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+}
+
 const main = read('electron/main.js');
 const stable = read('electron/main-stable.js');
 const preload = read('electron/preload.cjs');
@@ -48,6 +53,9 @@ for (const [file, content] of [['electron/main.js', main], ['electron/main-stabl
     "ipcMain.handle('p2p:networkSummary'",
     "ipcMain.handle('p2p:uploadFiles'",
     "ipcMain.handle('p2p:updateFile'",
+    'function activeIdentity()',
+    'function isValidIdentity',
+    'function assertVerifiedIdentity()',
     'async function uploadFilePathStreaming',
     'fs.createReadStream(filePath',
     'dialog.showOpenDialog',
@@ -57,8 +65,8 @@ for (const [file, content] of [['electron/main.js', main], ['electron/main-stabl
   ]);
 
   const uploadScope = scoped(content, 'async function uploadFilePathStreaming', ["\nipcMain.handle('p2p:download'", "\nipcMain.handle('p2p:delete'"]);
-  mustContain(file, uploadScope, ['folder', 'payload.folderPath']);
-  mustNotContain(file, uploadScope, ['await file.arrayBuffer()', 'Buffer.concat(buffers)', 'Array.from(plain)']);
+  mustContain(file, uploadScope, ['folder', 'payload.folderPath', 'activeIdentity()', 'assertVerifiedIdentity()']);
+  mustNotContain(file, uploadScope, ['await file.arrayBuffer()', 'Buffer.concat(buffers)', 'Array.from(plain)', 'assertVerifiedWallet();\n  const stat = fs.statSync(filePath)', 'const ownerWallet = activeWallet();']);
 }
 
 mustContain('electron/download-to-path-override.js', downloadOverride, [
@@ -71,7 +79,7 @@ mustContain('electron/download-to-path-override.js', downloadOverride, [
 mustNotContain('electron/download-to-path-override.js', downloadOverride, ['bytes: Array.from', 'Array.from(outputBuffer)', 'Buffer.concat(buffers)']);
 
 mustContain('electron/preload.cjs', preload, ["'p2p:uploadFiles'", "'p2p:downloadToPath'", "'p2p:updateFile'", "'seed:create'", "'wallet:connect'"]);
-mustContain('client/src/NativeP2PAppLive.tsx', live, ['p2p:uploadFiles', 'p2p:downloadToPath', 'p2p:updateFile', 'file.folder', 'identityConnected', 'walletConnected={identityConnected}']);
-mustNotContain('client/src/NativeP2PAppLive.tsx', live, ['file.arrayBuffer()', 'bytes: await', 'if (!walletConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading")']);
+mustContain('client/src/NativeP2PAppLive.tsx', live, ['p2p:uploadFiles', 'p2p:downloadToPath', 'p2p:updateFile', 'file.folder', 'identityConnected', 'walletConnected={identityConnected}', 'activeTab']);
+mustNotContain('client/src/NativeP2PAppLive.tsx', live, ['file.arrayBuffer()', 'bytes: await', 'if (!walletConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading")', '<Tabs value={view === "admin" ? "admin" : "files"}']);
 
 console.log('[verify-runtime-safety] Electron runtime safety checks passed');
