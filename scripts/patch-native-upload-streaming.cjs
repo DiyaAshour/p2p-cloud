@@ -20,6 +20,21 @@ replaceOnce(
   "import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';"
 );
 
+if (!main.includes('function keySourceForIdentity(')) {
+  const anchor = "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';";
+  if (main.includes(anchor)) {
+    main = main.replace(anchor, `${anchor}\nfunction keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }`);
+    changed = true;
+  } else {
+    throw new Error('[patch-native-upload-streaming] cannot find ENCRYPTION_KEY_SOURCE anchor');
+  }
+}
+
+if (main.includes('keySourceForIdentity(')) {
+  main = main.replace(/keySourceForIdentity\([^)]*\)/g, 'ENCRYPTION_KEY_SOURCE');
+  changed = true;
+}
+
 if (!main.includes("ipcMain.handle('p2p:uploadFiles'")) {
   const insertBefore = "\nipcMain.handle('p2p:download'";
   const idx = main.indexOf(insertBefore);
