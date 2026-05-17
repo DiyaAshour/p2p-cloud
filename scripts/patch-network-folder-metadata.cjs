@@ -17,6 +17,12 @@ function replaceRegex(src, regex, replacement, label) {
   if (!regex.test(src)) { warn(label); return src; }
   return src.replace(regex, replacement);
 }
+function replaceBetween(src, start, end, replacement, label) {
+  const a = src.indexOf(start);
+  const b = src.indexOf(end, a === -1 ? 0 : a);
+  if (a === -1 || b === -1 || b <= a) { warn(label); return src; }
+  return src.slice(0, a) + replacement + src.slice(b);
+}
 
 const helperBlock = "function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\nfunction walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND); }\nfunction walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND); }\nfunction folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }\nfunction assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }\nfunction folderIdFromName(name = '') { return crypto.createHash('sha256').update(`${folderOwnerIdentity()}:folder:${String(name || '').trim().toLowerCase()}:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`).digest('hex'); }\nfunction sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\\r\\n\\t]/g, ' ').replace(/\\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }\nfunction findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }\nfunction assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }\n";
 
@@ -28,8 +34,9 @@ if (main) {
 
   if (!main.includes('function walletFileManifests()')) {
     main = main.replace("function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\n", helperBlock);
-  } else {
-    main = main.replace(/function walletManifests\(\) \{ return walletState\.connected \? manifests\.filter\(walletOwnsManifest\)\.filter\(isUsableManifest\) : \[\]; \}\nfunction walletFileManifests\(\) \{[\s\S]*?function assertFolderNotDescendant\(folderId, parentFolderId\) \{[\s\S]*?\}\n/m, helperBlock);
+  } else if (!main.includes('function folderOwnerIdentity()')) {
+    main = replaceBetween(main, 'function walletManifests() {', 'function totalStoredBytesForWallet()', helperBlock, 'upgrade old folder helper block');
+    if (!main.includes('function totalStoredBytesForWallet()')) main += "\n";
   }
 
   main = main.replace("function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }", "function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }");
