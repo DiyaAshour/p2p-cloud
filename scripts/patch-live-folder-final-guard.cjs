@@ -57,28 +57,41 @@ if (!s.includes('const [folderParents, setFolderParents]')) {
   }
 }
 
+// Seed auto-login may have accountId/username/fingerprint even when the old walletConnected boolean is false.
+if (!s.includes('const folderIdentityReady =')) {
+  patch(
+    /(  const walletConnected = Boolean\([\s\S]*?\);\r?\n)/,
+    '$1  const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);\n',
+    'folderIdentityReady after walletConnected'
+  );
+}
+
 if (!s.includes('final logged-out folder guard')) {
   patch(
     /(  const folders = useMemo\(\(\) => \{\r?\n)/,
-    '$1    // final logged-out folder guard\n    if (!walletConnected && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];\n',
+    '$1    // final logged-out folder guard\n    if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];\n',
     'folders memo'
   );
 }
+// Repair older injected guards that used walletConnected.
+s = s.replace('if (!walletConnected && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];', 'if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];');
 
 if (!s.includes('final folder state clear guard')) {
   const addedAfterWorkspaceEffect = patch(
     /(  useEffect\(\(\) => \{\r?\n    localStorage\.setItem\(ACTIVE_WORKSPACE_KEY, JSON\.stringify\(activeWorkspace\?\.workspaceId \|\| ""\)\);\r?\n  \}, \[activeWorkspace\?\.workspaceId\]\);\r?\n)/,
-    '$1\n  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected]);\n',
+    '$1\n  // final folder state clear guard\n  useEffect(() => {\n    if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);\n',
     ''
   );
   if (!addedAfterWorkspaceEffect) {
     insertBefore(
       /  const run = async \(work: \(\) => Promise<void>\) => \{\r?\n/,
-      '  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected]);\n\n',
+      '  // final folder state clear guard\n  useEffect(() => {\n    if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);\n\n',
       'insert guard before run'
     );
   }
 }
+// Repair older injected guard dependencies/conditions.
+s = s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\n      setFolderParents\(\{\}\);\n      setActiveFolder\(ALL_FILES\);\n    \}\n  \}, \[walletConnected\]\);/g, 'if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);');
 
 // Force New folder to work after verify-runtime-safety restores NativeP2PAppLive.
 if (!s.includes('final network createFolder')) {
@@ -88,7 +101,7 @@ if (!s.includes('final network createFolder')) {
     // final network createFolder
     const folder = newFolder.trim();
     if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) return;
-    if (!walletConnected && view !== "company" && view !== "admin") {
+    if (!folderIdentityReady && view !== "company" && view !== "admin") {
       toast.error("Connect wallet or sign in before creating folders");
       return;
     }
@@ -112,9 +125,12 @@ if (!s.includes('final network createFolder')) {
     'createFolder final replace'
   );
 }
+// Repair older createFolder guard.
+s = s.replace('if (!walletConnected && view !== "company" && view !== "admin") {\n      toast.error("Connect wallet or sign in before creating folders");', 'if (!folderIdentityReady && view !== "company" && view !== "admin") {\n      toast.error("Connect wallet or sign in before creating folders");');
 
 // Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
-s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [walletConnected]);');
+s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [folderIdentityReady]);');
+s = s.replace(/\}, \[walletConnected\]\);/g, '}, [folderIdentityReady]);');
 
 if (!s.includes('const [fileFolders, setFileFolders]')) {
   console.error('[patch-live-folder-final-guard] failed to inject fileFolders state');
@@ -122,6 +138,10 @@ if (!s.includes('const [fileFolders, setFileFolders]')) {
 }
 if (!s.includes('const [folderParents, setFolderParents]')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderParents state');
+  process.exit(1);
+}
+if (!s.includes('const folderIdentityReady =')) {
+  console.error('[patch-live-folder-final-guard] failed to inject folderIdentityReady');
   process.exit(1);
 }
 
