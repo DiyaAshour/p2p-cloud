@@ -38,6 +38,14 @@ if (main) {
     "function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }",
     "function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }"
   );
+  main = main.replace(
+    "function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }",
+    "function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletFileManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }"
+  );
+
+  // Repair and file stats must ignore folder manifests.
+  main = main.replace("const own = walletManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);", "const own = walletFileManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);");
+  main = main.replace("ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests();", "ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletFileManifests();");
 
   main = replaceOnce(
     main,
@@ -169,7 +177,7 @@ ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
 
 let preload = read(preloadPath);
 if (preload) {
-  for (const channel of ['p2p:listFolders', 'p2p:createFolder', 'p2p:renameFolder', 'p2p:deleteFolder', 'p2p:moveFolder', 'p2p:moveFile']) {
+  for (const channel of ['p2p:upload', 'p2p:listFolders', 'p2p:createFolder', 'p2p:renameFolder', 'p2p:deleteFolder', 'p2p:moveFolder', 'p2p:moveFile']) {
     if (!preload.includes(`'${channel}'`)) preload = preload.replace("  'p2p:listFiles',\n", `  'p2p:listFiles',\n  '${channel}',\n`);
   }
   write(preloadPath, preload);
