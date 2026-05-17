@@ -24,6 +24,10 @@ for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   if (m.includes(oldLine)) m = m.replace(oldLine, newLine);
   m = m.replace("ipcMain.handle('wallet:status', async () => walletSummary());", "ipcMain.handle('wallet:status', async () => { loadWallet(); return walletSummary(); });");
   m = m.replace("ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return [];", "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { loadWallet(); if (!walletState.connected || !walletState.verified) return [];");
+  if (m.includes('isVerifiedIdentity') && !m.includes('function isVerifiedIdentity()')) {
+    m = m.replace('function assertVerifiedWallet()', "function isVerifiedIdentity() { return Boolean(walletState.connected && walletState.verified && (isValidWallet(walletState.address) || walletState.authMode === 'seed' || String(walletState.accountId || '').startsWith('seed:'))); }\nfunction assertVerifiedIdentity() { if (!isVerifiedIdentity()) throw new Error('Verified identity required. Connect wallet or sign in first.'); }\nfunction assertVerifiedWallet()");
+  }
+  m = m.replaceAll('if (!isVerifiedIdentity()) throw new Error', 'assertVerifiedIdentity(); if (false) throw new Error');
   fs.writeFileSync(file, m, 'utf8');
-  console.log(`[fix-live-clicks] patched ${file} disconnect cleanup and seed session reload`);
+  console.log(`[fix-live-clicks] patched ${file} disconnect/session/identity helpers`);
 }
