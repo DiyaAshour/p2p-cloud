@@ -10,8 +10,12 @@ if (!fs.existsSync(livePath)) {
 let src = fs.readFileSync(livePath, 'utf8');
 const before = src;
 
-src = src.replace(
-  '  const walletConnected = Boolean(wallet?.connected && (wallet.accountId || wallet.address));\n  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";',
+function forceReplace(regex, replacement) {
+  src = src.replace(regex, replacement);
+}
+
+forceReplace(
+  /  const walletConnected = Boolean\(wallet\?\.connected && \(wallet\.accountId \|\| wallet\.address\)\);\r?\n  const identityLabel = wallet\?\.authMode === "seed" \? `Seed: \$\{wallet\.username \|\| short\(wallet\.accountId \|\| wallet\.address\)\}` : walletConnected \? short\(wallet\?\.address \|\| wallet\?\.accountId \|\| ""\) : "Guest";/,
   '  const walletConnected = Boolean(wallet?.connected && wallet?.authMode !== "seed" && (wallet.accountId || wallet.address));\n  const seedConnected = Boolean(wallet?.authMode === "seed" && (wallet.accountId || wallet.username || wallet.seedFingerprint));\n  const identityConnected = Boolean(walletConnected || seedConnected);\n  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";'
 );
 
@@ -28,7 +32,7 @@ src = src.replace(/if \(!walletConnected\) throw new Error\("Connect wallet befo
 src = src.replace(/disabled=\{busy \|\| !walletConnected\}>Save to My Drive/g, 'disabled={busy || !identityConnected}>Save to My Drive');
 
 src = src.replace(
-  '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
+  /  const disconnectWallet = \(\) => run\(async \(\) => \{\r?\n    setWallet\(await api\.invoke<WalletState>\("wallet:disconnect"\)\);\r?\n    await refresh\(\);\r?\n  \}\);/,
   '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
 );
 
@@ -36,6 +40,13 @@ src = src.replace(
   '          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={walletConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />',
   '          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={identityConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />'
 );
+
+if (!src.includes('if (!identityConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");')) {
+  console.warn('[seed-identity-actions] warning: upload guard was not found/replaced');
+}
+if (!src.includes('walletConnected={identityConnected}')) {
+  console.warn('[seed-identity-actions] warning: IdentityAccountCard prop was not found/replaced');
+}
 
 if (src !== before) {
   fs.writeFileSync(livePath, src, 'utf8');
