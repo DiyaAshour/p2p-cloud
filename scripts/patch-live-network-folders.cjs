@@ -22,9 +22,25 @@ function restoreSafeLiveIfNeeded() {
   }
 }
 
+function forceIdentityAccountCard(src) {
+  if (!src.includes('import IdentityAccountCard from "./IdentityAccountCard";')) {
+    src = src.replace('import { toast } from "sonner";', 'import { toast } from "sonner";\nimport IdentityAccountCard from "./IdentityAccountCard";');
+  }
+  if (src.includes('<IdentityAccountCard api={api}')) return src;
+  const replacement = '          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={walletConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />';
+  const exactOld = `<Card className="rounded-2xl border-zinc-800 bg-zinc-900">\n            <CardContent className="space-y-4 p-5">\n              <p className="text-sm text-zinc-400">Identity</p>\n              <p className="truncate font-medium">{identityLabel}</p>\n              {walletConnected ? (\n                <Button variant="outline" onClick={disconnectWallet} disabled={busy}>Disconnect</Button>\n              ) : (\n                <Button onClick={connectWallet} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button>\n              )}\n            </CardContent>\n          </Card>`;
+  if (src.includes(exactOld)) return src.replace(exactOld, replacement.trimEnd());
+  const broad = /          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">\r?\n            <CardContent className="space-y-4 p-5">\r?\n              <p className="text-sm text-zinc-400">Identity<\/p>[\s\S]*?<Wallet className="size-4" \/>Connect Wallet[\s\S]*?            <\/CardContent>\r?\n          <\/Card>/;
+  if (broad.test(src)) return src.replace(broad, replacement);
+  console.warn('[live-network-folders] could not find old Identity card; leaving current identity block unchanged');
+  return src;
+}
+
 function patch() {
   let src = fs.readFileSync(livePath, 'utf8');
   const before = src;
+
+  src = forceIdentityAccountCard(src);
 
   if (!src.includes('| "p2p:updateFile"')) {
     src = src.replace('  | "p2p:prepareProof"\n', '  | "p2p:prepareProof"\n  | "p2p:updateFile"\n');
@@ -60,7 +76,7 @@ function patch() {
 
   if (src !== before) {
     fs.writeFileSync(livePath, src, 'utf8');
-    console.log('[live-network-folders] patched My Drive folders to use network manifests');
+    console.log('[live-network-folders] patched My Drive folders and forced mutual-exclusive Identity card');
   } else {
     console.log('[live-network-folders] already patched');
   }
