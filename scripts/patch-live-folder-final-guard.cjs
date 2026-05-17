@@ -32,7 +32,6 @@ function insertBefore(regex, insertion, label) {
   return false;
 }
 
-// Keep IPC channel typing compatible with the final folder action.
 if (!s.includes('| "drive:saveFolders"')) {
   patch(/(  \| "wallet:disconnect"\r?\n)/, '$1  | "drive:getFolders"\n  | "drive:saveFolders"\n  | "p2p:updateFile"\n', 'channel union');
 }
@@ -60,7 +59,6 @@ if (!s.includes('const [folderParents, setFolderParents]')) {
   }
 }
 
-// Seed auto-login may have accountId/username/fingerprint even when the old walletConnected boolean is false.
 if (!s.includes('const folderIdentityReady =')) {
   patch(
     /(  const walletConnected = Boolean\([\s\S]*?\);\r?\n)/,
@@ -68,7 +66,6 @@ if (!s.includes('const folderIdentityReady =')) {
     'folderIdentityReady after walletConnected'
   );
 }
-// Strengthen older injected expression.
 markChange(s.replace(
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);',
   'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");'
@@ -81,7 +78,6 @@ if (!s.includes('final logged-out folder guard')) {
     'folders memo'
   );
 }
-// Repair older injected guards that used walletConnected.
 markChange(s.replace('if (!walletConnected && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];', 'if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];'));
 
 if (!s.includes('final folder state clear guard')) {
@@ -98,15 +94,12 @@ if (!s.includes('final folder state clear guard')) {
     );
   }
 }
-// Repair older injected guard dependencies/conditions.
 markChange(s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\n      setFolderParents\(\{\}\);\n      setActiveFolder\(ALL_FILES\);\n    \}\n  \}, \[walletConnected\]\);/g, 'if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);'));
 
-// Force New folder to work after verify-runtime-safety restores NativeP2PAppLive.
-// Always replace it, even if a previous final marker exists, because earlier final versions may be stale.
 patch(
   /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
   `  const createFolder = () => {
-    // final network createFolder v3
+    // final network createFolder v4
     const folder = newFolder.trim();
     console.log('[folders] create clicked', { folder, view, folderIdentityReady, busy });
     if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) {
@@ -134,11 +127,25 @@ patch(
   'createFolder final replace'
 );
 
-// Make the + folder button clickable even when startup refresh leaves busy=true.
+// Replace the New folder input/button block itself with a native button that cannot be disabled by busy.
+const nativeFolderBlock = `          <div className="flex gap-2">
+            <Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); createFolder(); } }} placeholder="New folder" />
+            <button type="button" onMouseDown={(event) => { event.preventDefault(); createFolder(); }} onClick={(event) => { event.preventDefault(); createFolder(); }} className="inline-flex h-10 min-w-12 items-center justify-center rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-500">+</button>
+          </div>`;
+if (!s.includes('onMouseDown={(event) => { event.preventDefault(); createFolder(); }}')) {
+  const before = s;
+  s = s.replace(
+    /          <div className="flex gap-2">\r?\n\s*<Input[\s\S]*?placeholder="New folder"[\s\S]*?\/?>\r?\n\s*<Button[\s\S]*?>\+<\/Button>\r?\n\s*<\/div>/,
+    nativeFolderBlock
+  );
+  if (s !== before) changed = true;
+}
+// Fallback: remove disabled busy from any remaining + Button for folder creation.
+markChange(s.replace(/<Button([^>]*?)onClick=\{createFolder\}([^>]*?)disabled=\{busy\}([^>]*?)>\+<\/Button>/g, '<Button$1onClick={(event) => { event.preventDefault(); createFolder(); }}$2$3>+</Button>'));
+markChange(s.replace(/<Button([^>]*?)disabled=\{busy\}([^>]*?)onClick=\{createFolder\}([^>]*?)>\+<\/Button>/g, '<Button$1$2onClick={(event) => { event.preventDefault(); createFolder(); }}$3>+</Button>'));
 markChange(s.replace(/<Button onClick=\{createFolder\} disabled=\{busy\}>\+<\/Button>/g, '<Button onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>'));
 markChange(s.replace(/<Button onClick=\{createFolder\}>\+<\/Button>/g, '<Button onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>'));
 
-// Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
 markChange(s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [folderIdentityReady]);'));
 markChange(s.replace(/\}, \[walletConnected\]\);/g, '}, [folderIdentityReady]);'));
 
@@ -154,10 +161,10 @@ if (!s.includes('const folderIdentityReady =')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderIdentityReady');
   process.exit(1);
 }
-if (!s.includes('final network createFolder v3')) {
+if (!s.includes('final network createFolder v4')) {
   console.error('[patch-live-folder-final-guard] failed to patch createFolder');
   process.exit(1);
 }
 
 fs.writeFileSync(file, s, 'utf8');
-console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder v3' : '[patch-live-folder-final-guard] already applied');
+console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and native createFolder v4' : '[patch-live-folder-final-guard] already applied');
