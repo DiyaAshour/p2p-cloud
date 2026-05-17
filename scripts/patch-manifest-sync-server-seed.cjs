@@ -1,0 +1,11 @@
+const fs = require('node:fs');
+const file = 'server/manifest-sync.js';
+if (!fs.existsSync(file)) process.exit(0);
+let s = fs.readFileSync(file, 'utf8');
+const before = s;
+s = s.replace("function normalizeWallet(address = '') {\n  return String(address || '').trim().toLowerCase();\n}\n\nfunction validWallet(address = '') {\n  return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));\n}", "function normalizeIdentity(value = '') {\n  return String(value || '').trim().toLowerCase();\n}\n\nfunction normalizeWallet(address = '') {\n  return normalizeIdentity(address);\n}\n\nfunction validWallet(address = '') {\n  return /^0x[a-f0-9]{40}$/.test(normalizeIdentity(address));\n}\n\nfunction validIdentity(identity = '') {\n  const value = normalizeIdentity(identity);\n  return validWallet(value) || /^seed:[a-f0-9]{16,128}$/.test(value);\n}");
+s = s.replaceAll('normalizeWallet(manifest.ownerWallet)', 'normalizeIdentity(manifest.ownerWallet)');
+s = s.replaceAll('const wallet = normalizeWallet(parts[1]);\n      if (!validWallet(wallet)) return send(res, 400, { ok: false, error: \'Invalid wallet address\' });', 'const wallet = normalizeIdentity(parts[1]);\n      if (!validIdentity(wallet)) return send(res, 400, { ok: false, error: \'Invalid wallet or seed identity\' });');
+s = s.replaceAll('url.pathname.split(\'/\').filter(Boolean)', 'url.pathname.split(\'/\').filter(Boolean).map(decodeURIComponent)');
+if (s !== before) fs.writeFileSync(file, s, 'utf8');
+console.log(s === before ? '[manifest-sync-server-seed] already patched' : '[manifest-sync-server-seed] patched server/manifest-sync.js for seed identities');
