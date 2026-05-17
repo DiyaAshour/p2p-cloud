@@ -9,7 +9,7 @@ function read(file) { return fs.existsSync(file) ? fs.readFileSync(file, 'utf8')
 function write(file, value) { fs.writeFileSync(file, value, 'utf8'); }
 
 function hasP2PHandlers(source) {
-  return source.includes("ipcMain.handle('p2p:start'") && source.includes("ipcMain.handle('p2p:networkSummary'");
+  return source.includes("ipcMain.handle('p2p:start'") && source.includes("ipcMain.handle('p2p:networkSummary'") && source.includes("ipcMain.handle('p2p:uploadFiles'") && source.includes("ipcMain.handle('p2p:updateFile'");
 }
 
 function patchAutoRepairStartup(source) {
@@ -46,7 +46,7 @@ if (!fs.existsSync(mainPath)) {
 
 let main = read(mainPath);
 if (!hasP2PHandlers(main)) {
-  console.warn('[stable-root-cause] electron/main.js lacks p2p handlers; leaving stable unchanged');
+  console.warn('[stable-root-cause] electron/main.js lacks required p2p handlers; leaving stable unchanged');
   process.exit(0);
 }
 
