@@ -50,8 +50,27 @@ function isBadEncryptedManifest(manifest = {}) {
   return manifest?.isEncrypted === true && !hasEncryptionMetadata(manifest);
 }
 
+function isDriveMetadataManifest(manifest = {}) {
+  return manifest?.type === 'drive-folders-v1' || manifest?.hash === '__drive_folders_v1__';
+}
+
 function sanitizePulledManifest(manifest = {}) {
   if (!manifest || typeof manifest !== 'object') return null;
+  if (isDriveMetadataManifest(manifest)) {
+    if (!manifest.ownerWallet) return null;
+    return {
+      ...manifest,
+      type: 'drive-folders-v1',
+      hash: '__drive_folders_v1__',
+      name: '__drive_folders_v1__',
+      ownerWallet: normalizeIdentity(manifest.ownerWallet),
+      isEncrypted: false,
+      visibility: 'private',
+      isPublic: false,
+      folders: Array.isArray(manifest.folders) ? manifest.folders : [],
+      fileFolders: manifest.fileFolders && typeof manifest.fileFolders === 'object' ? manifest.fileFolders : {},
+    };
+  }
   if (!manifest.hash || !manifest.ownerWallet) return null;
   if (isBadEncryptedManifest(manifest)) return null;
   return {
@@ -81,7 +100,7 @@ export async function pullWalletManifests(walletAddress) {
     if (manifest) clean.push(manifest);
     else skipped += 1;
   }
-  if (skipped) console.warn(`[manifest-sync] skipped ${skipped} invalid encrypted manifest(s) from remote`);
+  if (skipped) console.warn(`[manifest-sync] skipped ${skipped} invalid manifest(s) from remote`);
   return clean;
 }
 
@@ -91,8 +110,23 @@ export async function pushWalletManifest(manifest = {}) {
   if (isBadEncryptedManifest(manifest)) {
     throw new Error('Refusing to sync encrypted manifest without encryption metadata');
   }
+  const isMetadata = isDriveMetadataManifest(manifest);
   const payload = {
-    manifest: {
+    manifest: isMetadata ? {
+      ...manifest,
+      type: 'drive-folders-v1',
+      hash: '__drive_folders_v1__',
+      name: '__drive_folders_v1__',
+      ownerWallet: identity,
+      isEncrypted: false,
+      visibility: 'private',
+      isPublic: false,
+      size: 0,
+      storedSize: 0,
+      totalChunks: 0,
+      chunks: [],
+      updatedAt: new Date().toISOString(),
+    } : {
       ...manifest,
       ownerWallet: identity,
       visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),
