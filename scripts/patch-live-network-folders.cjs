@@ -6,11 +6,17 @@ const root = process.cwd();
 const livePath = path.join(root, 'client', 'src', 'NativeP2PAppLive.tsx');
 const safeRef = '9d64d69b05a89ca28c6677162230b5f1ef2fa7c9';
 
-function restoreSafeLive() {
+function isProbablyBroken(src) {
+  return !src.includes('export default function NativeP2PAppLive') || !src.includes('<main className=') || !src.includes('</main>') || !src.includes('</div>') || src.length < 25000;
+}
+
+function restoreSafeLiveIfNeeded() {
+  const current = fs.existsSync(livePath) ? fs.readFileSync(livePath, 'utf8') : '';
+  if (!isProbablyBroken(current)) return;
   try {
     const content = execFileSync('git', ['show', `${safeRef}:client/src/NativeP2PAppLive.tsx`], { cwd: root, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
     fs.writeFileSync(livePath, content, 'utf8');
-    console.log('[live-network-folders] restored NativeP2PAppLive.tsx from known-good UI commit');
+    console.log('[live-network-folders] restored NativeP2PAppLive.tsx from known-good UI commit because current file was truncated');
   } catch (error) {
     console.warn('[live-network-folders] could not restore known-good UI:', error?.message || error);
   }
@@ -60,5 +66,5 @@ function patch() {
   }
 }
 
-restoreSafeLive();
+restoreSafeLiveIfNeeded();
 patch();
