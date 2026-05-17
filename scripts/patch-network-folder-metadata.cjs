@@ -45,19 +45,23 @@ if (main) {
   main = main.replace("const own = walletManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);", "const own = walletFileManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);");
   main = main.replace("ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests();", "ipcMain.handle('p2p:repair', async () => { assertFolderIdentity(); const node = ensureTransport({}); const own = walletFileManifests();");
 
-  main = replaceOnce(
-    main,
-    "  const own = walletManifests();\n  const connectedPeers = node.connectedPeerIds?.() || [];\n  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };\n}",
-    "  const own = walletFileManifests();\n  const folders = walletFolderManifests();\n  const connectedPeers = node.connectedPeerIds?.() || [];\n  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, totalFolders: folders.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };\n}",
-    'networkSummary file/folder split'
-  );
+  if (!main.includes('totalFolders: folders.length')) {
+    main = replaceOnce(
+      main,
+      "  const own = walletManifests();\n  const connectedPeers = node.connectedPeerIds?.() || [];\n  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };\n}",
+      "  const own = walletFileManifests();\n  const folders = walletFolderManifests();\n  const connectedPeers = node.connectedPeerIds?.() || [];\n  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, totalFolders: folders.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };\n}",
+      'networkSummary file/folder split'
+    );
+  }
 
-  main = replaceOnce(
-    main,
-    "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });",
-    "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletFileManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || ''].some((v) => String(v || '').toLowerCase().includes(query))); });",
-    'listFiles file-only'
-  );
+  if (!main.includes("const own = walletFileManifests(); if (!query) return own;")) {
+    main = replaceOnce(
+      main,
+      "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });",
+      "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletFileManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || ''].some((v) => String(v || '').toLowerCase().includes(query))); });",
+      'listFiles file-only'
+    );
+  }
 
   if (!main.includes("ipcMain.handle('p2p:listFolders'")) {
     const handlers = `
@@ -163,14 +167,18 @@ ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
     main = main.replace("ipcMain.handle('p2p:listFiles'", `${handlers}\nipcMain.handle('p2p:listFiles'`);
   }
 
-  main = replaceOnce(
-    main,
-    "const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };",
-    "const targetFolderId = String(payload.folderId || '');\n  const targetFolder = targetFolderId ? findFolderById(targetFolderId) : null;\n  if (targetFolderId && !targetFolder) throw new Error('Target folder not found');\n  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', folderId: targetFolderId, folderName: targetFolder?.name || '', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };",
-    'upload folder metadata'
-  );
+  if (!main.includes('folderId: targetFolderId')) {
+    main = replaceOnce(
+      main,
+      "const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };",
+      "const targetFolderId = String(payload.folderId || '');\n  const targetFolder = targetFolderId ? findFolderById(targetFolderId) : null;\n  if (targetFolderId && !targetFolder) throw new Error('Target folder not found');\n  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', folderId: targetFolderId, folderName: targetFolder?.name || '', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };",
+      'upload folder metadata'
+    );
+  }
 
-  main = main.replace("      name: displayName,\n      folder,\n      size: stat.size,", "      name: displayName,\n      folder,\n      folderId: String(payload.folderId || ''),\n      folderName: String(payload.folderName || ''),\n      size: stat.size,");
+  if (!main.includes('folderId: String(payload.folderId ||')) {
+    main = main.replace("      name: displayName,\n      folder,\n      size: stat.size,", "      name: displayName,\n      folder,\n      folderId: String(payload.folderId || ''),\n      folderName: String(payload.folderName || ''),\n      size: stat.size,");
+  }
 
   write(mainPath, main);
 }
