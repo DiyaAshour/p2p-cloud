@@ -1,4 +1,11 @@
 const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
+
+try {
+  execFileSync(process.execPath, ['scripts/patch-live-network-folders.cjs'], { stdio: 'inherit' });
+} catch (error) {
+  throw new Error(`[verify-runtime-safety] failed to apply live network folder patch: ${error?.message || error}`);
+}
 
 function read(file) {
   if (!fs.existsSync(file)) throw new Error(`Missing required file: ${file}`);
