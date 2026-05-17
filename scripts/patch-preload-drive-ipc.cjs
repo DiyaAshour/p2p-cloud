@@ -1,44 +1,49 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const preloadPath = path.join(process.cwd(), 'electron', 'preload.cjs');
-if (!fs.existsSync(preloadPath)) {
-  console.error('[patch-preload-drive-ipc] missing electron/preload.cjs');
-  process.exit(1);
-}
+const preloadFiles = [
+  path.join(process.cwd(), 'electron', 'preload.cjs'),
+  path.join(process.cwd(), 'electron', 'preload.js'),
+];
 
-let src = fs.readFileSync(preloadPath, 'utf8');
-const before = src;
+function patchPreload(preloadPath) {
+  if (!fs.existsSync(preloadPath)) return { skipped: true, file: preloadPath };
+  let src = fs.readFileSync(preloadPath, 'utf8');
+  const before = src;
 
-for (const channel of ['drive:getFolders', 'drive:saveFolders']) {
-  if (!src.includes("'" + channel + "'")) {
-    src = src.replace("  'p2p:listFiles',\n", "  'p2p:listFiles',\n  '" + channel + "',\n");
+  for (const channel of ['drive:getFolders', 'drive:saveFolders']) {
+    if (!src.includes("'" + channel + "'")) {
+      src = src.replace("  'p2p:listFiles',\n", "  'p2p:listFiles',\n  '" + channel + "',\n");
+    }
   }
+
+  if (!src.includes("channel.startsWith('drive:')")) {
+    if (src.includes("channel.startsWith('company:')")) {
+      src = src.replace(
+        "channel.startsWith('company:')",
+        "channel.startsWith('company:') || channel.startsWith('drive:')"
+      );
+    }
+  }
+
+  if (!src.includes("'drive:saveFolders'")) {
+    throw new Error(preloadPath + ': failed to allow drive:saveFolders');
+  }
+  if (!src.includes("'drive:getFolders'")) {
+    throw new Error(preloadPath + ': failed to allow drive:getFolders');
+  }
+
+  if (src !== before) {
+    fs.writeFileSync(preloadPath, src, 'utf8');
+    return { changed: true, file: preloadPath };
+  }
+  return { changed: false, file: preloadPath };
 }
 
-if (!src.includes("channel.startsWith('drive:')")) {
-  src = src.replace(
-    "channel.startsWith('company:')",
-    "channel.startsWith('company:') || channel.startsWith('drive:')"
-  );
+let changed = false;
+for (const file of preloadFiles) {
+  const result = patchPreload(file);
+  if (result.changed) changed = true;
 }
 
-if (!src.includes("'drive:saveFolders'")) {
-  console.error('[patch-preload-drive-ipc] failed to allow drive:saveFolders');
-  process.exit(1);
-}
-if (!src.includes("'drive:getFolders'")) {
-  console.error('[patch-preload-drive-ipc] failed to allow drive:getFolders');
-  process.exit(1);
-}
-if (!src.includes("channel.startsWith('drive:')")) {
-  console.error('[patch-preload-drive-ipc] failed to add drive retry');
-  process.exit(1);
-}
-
-if (src !== before) {
-  fs.writeFileSync(preloadPath, src, 'utf8');
-  console.log('[patch-preload-drive-ipc] drive IPC allowed in preload');
-} else {
-  console.log('[patch-preload-drive-ipc] preload already allows drive IPC');
-}
+console.log(changed ? '[patch-preload-drive-ipc] drive IPC allowed in preload variants' : '[patch-preload-drive-ipc] preload variants already allow drive IPC');
