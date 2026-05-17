@@ -29,6 +29,15 @@ function removeIdentityHelpers(source) {
   return next;
 }
 
+const oldDeriveDriveKeyBlock = [
+  'function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {',
+  '  const wallet = normalizeWallet(ownerWallet);',
+  "  if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');",
+  '  const password = validateDrivePassword(drivePassword);',
+  "  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');",
+  "  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');",
+  '}'
+].join('\n');
 const deriveDriveKeyReplacement = [
   'function deriveDriveKey({ ownerWallet = activeIdentity(), drivePassword, salt }) {',
   '  const wallet = normalizeIdentity(ownerWallet || activeIdentity());',
@@ -49,10 +58,8 @@ for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   m = m.replace("ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return [];", "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { loadWallet(); if (!walletState.connected || !walletState.verified) return [];");
   m = removeIdentityHelpers(m);
   m = m.replace('function assertVerifiedWallet()', `${identityHelpers}\nfunction assertVerifiedWallet()`);
-  m = m.replace(/function deriveDriveKey\([^)]*\) \{[\s\S]*?return crypto\.pbkdf2Sync\([^;]+;\n\}/m, deriveDriveKeyReplacement);
-  if (!m.includes("function deriveDriveKey({ ownerWallet = activeIdentity()")) {
-    m = m.replace("function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {\n  const wallet = normalizeWallet(ownerWallet);\n  if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');", "function deriveDriveKey({ ownerWallet = activeIdentity(), drivePassword, salt }) {\n  const wallet = normalizeIdentity(ownerWallet || activeIdentity());\n  if (!isValidIdentity(wallet)) throw new Error('Valid wallet or seed identity required for private file encryption.');");
-  }
+  if (m.includes(oldDeriveDriveKeyBlock)) m = m.replace(oldDeriveDriveKeyBlock, deriveDriveKeyReplacement);
+  m = m.replace(/function deriveDriveKey\(\{[\s\S]*?\n\}\n\nfunction encryptPrivateBuffer/m, `${deriveDriveKeyReplacement}\n\nfunction encryptPrivateBuffer`);
   m = m.replace(/function encryptPrivateBuffer\(plainBuffer, ownerWallet = activeWallet\(\), drivePassword\)/g, 'function encryptPrivateBuffer(plainBuffer, ownerWallet = activeIdentity(), drivePassword)');
   m = m.replace('function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }', 'function walletOwnsManifest(manifest) { return normalizeIdentity(manifest.ownerWallet) === activeIdentity(); }');
   m = m.replace('function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }', 'function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; const identity = activeIdentity(); return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, accountId: identity || walletState.accountId || walletState.address, address: isValidWallet(identity) ? identity : walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }');
