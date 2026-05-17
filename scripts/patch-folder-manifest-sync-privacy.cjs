@@ -12,8 +12,9 @@ const before = src;
 
 function warn(label) { console.warn('[patch-folder-manifest-sync-privacy] skipped:', label); }
 function replaceOnce(search, replacement, label) {
-  if (!src.includes(search)) { warn(label); return; }
+  if (!src.includes(search)) { warn(label); return false; }
   src = src.replace(search, replacement);
+  return true;
 }
 
 if (!src.includes('function isFolderManifest')) {
@@ -24,7 +25,7 @@ if (!src.includes('function isFolderManifest')) {
   );
 }
 
-if (!src.includes('kind: \'folder\',')) {
+if (!src.includes('if (isFolderManifest(manifest)) {')) {
   replaceOnce(
     "  if (!manifest.hash || !manifest.ownerWallet) return null;\n  if (isBadEncryptedManifest(manifest)) return null;\n  return {",
     "  if (isFolderManifest(manifest)) {\n    if (!manifest.hash || !manifest.ownerWallet || !manifest.folderId) return null;\n    return {\n      ...manifest,\n      kind: 'folder',\n      isFolder: true,\n      ownerWallet: normalizeIdentity(manifest.ownerWallet),\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      replicas: Array.isArray(manifest.replicas) ? manifest.replicas : [],\n    };\n  }\n  if (!manifest.hash || !manifest.ownerWallet) return null;\n  if (isBadEncryptedManifest(manifest)) return null;\n  return {",
@@ -40,11 +41,13 @@ if (!src.includes('const isFolder = isFolderManifest(manifest);')) {
   );
 }
 
-replaceOnce(
-  "    manifest: isMetadata ? {\n      ...manifest,\n      type: 'drive-folders-v1',\n      hash: '__drive_folders_v1__',\n      name: '__drive_folders_v1__',\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      updatedAt: new Date().toISOString(),\n    } : {\n      ...manifest,\n      ownerWallet: identity,\n      visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),\n      isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,\n    },",
-  "    manifest: isMetadata ? {\n      ...manifest,\n      type: 'drive-folders-v1',\n      hash: '__drive_folders_v1__',\n      name: '__drive_folders_v1__',\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      updatedAt: new Date().toISOString(),\n    } : isFolder ? {\n      ...manifest,\n      kind: 'folder',\n      isFolder: true,\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      replicas: Array.isArray(manifest.replicas) ? manifest.replicas : [],\n      updatedAt: manifest.updatedAt || new Date().toISOString(),\n    } : {\n      ...manifest,\n      ownerWallet: identity,\n      visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),\n      isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,\n    },",
-  'push folder manifest as private'
-);
+if (!src.includes('} : isFolder ? {')) {
+  replaceOnce(
+    "    manifest: isMetadata ? {\n      ...manifest,\n      type: 'drive-folders-v1',\n      hash: '__drive_folders_v1__',\n      name: '__drive_folders_v1__',\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      updatedAt: new Date().toISOString(),\n    } : {\n      ...manifest,\n      ownerWallet: identity,\n      visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),\n      isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,\n    },",
+    "    manifest: isMetadata ? {\n      ...manifest,\n      type: 'drive-folders-v1',\n      hash: '__drive_folders_v1__',\n      name: '__drive_folders_v1__',\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      updatedAt: new Date().toISOString(),\n    } : isFolder ? {\n      ...manifest,\n      kind: 'folder',\n      isFolder: true,\n      ownerWallet: identity,\n      isEncrypted: false,\n      visibility: 'private',\n      isPublic: false,\n      size: 0,\n      storedSize: 0,\n      totalChunks: 0,\n      chunks: [],\n      replicas: Array.isArray(manifest.replicas) ? manifest.replicas : [],\n      updatedAt: manifest.updatedAt || new Date().toISOString(),\n    } : {\n      ...manifest,\n      ownerWallet: identity,\n      visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),\n      isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,\n    },",
+    'push folder manifest as private'
+  );
+}
 
 if (src !== before) {
   fs.writeFileSync(filePath, src, 'utf8');
