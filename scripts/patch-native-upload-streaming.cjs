@@ -26,6 +26,10 @@ if (!main.includes("ipcMain.handle('p2p:uploadFiles'")) {
   if (idx === -1) throw new Error('[patch-native-upload-streaming] cannot find insertion point before p2p:download');
 
   const handler = `
+function normalizeFolderPath(folder = '') {
+  return String(folder || '').replace(/\\\\/g, '/').split('/').map((part) => part.trim()).filter(Boolean).join('/');
+}
+
 async function uploadFilePathStreaming(filePath, payload = {}) {
   const node = ensureTransport({});
   assertVerifiedWallet();
@@ -36,7 +40,9 @@ async function uploadFilePathStreaming(filePath, payload = {}) {
   const ownerWallet = activeWallet();
   const privateFile = payload.isEncrypted !== false;
   const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
-  const displayName = path.join(String(payload.folderPath || ''), path.basename(filePath)).replace(/\\\\/g, '/').replace(/^\\/+/, '');
+  const folder = normalizeFolderPath(payload.folderPath || '');
+  const baseName = path.basename(filePath);
+  const displayName = folder ? path.join(folder, baseName).replace(/\\\\/g, '/') : baseName;
   const mimeType = payload.mimeType || 'application/octet-stream';
   const uploadConcurrency = clampConcurrency(payload.uploadConcurrency, UPLOAD_CONCURRENCY, 8);
 
@@ -146,11 +152,13 @@ async function uploadFilePathStreaming(filePath, payload = {}) {
     const manifest = {
       id: ownerWallet + ':' + storedHash.digest('hex'),
       name: displayName,
+      folder,
       size: stat.size,
       storedSize,
       hash: null,
       rootHash: tree.root,
       uploadedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       isEncrypted: privateFile,
       visibility: privateFile ? 'private' : 'public',
       isPublic: !privateFile,
@@ -192,14 +200,65 @@ ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
   for (const filePath of result.filePaths) files.push(await uploadFilePathStreaming(filePath, payload));
   return { ok: true, files, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
 });
+
+ipcMain.handle('p2p:updateFile', async (_event, payload = {}) => {
+  assertVerifiedWallet();
+  await syncPull();
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this wallet');
+  if (!walletOwnsManifest(manifest)) throw new Error('Only the owner can update this file metadata');
+  const patch = payload.patch || {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'folder')) manifest.folder = normalizeFolderPath(patch.folder || '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'name')) manifest.name = String(patch.name || manifest.name).trim() || manifest.name;
+  manifest.updatedAt = new Date().toISOString();
+  manifests = manifests.map((m) => (walletOwnsManifest(m) && m.hash === manifest.hash ? manifest : m));
+  persistManifests();
+  await syncPush(manifest);
+  return { ok: true, file: manifest, summary: networkSummary() };
+});
 `;
   main = main.slice(0, idx) + handler + main.slice(idx);
   changed = true;
 }
 
+if (main.includes("ipcMain.handle('p2p:uploadFiles'") && !main.includes("ipcMain.handle('p2p:updateFile'")) {
+  const insertBefore = "\nipcMain.handle('p2p:download'";
+  const idx = main.indexOf(insertBefore);
+  if (idx !== -1) {
+    const updateHandler = `
+function normalizeFolderPath(folder = '') {
+  return String(folder || '').replace(/\\\\/g, '/').split('/').map((part) => part.trim()).filter(Boolean).join('/');
+}
+
+ipcMain.handle('p2p:updateFile', async (_event, payload = {}) => {
+  assertVerifiedWallet();
+  await syncPull();
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this wallet');
+  if (!walletOwnsManifest(manifest)) throw new Error('Only the owner can update this file metadata');
+  const patch = payload.patch || {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'folder')) manifest.folder = normalizeFolderPath(patch.folder || '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'name')) manifest.name = String(patch.name || manifest.name).trim() || manifest.name;
+  manifest.updatedAt = new Date().toISOString();
+  manifests = manifests.map((m) => (walletOwnsManifest(m) && m.hash === manifest.hash ? manifest : m));
+  persistManifests();
+  await syncPush(manifest);
+  return { ok: true, file: manifest, summary: networkSummary() };
+});
+`;
+    main = main.slice(0, idx) + updateHandler + main.slice(idx);
+    changed = true;
+  }
+}
+
+if (main.includes('const manifest = {') && !main.includes('folder,')) {
+  main = main.replace('      name: displayName,\n      size: stat.size,', '      name: displayName,\n      folder,\n      size: stat.size,');
+  changed = true;
+}
+
 if (changed) {
   fs.writeFileSync(mainPath, main, 'utf8');
-  console.log('[patch-native-upload-streaming] installed native streaming upload');
+  console.log('[patch-native-upload-streaming] installed native streaming upload with network folders');
 } else {
   console.log('[patch-native-upload-streaming] native streaming upload already installed');
 }
