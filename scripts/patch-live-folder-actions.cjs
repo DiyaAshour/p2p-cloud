@@ -12,6 +12,11 @@ function r(from, to) {
 }
 
 r(
+  '  | "wallet:disconnect"',
+  '  | "wallet:disconnect"\n  | "drive:getFolders"\n  | "drive:saveFolders"'
+);
+
+r(
   '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => readJson(ACTIVE_WORKSPACE_KEY, ""));',
   '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n  const [folderParents, setFolderParents] = useState<Record<string, string>>({});\n  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => readJson(ACTIVE_WORKSPACE_KEY, ""));'
 );
@@ -33,17 +38,22 @@ r(
 
 r(
   '  const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;',
-  '  const folderPath = (folder: string) => folder === ALL_FILES || folder === UNCATEGORIZED ? folder : [folderParents[folder], folder].filter(Boolean).join(" / ");\n  const orderedFolders = useMemo(() => folders, [folders]);\n  const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;'
+  '  const folderPath = (folder: string) => folder === ALL_FILES || folder === UNCATEGORIZED ? folder : [folderParents[folder], folder].filter(Boolean).join(" / ");\n  const orderedFolders = useMemo(() => folders, [folders]);\n  const saveDriveFolders = async (nextFolders = fileFolders, nextParents = folderParents) => {\n    if (!api || !walletConnected) return;\n    const folderNames = Array.from(new Set(Object.values(nextFolders).filter(Boolean)));\n    const foldersPayload = folderNames.map((name) => ({ id: name, name, parentId: nextParents[name] || null, updatedAt: new Date().toISOString() }));\n    await api.invoke("drive:saveFolders", { folders: foldersPayload, fileFolders: nextFolders });\n  };\n  const loadDriveFolders = async () => {\n    if (!api || !walletConnected) return;\n    const remote = await api.invoke<{ folders: Array<{ id: string; name: string; parentId?: string | null }>; fileFolders: Record<string, string> }>("drive:getFolders");\n    const nextFileFolders = remote.fileFolders || {};\n    const nextParents = Object.fromEntries((remote.folders || []).map((folder) => [folder.name || folder.id, folder.parentId || ""]));\n    setFileFolders(nextFileFolders);\n    setFolderParents(nextParents);\n  };\n  const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;'
+);
+
+r(
+  '    setCompany(nextCompany);\n    if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);',
+  '    setCompany(nextCompany);\n    if (nextWallet.connected) {\n      try {\n        const remote = await api.invoke<{ folders: Array<{ id: string; name: string; parentId?: string | null }>; fileFolders: Record<string, string> }>("drive:getFolders");\n        setFileFolders(remote.fileFolders || {});\n        setFolderParents(Object.fromEntries((remote.folders || []).map((folder) => [folder.name || folder.id, folder.parentId || ""])));\n      } catch {}\n    }\n    if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);'
 );
 
 r(
   '    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);',
-  '    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);\n    const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";\n    setFolderParents((current) => ({ ...current, [folder]: parent }));\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);'
+  '    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);\n    const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";\n    const nextParents = { ...folderParents, [folder]: parent };\n    const nextFolders = { ...fileFolders, [key]: folder };\n    setFolderParents(nextParents);\n    setFileFolders(nextFolders);\n    void saveDriveFolders(nextFolders, nextParents);\n    setActiveFolder(folder);'
 );
 
 r(
   '  const upload = () => run(async () => {',
-  '  const renameActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const name = window.prompt("Rename folder", activeFolder)?.trim();\n    if (!name || name === ALL_FILES || name === UNCATEGORIZED || name === activeFolder) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).map(([key, folder]) => [key, folder === activeFolder ? name : folder])));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).map(([folder, parent]) => [folder === activeFolder ? name : folder, parent === activeFolder ? name : parent])));\n    setActiveFolder(name);\n  };\n  const deleteActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).filter(([key, folder]) => !key.endsWith(`:${activeFolder}`) && folder !== activeFolder)));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).filter(([folder]) => folder !== activeFolder).map(([folder, parent]) => [folder, parent === activeFolder ? "" : parent])));\n    setActiveFolder(ALL_FILES);\n  };\n  const moveActiveFolderToParent = (targetParent: string) => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    setFolderParents((current) => ({ ...current, [activeFolder]: targetParent === UNCATEGORIZED ? "" : targetParent }));\n  };\n  const upload = () => run(async () => {'
+  '  const renameActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const name = window.prompt("Rename folder", activeFolder)?.trim();\n    if (!name || name === ALL_FILES || name === UNCATEGORIZED || name === activeFolder) return;\n    const nextFolders = Object.fromEntries(Object.entries(fileFolders).map(([key, folder]) => [key, folder === activeFolder ? name : folder]));\n    const nextParents = Object.fromEntries(Object.entries(folderParents).map(([folder, parent]) => [folder === activeFolder ? name : folder, parent === activeFolder ? name : parent]));\n    setFileFolders(nextFolders);\n    setFolderParents(nextParents);\n    setActiveFolder(name);\n    void saveDriveFolders(nextFolders, nextParents);\n  };\n  const deleteActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const nextFolders = Object.fromEntries(Object.entries(fileFolders).filter(([key, folder]) => !key.endsWith(`:${activeFolder}`) && folder !== activeFolder));\n    const nextParents = Object.fromEntries(Object.entries(folderParents).filter(([folder]) => folder !== activeFolder).map(([folder, parent]) => [folder, parent === activeFolder ? "" : parent]));\n    setFileFolders(nextFolders);\n    setFolderParents(nextParents);\n    setActiveFolder(ALL_FILES);\n    void saveDriveFolders(nextFolders, nextParents);\n  };\n  const moveActiveFolderToParent = (targetParent: string) => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const nextParents = { ...folderParents, [activeFolder]: targetParent === UNCATEGORIZED ? "" : targetParent };\n    setFolderParents(nextParents);\n    void saveDriveFolders(fileFolders, nextParents);\n  };\n  const upload = () => run(async () => {'
 );
 
 r(
@@ -53,7 +63,7 @@ r(
 
 if (changed) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-live-folder-actions] added folder actions UI');
+  console.log('[patch-live-folder-actions] synced folders through drive IPC');
 } else {
   console.log('[patch-live-folder-actions] already applied');
 }
