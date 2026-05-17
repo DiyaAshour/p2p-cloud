@@ -71,12 +71,10 @@ ipcMain.handle('drive:saveFolders', async (_event, payload = {}) => {
   }
 
   const keepNames = new Set(incomingFolders.map((item) => String(item.name || item.id || '').toLowerCase()).filter(Boolean));
-  if (keepNames.size) {
-    for (const folder of [...walletFolderManifests()]) {
-      if (!keepNames.has(String(folder.name || '').toLowerCase())) {
-        manifests = manifests.filter((m) => !(m.kind === FOLDER_MANIFEST_KIND && m.folderId === folder.folderId));
-        await syncDelete(folderOwnerIdentity(), folder.hash);
-      }
+  for (const folder of [...walletFolderManifests()]) {
+    if (!keepNames.has(String(folder.name || '').toLowerCase())) {
+      manifests = manifests.filter((m) => !(m.kind === FOLDER_MANIFEST_KIND && m.folderId === folder.folderId));
+      await syncDelete(folderOwnerIdentity(), folder.hash);
     }
   }
 
