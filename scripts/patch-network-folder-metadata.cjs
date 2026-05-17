@@ -18,34 +18,25 @@ function replaceRegex(src, regex, replacement, label) {
   return src.replace(regex, replacement);
 }
 
+const helperBlock = "function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\nfunction walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND); }\nfunction walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND); }\nfunction folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }\nfunction assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }\nfunction folderIdFromName(name = '') { return crypto.createHash('sha256').update(`${folderOwnerIdentity()}:folder:${String(name || '').trim().toLowerCase()}:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`).digest('hex'); }\nfunction sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\\r\\n\\t]/g, ' ').replace(/\\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }\nfunction findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }\nfunction assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }\n";
+
 let main = read(mainPath);
 if (main) {
   if (!main.includes("const FOLDER_MANIFEST_KIND = 'folder';")) {
-    main = main.replace(
-      "const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;\n",
-      "const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;\nconst FOLDER_MANIFEST_KIND = 'folder';\n"
-    );
+    main = main.replace("const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;\n", "const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;\nconst FOLDER_MANIFEST_KIND = 'folder';\n");
   }
 
   if (!main.includes('function walletFileManifests()')) {
-    main = main.replace(
-      "function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\n",
-      "function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\nfunction walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND); }\nfunction walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND); }\nfunction folderIdFromName(name = '') { return crypto.createHash('sha256').update(`${activeWallet()}:folder:${String(name || '').trim().toLowerCase()}:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`).digest('hex'); }\nfunction sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\\r\\n\\t]/g, ' ').replace(/\\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }\nfunction findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }\nfunction assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }\n"
-    );
+    main = main.replace("function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }\n", helperBlock);
+  } else {
+    main = main.replace(/function walletManifests\(\) \{ return walletState\.connected \? manifests\.filter\(walletOwnsManifest\)\.filter\(isUsableManifest\) : \[\]; \}\nfunction walletFileManifests\(\) \{[\s\S]*?function assertFolderNotDescendant\(folderId, parentFolderId\) \{[\s\S]*?\}\n/m, helperBlock);
   }
 
-  main = main.replace(
-    "function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }",
-    "function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }"
-  );
-  main = main.replace(
-    "function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }",
-    "function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletFileManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }"
-  );
+  main = main.replace("function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }", "function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }");
+  main = main.replace("function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }", "function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletFileManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }");
 
-  // Repair and file stats must ignore folder manifests.
   main = main.replace("const own = walletManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);", "const own = walletFileManifests();\n  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);");
-  main = main.replace("ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests();", "ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletFileManifests();");
+  main = main.replace("ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests();", "ipcMain.handle('p2p:repair', async () => { assertFolderIdentity(); const node = ensureTransport({}); const own = walletFileManifests();");
 
   main = replaceOnce(
     main,
@@ -69,15 +60,15 @@ ipcMain.handle('p2p:listFolders', async () => {
   return walletFolderManifests().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 });
 ipcMain.handle('p2p:createFolder', async (_event, payload = {}) => {
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
-  const ownerWallet = activeWallet();
+  const ownerWallet = folderOwnerIdentity();
   const name = sanitizeFolderName(payload.name);
   const parentFolderId = String(payload.parentFolderId || '');
   if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');
   if (walletFolderManifests().some((folder) => String(folder.parentFolderId || '') === parentFolderId && String(folder.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
   const folderId = folderIdFromName(name);
-  const folder = { kind: FOLDER_MANIFEST_KIND, id: `${ownerWallet}:folder:${folderId}`, hash: `folder:${folderId}`, rootHash: `folder:${folderId}`, folderId, name, parentFolderId, ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, chunks: [], replicas: [], isEncrypted: false, isFolder: true };
+  const folder = { kind: FOLDER_MANIFEST_KIND, id: `${ownerWallet}:folder:${folderId}`, hash: `folder:${folderId}`, rootHash: `folder:${folderId}`, folderId, name, parentFolderId, ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
   manifests.push(folder);
   persistManifests();
   await syncPush(folder);
@@ -85,21 +76,21 @@ ipcMain.handle('p2p:createFolder', async (_event, payload = {}) => {
   return { ok: true, folder, folders: walletFolderManifests() };
 });
 ipcMain.handle('p2p:renameFolder', async (_event, payload = {}) => {
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
   const folderId = String(payload.folderId || '');
   const name = sanitizeFolderName(payload.name);
   const folder = findFolderById(folderId);
   if (!folder) throw new Error('Folder not found');
   if (walletFolderManifests().some((candidate) => candidate.folderId !== folderId && String(candidate.parentFolderId || '') === String(folder.parentFolderId || '') && String(candidate.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
-  Object.assign(folder, { name, updatedAt: new Date().toISOString() });
+  Object.assign(folder, { name, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
   persistManifests();
   await syncPush(folder);
   await syncPull();
   return { ok: true, folder, folders: walletFolderManifests() };
 });
 ipcMain.handle('p2p:moveFolder', async (_event, payload = {}) => {
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
   const folderId = String(payload.folderId || '');
   const parentFolderId = String(payload.parentFolderId || '');
@@ -108,14 +99,14 @@ ipcMain.handle('p2p:moveFolder', async (_event, payload = {}) => {
   if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Target folder not found');
   assertFolderNotDescendant(folderId, parentFolderId);
   if (walletFolderManifests().some((candidate) => candidate.folderId !== folderId && String(candidate.parentFolderId || '') === parentFolderId && String(candidate.name || '').toLowerCase() === String(folder.name || '').toLowerCase())) throw new Error('A folder with this name already exists in target');
-  Object.assign(folder, { parentFolderId, updatedAt: new Date().toISOString() });
+  Object.assign(folder, { parentFolderId, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
   persistManifests();
   await syncPush(folder);
   await syncPull();
   return { ok: true, folder, folders: walletFolderManifests() };
 });
 ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
   const folderId = String(payload.folderId || '');
   const folder = findFolderById(folderId);
@@ -141,15 +132,15 @@ ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
   manifests = manifests.filter((m) => !(m.kind === FOLDER_MANIFEST_KIND && removed.has(m.folderId)));
   persistManifests();
   for (const file of changedFiles) await syncPush(file);
-  for (const removedFolder of removedFolders) await syncDelete(activeWallet(), removedFolder.hash);
+  for (const removedFolder of removedFolders) await syncDelete(folderOwnerIdentity(), removedFolder.hash);
   await syncPull();
   return { ok: true, removed: removed.size, folders: walletFolderManifests() };
 });
 ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
   const manifest = findManifest(payload);
-  if (!manifest) throw new Error('File not found for this wallet');
+  if (!manifest) throw new Error('File not found for this identity');
   const folderId = String(payload.folderId || '');
   const folder = folderId ? findFolderById(folderId) : null;
   if (folderId && !folder) throw new Error('Target folder not found');
@@ -171,6 +162,8 @@ ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
     "const targetFolderId = String(payload.folderId || '');\n  const targetFolder = targetFolderId ? findFolderById(targetFolderId) : null;\n  if (targetFolderId && !targetFolder) throw new Error('Target folder not found');\n  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', folderId: targetFolderId, folderName: targetFolder?.name || '', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };",
     'upload folder metadata'
   );
+
+  main = main.replace("      name: displayName,\n      folder,\n      size: stat.size,", "      name: displayName,\n      folder,\n      folderId: String(payload.folderId || ''),\n      folderName: String(payload.folderName || ''),\n      size: stat.size,");
 
   write(mainPath, main);
 }
@@ -231,7 +224,7 @@ if (appSrc) {
   appSrc = replaceRegex(appSrc, /const removeActiveFolder = \(\) => \{[\s\S]*?toast\.success\(`Removed \$\{removed\.size\} folder\(s\)`\);\n  \};/, 'const removeActiveFolder = () => runBusy(async () => { if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) { toast.error("Open a custom folder first"); return; } if (!confirm("Remove this folder and its subfolders? Files inside move to Uncategorized, not deleted.")) return; await bridge.invoke("p2p:deleteFolder", { folderId: activeFolder }); setActiveFolder(ALL_FILES); toast.success("Folder removed"); await refreshAll(); });', 'deleteFolder network');
   appSrc = replaceRegex(appSrc, /const moveActiveFolderToParent = \(targetParent: string\) => \{[\s\S]*?toast\.success\(targetParent && targetParent !== UNCATEGORIZED \? `Moved folder inside \$\{folderPath\(targetParent\)\}` : "Moved folder to root"\);\n  \};/, 'const moveActiveFolderToParent = (targetParent: string) => runBusy(async () => { if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) { toast.error("Open a custom folder first"); return; } const parentFolderId = targetParent === UNCATEGORIZED ? "" : targetParent; await bridge.invoke("p2p:moveFolder", { folderId: activeFolder, parentFolderId }); toast.success(parentFolderId ? `Moved folder inside ${folderPath(parentFolderId)}` : "Moved folder to root"); await refreshAll(); });', 'moveFolder network');
 
-  appSrc = appSrc.replace('bytes: await file.arrayBuffer() });', 'bytes: await file.arrayBuffer(), folderId: targetFolder });');
+  appSrc = appSrc.replace('bytes: await file.arrayBuffer() });', 'bytes: await file.arrayBuffer(), folderId: targetFolder, folderName: targetFolder ? folderPath(targetFolder) : "" });');
   appSrc = appSrc.replaceAll('folderNames.map((folder) => <option key={folder} value={folder}>{folderPath(folder)}</option>)', 'orderedFolders.map((folder) => <option key={folder} value={folder}>{folderPath(folder)}</option>)');
   write(appPath, appSrc);
 }
