@@ -32,18 +32,28 @@ r(
 );
 
 r(
+  '  const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;',
+  '  const folderPath = (folder: string) => folder === ALL_FILES || folder === UNCATEGORIZED ? folder : [folderParents[folder], folder].filter(Boolean).join(" / ");\n  const orderedFolders = useMemo(() => folders, [folders]);\n  const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;'
+);
+
+r(
   '    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);',
   '    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);\n    const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";\n    setFolderParents((current) => ({ ...current, [folder]: parent }));\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);'
 );
 
 r(
   '  const upload = () => run(async () => {',
-  '  const renameActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const name = window.prompt("Rename folder", activeFolder)?.trim();\n    if (!name || name === ALL_FILES || name === UNCATEGORIZED || name === activeFolder) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).map(([key, folder]) => [key, folder === activeFolder ? name : folder])));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).map(([folder, parent]) => [folder === activeFolder ? name : folder, parent === activeFolder ? name : parent])));\n    setActiveFolder(name);\n  };\n  const deleteActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).filter(([key, folder]) => !key.endsWith(`:${activeFolder}`) && folder !== activeFolder)));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).filter(([folder]) => folder !== activeFolder).map(([folder, parent]) => [folder, parent === activeFolder ? "" : parent])));\n    setActiveFolder(ALL_FILES);\n  };\n  const moveActiveFolderToParent = (targetParent: string) => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    if (targetParent === activeFolder) return;\n    let cursor = targetParent;\n    while (cursor) {\n      if (cursor === activeFolder) return;\n      cursor = folderParents[cursor] || "";\n    }\n    setFolderParents((current) => ({ ...current, [activeFolder]: targetParent === UNCATEGORIZED ? "" : targetParent }));\n  };\n  const upload = () => run(async () => {'
+  '  const renameActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    const name = window.prompt("Rename folder", activeFolder)?.trim();\n    if (!name || name === ALL_FILES || name === UNCATEGORIZED || name === activeFolder) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).map(([key, folder]) => [key, folder === activeFolder ? name : folder])));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).map(([folder, parent]) => [folder === activeFolder ? name : folder, parent === activeFolder ? name : parent])));\n    setActiveFolder(name);\n  };\n  const deleteActiveFolder = () => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    setFileFolders((current) => Object.fromEntries(Object.entries(current).filter(([key, folder]) => !key.endsWith(`:${activeFolder}`) && folder !== activeFolder)));\n    setFolderParents((current) => Object.fromEntries(Object.entries(current).filter(([folder]) => folder !== activeFolder).map(([folder, parent]) => [folder, parent === activeFolder ? "" : parent])));\n    setActiveFolder(ALL_FILES);\n  };\n  const moveActiveFolderToParent = (targetParent: string) => {\n    if (activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED) return;\n    setFolderParents((current) => ({ ...current, [activeFolder]: targetParent === UNCATEGORIZED ? "" : targetParent }));\n  };\n  const upload = () => run(async () => {'
+);
+
+r(
+  '          <div className="flex gap-2">\n            <Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="New folder" />\n            <Button onClick={createFolder} disabled={busy}>+</Button>\n          </div>',
+  '          <div className="flex gap-2">\n            <Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="New folder" />\n            <Button onClick={createFolder} disabled={busy}>+</Button>\n          </div>\n          {activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && (\n            <div className="mt-2 grid gap-2">\n              <Button variant="outline" size="sm" onClick={renameActiveFolder}>Rename folder</Button>\n              <select value={folderParents[activeFolder] || UNCATEGORIZED} onChange={(event) => moveActiveFolderToParent(event.target.value)} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">\n                <option value={UNCATEGORIZED}>Move to root</option>\n                {orderedFolders.filter((folder) => folder !== ALL_FILES && folder !== UNCATEGORIZED && folder !== activeFolder).map((folder) => <option key={folder} value={folder}>{folderPath(folder)}</option>)}\n              </select>\n              <Button variant="destructive" size="sm" onClick={deleteActiveFolder}>Delete folder</Button>\n            </div>\n          )}'
 );
 
 if (changed) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-live-folder-actions] added folder actions');
+  console.log('[patch-live-folder-actions] added folder actions UI');
 } else {
   console.log('[patch-live-folder-actions] already applied');
 }
