@@ -51,11 +51,33 @@ function assertAllowedChannel(channel) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMissingHandler(error) {
+  return String(error?.message || error || '').includes('No handler registered');
+}
+
+async function invokeWithRuntimeRetry(channel, payload) {
+  assertAllowedChannel(channel);
+  const retryable = channel.startsWith('p2p:') || channel.startsWith('wallet:') || channel.startsWith('seed:') || channel.startsWith('company:');
+  const attempts = retryable ? 30 : 1;
+  let lastError;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await ipcRenderer.invoke(channel, payload);
+    } catch (error) {
+      lastError = error;
+      if (!retryable || !isMissingHandler(error)) throw error;
+      await sleep(250);
+    }
+  }
+  throw lastError;
+}
+
 contextBridge.exposeInMainWorld('electron', {
-  invoke: (channel, payload) => {
-    assertAllowedChannel(channel);
-    return ipcRenderer.invoke(channel, payload);
-  },
+  invoke: invokeWithRuntimeRetry,
   isElectron: true,
   platform: process.platform,
 });
