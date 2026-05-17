@@ -63,17 +63,20 @@ if (!s.includes('final logged-out folder guard')) {
 if (!s.includes('final folder state clear guard')) {
   const addedAfterWorkspaceEffect = patch(
     /(  useEffect\(\(\) => \{\r?\n    localStorage\.setItem\(ACTIVE_WORKSPACE_KEY, JSON\.stringify\(activeWorkspace\?\.workspaceId \|\| ""\)\);\r?\n  \}, \[activeWorkspace\?\.workspaceId\]\);\r?\n)/,
-    '$1\n  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected, folderStorageKey]);\n',
+    '$1\n  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected]);\n',
     ''
   );
   if (!addedAfterWorkspaceEffect) {
     insertBefore(
       /  const run = async \(work: \(\) => Promise<void>\) => \{\r?\n/,
-      '  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected, folderStorageKey]);\n\n',
+      '  // final folder state clear guard\n  useEffect(() => {\n    if (!walletConnected) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [walletConnected]);\n\n',
       'insert guard before run'
     );
   }
 }
+
+// Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
+s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [walletConnected]);');
 
 if (!s.includes('const [fileFolders, setFileFolders]')) {
   console.error('[patch-live-folder-final-guard] failed to inject fileFolders state');
