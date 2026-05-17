@@ -20,20 +20,20 @@ replaceOnce(
   "import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';"
 );
 
-if (!main.includes('function keySourceForIdentity(')) {
-  const anchor = "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';";
-  if (main.includes(anchor)) {
-    main = main.replace(anchor, `${anchor}\nfunction keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }`);
-    changed = true;
-  } else {
-    throw new Error('[patch-native-upload-streaming] cannot find ENCRYPTION_KEY_SOURCE anchor');
-  }
+// Repair bad output from older patch attempts.
+main = main.replace(/function\s+ENCRYPTION_KEY_SOURCE\s*\([^)]*\)\s*\{\s*return\s+ENCRYPTION_KEY_SOURCE;\s*\}\s*/g, '');
+main = main.replace(/function\s+keySourceForIdentity\s*\([^)]*\)\s*\{\s*return\s+ENCRYPTION_KEY_SOURCE;\s*\}\s*/g, '');
+
+const anchor = "const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';";
+if (main.includes(anchor)) {
+  main = main.replace(anchor, `${anchor}\nfunction keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }`);
+  changed = true;
+} else {
+  throw new Error('[patch-native-upload-streaming] cannot find ENCRYPTION_KEY_SOURCE anchor');
 }
 
-if (main.includes('keySourceForIdentity(')) {
-  main = main.replace(/keySourceForIdentity\([^)]*\)/g, 'ENCRYPTION_KEY_SOURCE');
-  changed = true;
-}
+// Replace only call sites, not the helper declaration.
+main = main.replace(/(?<!function\s+)keySourceForIdentity\([^)]*\)/g, 'ENCRYPTION_KEY_SOURCE');
 
 if (!main.includes("ipcMain.handle('p2p:uploadFiles'")) {
   const insertBefore = "\nipcMain.handle('p2p:download'";
