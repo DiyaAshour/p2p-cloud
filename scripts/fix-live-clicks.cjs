@@ -16,7 +16,7 @@ fs.writeFileSync(p, s, 'utf8');
 console.log(s === before ? '[fix-live-clicks] UI already patched' : '[fix-live-clicks] patched upload tab, upload button, and disconnect UI');
 if (s.includes('<Tabs value={view === "admin" ? "admin" : "files"}') || s.includes('!walletConnected') || s.includes('const identityLabel = wallet?.authMode === "seed"')) process.exit(1);
 
-const identityHelpers = "function isVerifiedIdentity() { return Boolean(walletState.connected && walletState.verified && (isValidWallet(walletState.address) || walletState.authMode === 'seed' || String(walletState.accountId || '').startsWith('seed:'))); }\nfunction assertVerifiedIdentity() { if (!isVerifiedIdentity()) throw new Error('Verified identity required. Connect wallet or sign in first.'); }";
+const identityHelpers = "function activeIdentity() { const wallet = activeWallet(); if (isValidWallet(wallet)) return wallet; const account = String(walletState.accountId || walletState.address || '').trim().toLowerCase(); if (walletState.authMode === 'seed' && account.startsWith('seed:')) return account; return account; }\nfunction isValidIdentity(identity = '') { const value = String(identity || '').trim().toLowerCase(); return isValidWallet(value) || value.startsWith('seed:'); }\nfunction isVerifiedIdentity() { return Boolean(walletState.connected && walletState.verified && isValidIdentity(activeIdentity())); }\nfunction assertVerifiedIdentity() { if (!isVerifiedIdentity()) throw new Error('Verified identity required. Connect wallet or sign in first.'); }";
 
 for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   if (!fs.existsSync(file)) continue;
@@ -26,14 +26,16 @@ for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   if (m.includes(oldLine)) m = m.replace(oldLine, newLine);
   m = m.replace("ipcMain.handle('wallet:status', async () => walletSummary());", "ipcMain.handle('wallet:status', async () => { loadWallet(); return walletSummary(); });");
   m = m.replace("ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return [];", "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { loadWallet(); if (!walletState.connected || !walletState.verified) return [];");
-
-  // Repair any previously broken recursive assertion.
+  m = m.replace(/function activeIdentity\(\) \{[\s\S]*?\}\nfunction isValidIdentity\(identity = ''\) \{[\s\S]*?\}\nfunction isVerifiedIdentity\(\) \{[\s\S]*?\}\nfunction assertVerifiedIdentity\(\) \{[\s\S]*?\}/, identityHelpers);
   m = m.replace(/function isVerifiedIdentity\(\) \{[\s\S]*?\}\nfunction assertVerifiedIdentity\(\) \{[\s\S]*?\}/, identityHelpers);
-  if (m.includes('isVerifiedIdentity') && !m.includes('function isVerifiedIdentity()')) {
-    m = m.replace('function assertVerifiedWallet()', `${identityHelpers}\nfunction assertVerifiedWallet()`);
-  }
+  if (!m.includes('function activeIdentity()')) m = m.replace('function assertVerifiedWallet()', `${identityHelpers}\nfunction assertVerifiedWallet()`);
   m = m.replace("function assertVerifiedIdentity() { assertVerifiedIdentity(); if (false) throw new Error('Verified identity required. Connect wallet or sign in first.'); }", "function assertVerifiedIdentity() { if (!isVerifiedIdentity()) throw new Error('Verified identity required. Connect wallet or sign in first.'); }");
-
+  m = m.replace("const wallet = normalizeWallet(ownerWallet);\n  if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');", "const wallet = String(ownerWallet || activeIdentity()).trim().toLowerCase();\n  if (!isValidIdentity(wallet)) throw new Error('Valid wallet or seed identity required for private file encryption.');");
+  m = m.replaceAll('assertVerifiedWallet();\n  const stat = fs.statSync(filePath);', 'assertVerifiedIdentity();\n  const stat = fs.statSync(filePath);');
+  m = m.replaceAll('assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free;', 'assertVerifiedIdentity(); const plan = PLANS[walletState.planId] || PLANS.free;');
+  m = m.replaceAll('const ownerWallet = activeWallet();', 'const ownerWallet = activeIdentity();');
+  m = m.replaceAll('normalizeWallet(manifest.ownerWallet) === activeWallet()', 'String(manifest.ownerWallet || "").toLowerCase() === activeIdentity()');
+  m = m.replaceAll('pullWalletManifests(activeWallet())', 'pullWalletManifests(activeIdentity())');
   fs.writeFileSync(file, m, 'utf8');
-  console.log(`[fix-live-clicks] patched ${file} disconnect/session/identity helpers`);
+  console.log(`[fix-live-clicks] patched ${file} seed identity encryption/session helpers`);
 }
