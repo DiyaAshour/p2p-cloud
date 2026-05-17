@@ -41,7 +41,7 @@ for (const [file, content] of [['electron/main.js', main], ['electron/main-stabl
     "ipcMain.handle('p2p:uploadFiles'",
     'async function uploadFilePathStreaming',
     'fs.createReadStream(filePath',
-    "dialog.showOpenDialog",
+    'dialog.showOpenDialog',
     'chunknet-uploads',
   ]);
 
@@ -50,11 +50,13 @@ for (const [file, content] of [['electron/main.js', main], ['electron/main-stabl
 }
 
 mustContain('electron/download-to-path-override.js', downloadOverride, [
-  "ipcMain.handle('p2p:downloadToPath'",
+  'downloadManifestToPath',
+  "'p2p:downloadToPath'",
+  'ipcMain.handle(channel',
   'dialog.showSaveDialog',
-  'fs.appendFileSync(tempPath, buffer)',
+  'createWriteStream',
 ]);
-mustNotContain('electron/download-to-path-override.js', downloadOverride, ['bytes: Array.from', 'Array.from(outputBuffer)']);
+mustNotContain('electron/download-to-path-override.js', downloadOverride, ['bytes: Array.from', 'Array.from(outputBuffer)', 'Buffer.concat(buffers)']);
 
 mustContain('electron/preload.cjs', preload, ["'p2p:uploadFiles'", "'p2p:downloadToPath'", "'seed:create'", "'wallet:connect'"]);
 mustContain('client/src/NativeP2PAppLive.tsx', live, ['p2p:uploadFiles', 'p2p:downloadToPath']);
