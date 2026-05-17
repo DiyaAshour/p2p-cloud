@@ -8,6 +8,7 @@ const allowedChannels = new Set([
   'p2p:uploadFiles',
   'p2p:uploadPath',
   'p2p:downloadToPath',
+  'p2p:updateFile',
   'p2p:delete',
   'p2p:networkSummary',
   'p2p:bootstrapNow',
