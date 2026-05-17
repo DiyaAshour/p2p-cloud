@@ -114,7 +114,7 @@ patch(
     setFolderParents(nextParents);
     setActiveFolder(folder);
     setNewFolder("");
-    toast.success(`Folder created: ${folder}`);
+    toast.success("Folder created: " + folder);
     if (view === "personal") {
       const names = new Set<string>();
       for (const value of Object.values(nextFolders)) if (value && value !== ALL_FILES && value !== UNCATEGORIZED) names.add(value);
