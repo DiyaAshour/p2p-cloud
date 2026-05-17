@@ -11,36 +11,43 @@ function replaceOnce(from, to) {
   }
 }
 
-// Isolate new folder UI cache from old leaked localStorage keys.
+// Isolate folder UI cache from old leaked localStorage keys while keeping empty folders per identity.
 replaceOnce(
   'const FILE_FOLDERS_KEY = "chunknet.ui.fileFolders";',
-  'const FILE_FOLDERS_KEY = "chunknet.ui.fileFolders.v3";'
+  'const FILE_FOLDERS_KEY = "chunknet.ui.fileFolders.v4";'
+);
+replaceOnce(
+  'const FILE_FOLDERS_KEY = "chunknet.ui.fileFolders.v3";',
+  'const FILE_FOLDERS_KEY = "chunknet.ui.fileFolders.v4";'
 );
 
-// Folders in My Drive must come only from visible personal files, not stale personal:folder:* entries.
+// My Drive folders: keep empty folders created by this identity, plus folders assigned to this identity files.
 replaceOnce(
   '    const personalFileKeys = new Set(personalFiles.map((file) => file.hash));\n    const personalFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);',
-  '    const personalFileKeys = new Set(personalFiles.flatMap((file) => [file.hash, file.rootHash, keyFor(file)]).filter(Boolean));\n    const personalFolders = Object.entries(fileFolders).filter(([key]) => personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);'
+  '    const personalFileKeys = new Set(personalFiles.flatMap((file) => [file.hash, file.rootHash, keyFor(file)]).filter(Boolean));\n    const personalFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);'
+);
+replaceOnce(
+  '    const personalFileKeys = new Set(personalFiles.flatMap((file) => [file.hash, file.rootHash, keyFor(file)]).filter(Boolean));\n    const personalFolders = Object.entries(fileFolders).filter(([key]) => personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);',
+  '    const personalFileKeys = new Set(personalFiles.flatMap((file) => [file.hash, file.rootHash, keyFor(file)]).filter(Boolean));\n    const personalFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);'
 );
 
-// Folder lookup should accept hash/rootHash and ignore stale standalone folders.
+// Folder lookup should accept hash/rootHash.
 replaceOnce(
   '      const folder = cf?.folder || fileFolders[file.hash] || UNCATEGORIZED;',
   '      const folder = cf?.folder || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
 );
-
 replaceOnce(
   '    const folder = cf?.folder || fileFolders[file.hash] || UNCATEGORIZED;',
   '    const folder = cf?.folder || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
 );
 
-// Changing account should clear the in-memory folder cache immediately.
+// Changing account should clear the in-memory folder cache immediately; next identity reloads from its own key.
 replaceOnce(
   '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
   '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    setFileFolders({});\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
 );
 
-// Do not store folder assignment for All files/Uncategorized as a real folder.
+// Do not store folder assignment for All files/Uncategorized as a real folder on upload.
 replaceOnce(
   '        for (const file of result.files || []) next[file.hash] = activeFolder;',
   '        for (const file of result.files || []) if (activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED) next[file.hash] = activeFolder;'
@@ -48,7 +55,7 @@ replaceOnce(
 
 if (changed) {
   fs.writeFileSync(p, s, 'utf8');
-  console.log('[patch-ui-folder-scope] scoped My Drive folders to current account files');
+  console.log('[patch-ui-folder-scope] scoped folders per identity and preserved empty folders');
 } else {
   console.log('[patch-ui-folder-scope] already applied');
 }
