@@ -21,8 +21,8 @@ export default function IdentityAccountCard({ api, busy, identityLabel, walletCo
   const [createdCode, setCreatedCode] = useState("");
   const [saved, setSaved] = useState(false);
   const [working, setWorking] = useState(false);
-  const isSignedIn = Boolean(walletConnected);
   const isSeedIdentity = identityLabel.toLowerCase().startsWith("seed:") || identityLabel.toLowerCase().startsWith("user:") || (!identityLabel.startsWith("0x") && identityLabel !== "Guest");
+  const isSignedIn = Boolean(walletConnected || isSeedIdentity || (identityLabel && identityLabel !== "Guest"));
 
   async function run(task: () => Promise<void>) { setWorking(true); try { await task(); } catch (error) { toast.error(error instanceof Error ? error.message : "Operation failed"); } finally { setWorking(false); } }
 
