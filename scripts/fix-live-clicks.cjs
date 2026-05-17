@@ -21,11 +21,9 @@ for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   let m = fs.readFileSync(file, 'utf8');
   const oldLine = "walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };";
   const newLine = "walletState = { connected: false, verified: false, address: '', accountId: '', authMode: null, username: null, seedFingerprint: null, planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };";
-  if (m.includes(oldLine)) {
-    m = m.replace(oldLine, newLine);
-    fs.writeFileSync(file, m, 'utf8');
-    console.log(`[fix-live-clicks] patched ${file} disconnect seed cleanup`);
-  } else {
-    console.log(`[fix-live-clicks] ${file} disconnect cleanup already safe or handler not present`);
-  }
+  if (m.includes(oldLine)) m = m.replace(oldLine, newLine);
+  m = m.replace("ipcMain.handle('wallet:status', async () => walletSummary());", "ipcMain.handle('wallet:status', async () => { loadWallet(); return walletSummary(); });");
+  m = m.replace("ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return [];", "ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { loadWallet(); if (!walletState.connected || !walletState.verified) return [];");
+  fs.writeFileSync(file, m, 'utf8');
+  console.log(`[fix-live-clicks] patched ${file} disconnect cleanup and seed session reload`);
 }
