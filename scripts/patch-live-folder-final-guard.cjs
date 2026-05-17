@@ -29,6 +29,11 @@ function insertBefore(regex, insertion, label) {
   return false;
 }
 
+// Keep IPC channel typing compatible with the final folder action.
+if (!s.includes('| "drive:saveFolders"')) {
+  patch(/(  \| "wallet:disconnect"\r?\n)/, '$1  | "drive:getFolders"\n  | "drive:saveFolders"\n  | "p2p:updateFile"\n', 'channel union');
+}
+
 if (!s.includes('const [fileFolders, setFileFolders]')) {
   insertBefore(
     /  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/,
@@ -75,6 +80,39 @@ if (!s.includes('final folder state clear guard')) {
   }
 }
 
+// Force New folder to work after verify-runtime-safety restores NativeP2PAppLive.
+if (!s.includes('final network createFolder')) {
+  patch(
+    /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
+    `  const createFolder = () => {
+    // final network createFolder
+    const folder = newFolder.trim();
+    if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) return;
+    if (!walletConnected && view !== "company" && view !== "admin") {
+      toast.error("Connect wallet or sign in before creating folders");
+      return;
+    }
+    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);
+    const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";
+    const nextFolders = { ...fileFolders, [key]: folder };
+    const nextParents = { ...folderParents, [folder]: parent };
+    setFileFolders(nextFolders);
+    setFolderParents(nextParents);
+    setActiveFolder(folder);
+    setNewFolder("");
+    if (view === "personal") {
+      const names = new Set<string>();
+      for (const value of Object.values(nextFolders)) if (value && value !== ALL_FILES && value !== UNCATEGORIZED) names.add(value);
+      for (const value of Object.keys(nextParents)) if (value && value !== ALL_FILES && value !== UNCATEGORIZED) names.add(value);
+      const foldersPayload = Array.from(names).map((name) => ({ id: name, name, parentId: nextParents[name] || null, updatedAt: new Date().toISOString() }));
+      void api.invoke("drive:saveFolders" as Channel, { folders: foldersPayload, fileFolders: nextFolders }).then(refresh).catch((error) => toast.error(err(error)));
+    }
+  };
+  const upload =`,
+    'createFolder final replace'
+  );
+}
+
 // Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
 s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [walletConnected]);');
 
@@ -88,4 +126,4 @@ if (!s.includes('const [folderParents, setFolderParents]')) {
 }
 
 fs.writeFileSync(file, s, 'utf8');
-console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard' : '[patch-live-folder-final-guard] already applied');
+console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder' : '[patch-live-folder-final-guard] already applied');
