@@ -4,12 +4,21 @@ function normalizeBaseUrl(value = '') {
   return String(value || '').trim().replace(/\/$/, '');
 }
 
-function normalizeWallet(address = '') {
-  return String(address || '').trim().toLowerCase();
+function normalizeIdentity(value = '') {
+  return String(value || '').trim().toLowerCase();
 }
 
 function validWallet(address = '') {
-  return /^0x[a-f0-9]{40}$/.test(normalizeWallet(address));
+  return /^0x[a-f0-9]{40}$/.test(normalizeIdentity(address));
+}
+
+function validIdentity(identity = '') {
+  const value = normalizeIdentity(identity);
+  return validWallet(value) || /^seed:[a-f0-9]{16,128}$/.test(value);
+}
+
+function identityPath(identity = '') {
+  return encodeURIComponent(normalizeIdentity(identity));
 }
 
 function manifestSyncBaseUrl() {
@@ -47,7 +56,7 @@ function sanitizePulledManifest(manifest = {}) {
   if (isBadEncryptedManifest(manifest)) return null;
   return {
     ...manifest,
-    ownerWallet: normalizeWallet(manifest.ownerWallet),
+    ownerWallet: normalizeIdentity(manifest.ownerWallet),
     visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),
     isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
   };
@@ -60,9 +69,9 @@ async function parseJsonResponse(response) {
 }
 
 export async function pullWalletManifests(walletAddress) {
-  const wallet = normalizeWallet(walletAddress);
-  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync pull');
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests`);
+  const identity = normalizeIdentity(walletAddress);
+  if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync pull');
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`);
   const data = await parseJsonResponse(response);
   const incoming = Array.isArray(data.manifests) ? data.manifests : [];
   const clean = [];
@@ -77,20 +86,20 @@ export async function pullWalletManifests(walletAddress) {
 }
 
 export async function pushWalletManifest(manifest = {}) {
-  const wallet = normalizeWallet(manifest.ownerWallet);
-  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync push');
+  const identity = normalizeIdentity(manifest.ownerWallet);
+  if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync push');
   if (isBadEncryptedManifest(manifest)) {
     throw new Error('Refusing to sync encrypted manifest without encryption metadata');
   }
   const payload = {
     manifest: {
       ...manifest,
-      ownerWallet: wallet,
+      ownerWallet: identity,
       visibility: manifest.visibility || (manifest.isEncrypted ? 'private' : 'public'),
       isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
     },
   };
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests`, {
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
@@ -99,10 +108,10 @@ export async function pushWalletManifest(manifest = {}) {
 }
 
 export async function deleteWalletManifest(walletAddress, hash) {
-  const wallet = normalizeWallet(walletAddress);
-  if (!validWallet(wallet)) throw new Error('Valid wallet required for manifest sync delete');
+  const identity = normalizeIdentity(walletAddress);
+  if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync delete');
   if (!hash) throw new Error('Manifest hash required for delete');
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${wallet}/manifests/${encodeURIComponent(hash)}`, {
+  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests/${encodeURIComponent(hash)}`, {
     method: 'DELETE',
   });
   return parseJsonResponse(response);
