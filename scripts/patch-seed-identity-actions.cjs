@@ -10,20 +10,26 @@ if (!fs.existsSync(livePath)) {
 let src = fs.readFileSync(livePath, 'utf8');
 const before = src;
 
-function forceReplace(regex, replacement) {
-  src = src.replace(regex, replacement);
+function replaceLineContaining(source, needle, replacementLines) {
+  const lines = source.split(/\r?\n/);
+  const idx = lines.findIndex((line) => line.includes(needle));
+  if (idx === -1) return source;
+  const replacement = Array.isArray(replacementLines) ? replacementLines : [replacementLines];
+  lines.splice(idx, 1, ...replacement);
+  return lines.join('\n');
 }
 
-forceReplace(
-  /  const walletConnected = Boolean\(wallet\?\.connected && \(wallet\.accountId \|\| wallet\.address\)\);\r?\n  const identityLabel = wallet\?\.authMode === "seed" \? `Seed: \$\{wallet\.username \|\| short\(wallet\.accountId \|\| wallet\.address\)\}` : walletConnected \? short\(wallet\?\.address \|\| wallet\?\.accountId \|\| ""\) : "Guest";/,
-  '  const walletConnected = Boolean(wallet?.connected && wallet?.authMode !== "seed" && (wallet.accountId || wallet.address));\n  const seedConnected = Boolean(wallet?.authMode === "seed" && (wallet.accountId || wallet.username || wallet.seedFingerprint));\n  const identityConnected = Boolean(walletConnected || seedConnected);\n  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";'
-);
-
 if (!src.includes('const identityConnected = Boolean(walletConnected || seedConnected);')) {
-  src = src.replace(
-    '  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";',
-    '  const seedConnected = Boolean(wallet?.authMode === "seed" && (wallet.accountId || wallet.username || wallet.seedFingerprint));\n  const identityConnected = Boolean(walletConnected || seedConnected);\n  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";'
-  );
+  src = replaceLineContaining(src, 'const walletConnected = Boolean(wallet?.connected', [
+    '  const walletConnected = Boolean(wallet?.connected && wallet?.authMode !== "seed" && (wallet.accountId || wallet.address));',
+    '  const seedConnected = Boolean(wallet?.authMode === "seed" && (wallet.accountId || wallet.username || wallet.seedFingerprint));',
+    '  const identityConnected = Boolean(walletConnected || seedConnected);',
+  ]);
+}
+
+const identityLabelLine = '  const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";';
+if (!src.includes(identityLabelLine)) {
+  src = replaceLineContaining(src, 'const identityLabel = wallet?.authMode === "seed"', identityLabelLine);
 }
 
 src = src.replace(/walletConnected=\{walletConnected\}/g, 'walletConnected={identityConnected}');
@@ -31,26 +37,38 @@ src = src.replace(/if \(!walletConnected\) throw new Error\("Connect wallet or s
 src = src.replace(/if \(!walletConnected\) throw new Error\("Connect wallet before importing a shared link\."\);/g, 'if (!identityConnected) throw new Error("Sign in before importing a shared link.");');
 src = src.replace(/disabled=\{busy \|\| !walletConnected\}>Save to My Drive/g, 'disabled={busy || !identityConnected}>Save to My Drive');
 
-src = src.replace(
-  /  const disconnectWallet = \(\) => run\(async \(\) => \{\r?\n    setWallet\(await api\.invoke<WalletState>\("wallet:disconnect"\)\);\r?\n    await refresh\(\);\r?\n  \}\);/,
-  '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
-);
+const oldDisconnect = `  const disconnectWallet = () => run(async () => {
+    setWallet(await api.invoke<WalletState>("wallet:disconnect"));
+    await refresh();
+  });`;
+const newDisconnect = `  const disconnectWallet = () => run(async () => {
+    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");
+    setWallet(nextWallet);
+    setDrivePassword("");
+    setFiles([]);
+    setActiveFolder(ALL_FILES);
+    await refresh();
+  });`;
+if (src.includes(oldDisconnect)) src = src.replace(oldDisconnect, newDisconnect);
 
 src = src.replace(
   '          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={walletConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />',
   '          <IdentityAccountCard api={api} busy={busy} identityLabel={identityLabel} walletConnected={identityConnected} onWallet={setWallet} onRefresh={refresh} onDisconnect={disconnectWallet} />'
 );
 
-if (!src.includes('if (!identityConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");')) {
-  console.warn('[seed-identity-actions] warning: upload guard was not found/replaced');
-}
-if (!src.includes('walletConnected={identityConnected}')) {
-  console.warn('[seed-identity-actions] warning: IdentityAccountCard prop was not found/replaced');
-}
+const staleTokens = [
+  'if (!walletConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading")',
+  'walletConnected={walletConnected}',
+].filter((token) => src.includes(token));
 
 if (src !== before) {
   fs.writeFileSync(livePath, src, 'utf8');
   console.log('[seed-identity-actions] patched upload, shared link, and disconnect to use identityConnected');
 } else {
   console.log('[seed-identity-actions] already patched');
+}
+
+if (staleTokens.length) {
+  console.warn('[seed-identity-actions] stale wallet-only UI tokens remain:', staleTokens.join(', '));
+  process.exitCode = 1;
 }
