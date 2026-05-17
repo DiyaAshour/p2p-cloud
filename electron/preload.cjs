@@ -5,6 +5,8 @@ console.log('[preload] LOADED');
 const allowedChannels = new Set([
   'p2p:start',
   'p2p:listFiles',
+  'drive:getFolders',
+  'drive:saveFolders',
   'p2p:uploadFiles',
   'p2p:uploadPath',
   'p2p:downloadToPath',
@@ -61,7 +63,7 @@ function isMissingHandler(error) {
 
 async function invokeWithRuntimeRetry(channel, payload) {
   assertAllowedChannel(channel);
-  const retryable = channel.startsWith('p2p:') || channel.startsWith('wallet:') || channel.startsWith('seed:') || channel.startsWith('company:');
+  const retryable = channel.startsWith('p2p:') || channel.startsWith('wallet:') || channel.startsWith('seed:') || channel.startsWith('company:') || channel.startsWith('drive:');
   const attempts = retryable ? 30 : 1;
   let lastError;
   for (let i = 0; i < attempts; i += 1) {
