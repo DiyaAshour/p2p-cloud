@@ -50,7 +50,7 @@ ipcMain.handle('drive:saveFolders', async (_event, payload = {}) => {
     const name = sanitizeFolderName(item.name || item.id);
     if (!folderByName.has(name.toLowerCase())) {
       const folderId = folderIdFromName(name);
-      const folder = { kind: FOLDER_MANIFEST_KIND, id: \\`${ownerWallet}:folder:${folderId}\\`, hash: \\`folder:${folderId}\\`, rootHash: \\`folder:${folderId}\\`, folderId, name, parentFolderId: '', ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
+      const folder = { kind: FOLDER_MANIFEST_KIND, id: ownerWallet + ':folder:' + folderId, hash: 'folder:' + folderId, rootHash: 'folder:' + folderId, folderId, name, parentFolderId: '', ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
       manifests.push(folder);
       folderByName.set(name.toLowerCase(), folder);
       await syncPush(folder);
