@@ -101,6 +101,13 @@ function readJson<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
+function identityStorageId(wallet: WalletState | null) {
+  if (!wallet?.connected) return "guest";
+  if (wallet.authMode === "seed") return `seed:${wallet.accountId || wallet.seedFingerprint || wallet.username || "unknown"}`;
+  return `wallet:${wallet.address || wallet.accountId || "unknown"}`;
+}
+function personalFolderKey(folder: string) { return `personal:folder:${folder}`; }
+function companyFolderKey(workspaceId: string, folder: string) { return `company:${workspaceId}:folder:${folder}`; }
 function bytes(n = 0) {
   if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(2)} TB`;
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
@@ -153,11 +160,12 @@ export default function NativeP2PAppLive() {
   const [workspaceNameInput, setWorkspaceNameInput] = useState("");
   const [memberEmail, setMemberEmail] = useState("");
   const [memberRole, setMemberRole] = useState<Role>("viewer");
-  const [fileFolders, setFileFolders] = useState<Record<string, string>>(() => readJson(FILE_FOLDERS_KEY, {}));
+  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(() => readJson(ACTIVE_WORKSPACE_KEY, ""));
 
   const walletConnected = Boolean(wallet?.connected && (wallet.accountId || wallet.address));
   const identityLabel = wallet?.authMode === "seed" ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";
+  const folderStorageKey = `${FILE_FOLDERS_KEY}.${identityStorageId(wallet)}`;
   const workspaces = company?.workspaces || [];
   const activeWorkspace = workspaces.find((w) => w.workspaceId === activeWorkspaceId) || workspaces[0] || null;
   const deviceId = company?.deviceIdentity?.deviceId || "";
@@ -188,9 +196,13 @@ export default function NativeP2PAppLive() {
   const sharedFiles = useMemo(() => files.filter((file) => companyFileByKey.has(keyFor(file)) || companyFileByKey.has(file.hash)), [files, companyFileByKey]);
   const folders = useMemo(() => {
     const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];
-    const localFolders = Object.values(fileFolders).filter(Boolean);
-    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];
-  }, [fileFolders, activeWorkspace]);
+    const personalFileKeys = new Set(personalFiles.map((file) => file.hash));
+    const personalFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith("personal:folder:") || personalFileKeys.has(key)).map(([, folder]) => folder).filter(Boolean);
+    const companyPrefix = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:` : "company:none:folder:";
+    const companyFolders = Object.entries(fileFolders).filter(([key]) => key.startsWith(companyPrefix)).map(([, folder]) => folder).filter(Boolean);
+    const sourceFolders = view === "company" || view === "admin" ? [...workspaceFolders, ...companyFolders] : personalFolders;
+    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];
+  }, [fileFolders, activeWorkspace, personalFiles, view]);
   const baseFiles = view === "company" || view === "admin" ? companyFiles : view === "shared" ? sharedFiles : personalFiles;
   const visibleFiles = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -210,8 +222,12 @@ export default function NativeP2PAppLive() {
   const repairCompanyFiles = companyFiles.filter((file) => file.replicationStatus === "needs-repair").length;
 
   useEffect(() => {
-    localStorage.setItem(FILE_FOLDERS_KEY, JSON.stringify(fileFolders));
-  }, [fileFolders]);
+    setFileFolders(readJson(folderStorageKey, {}));
+    setActiveFolder(ALL_FILES);
+  }, [folderStorageKey]);
+  useEffect(() => {
+    localStorage.setItem(folderStorageKey, JSON.stringify(fileFolders));
+  }, [fileFolders, folderStorageKey]);
   useEffect(() => {
     localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(activeWorkspace?.workspaceId || ""));
   }, [activeWorkspace?.workspaceId]);
@@ -306,7 +322,8 @@ export default function NativeP2PAppLive() {
   const createFolder = () => {
     const folder = newFolder.trim();
     if (!folder) return;
-    setFileFolders((current) => ({ ...current, [`folder:${folder}`]: folder }));
+    const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);
+    setFileFolders((current) => ({ ...current, [key]: folder }));
     setActiveFolder(folder);
     setNewFolder("");
   };
@@ -325,7 +342,7 @@ export default function NativeP2PAppLive() {
         await api.invoke("company:addFile", { workspaceId: activeWorkspace.workspaceId, file, folder: activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder });
       }
     }
-    if (activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && result?.files?.length) {
+    if (!((view === "company" || view === "admin")) && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && result?.files?.length) {
       setFileFolders((current) => {
         const next = { ...current };
         for (const file of result.files || []) next[file.hash] = activeFolder;
@@ -395,7 +412,7 @@ export default function NativeP2PAppLive() {
             {cf?.uploadedByName && <p className="text-xs text-zinc-500">Uploaded by: {cf.uploadedByName}</p>}
             <div className="mt-2 flex flex-wrap gap-2">
               {file.isEncrypted && <Badge variant="secondary"><Lock className="mr-1 size-3" />Encrypted</Badge>}
-              <Badge variant="outline" className={p.tone}><ShieldCheck className="mr-1 size-3" />{p.label}</Badge>
+              <Badge variant="outline" className={p.tone}><ShieldCheck className="mr-1 size-3" />{p.label}</Badge>}
               {match && <Badge variant="outline"><Building2 className="mr-1 size-3" />{match.workspace.name}</Badge>}
               {cf?.hidden && <Badge variant="outline" className="text-amber-300"><EyeOff className="mr-1 size-3" />Hidden</Badge>}
             </div>
@@ -428,171 +445,3 @@ export default function NativeP2PAppLive() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50">
-      <header className="border-b border-zinc-800">
-        <div className="container flex flex-col gap-4 py-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-4">
-            <div className="rounded-2xl bg-zinc-50 p-3 text-zinc-950"><Cloud className="size-7" /></div>
-            <div>
-              <h1 className="text-2xl font-semibold">Native P2P Cloud</h1>
-              <p className="text-sm text-zinc-400">Live Electron P2P drive with company manifests and chunk protection.</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge className="px-3 py-2">{identityLabel}</Badge>
-            <Badge variant="outline" className="px-3 py-2">{company?.deviceIdentity?.deviceId ? short(company.deviceIdentity.deviceId) : "No device key"}</Badge>
-            <Button variant="outline" onClick={() => void run(refresh)} disabled={busy}><RefreshCw className="size-4" />Refresh</Button>
-          </div>
-        </div>
-      </header>
-
-      <main className="container grid gap-6 py-6 lg:grid-cols-[300px_minmax(0,1fr)]">
-        <aside className="space-y-4">
-          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-            <CardContent className="space-y-4 p-5">
-              <p className="text-sm text-zinc-400">Identity</p>
-              <p className="truncate font-medium">{identityLabel}</p>
-              {walletConnected ? (
-                <Button variant="outline" onClick={disconnectWallet} disabled={busy}>Disconnect</Button>
-              ) : (
-                <Button onClick={connectWallet} disabled={busy}><Wallet className="size-4" />Connect Wallet</Button>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-            <CardContent className="space-y-3 p-5">
-              <div className="flex justify-between text-sm"><span>Plan storage</span><span>{quota.toFixed(0)}%</span></div>
-              <div className="h-3 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-zinc-50" style={{ width: `${quota}%` }} /></div>
-              <p className="text-xs text-zinc-400">{bytes(wallet?.usedBytes || 0)} of {bytes(wallet?.plan?.quotaBytes || 0)}</p>
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-            <CardHeader><CardTitle className="text-base">Control panel</CardTitle></CardHeader>
-            <CardContent className="space-y-2">
-              {(["personal", "company", "shared", "admin"] as View[]).map((item) => (
-                <button key={item} onClick={() => setView(item)} className={`w-full rounded-xl px-4 py-3 text-left text-sm ${view === item ? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800/60"}`}>
-                  {item === "personal" && <HardDrive className="mr-2 inline size-4" />}
-                  {item === "company" && <Building2 className="mr-2 inline size-4" />}
-                  {item === "shared" && <Share2 className="mr-2 inline size-4" />}
-                  {item === "admin" && <Settings className="mr-2 inline size-4" />}
-                  {item === "personal" ? "My Drive" : item === "company" ? "Company Drive" : item === "shared" ? "Shared With Me" : "Admin Panel"}
-                </button>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-            <CardHeader><CardTitle className="text-base">Folders</CardTitle></CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex gap-2"><Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="New folder" /><Button onClick={createFolder}>+</Button></div>
-              {folders.map((folder) => (
-                <button key={folder} onClick={() => setActiveFolder(folder)} className={`block w-full rounded-xl px-4 py-3 text-left text-sm ${activeFolder === folder ? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800/60"}`}>
-                  <FolderOpen className="mr-2 inline size-4" />{folder}
-                </button>
-              ))}
-            </CardContent>
-          </Card>
-        </aside>
-
-        <section className="space-y-6">
-          <section className="grid gap-3 md:grid-cols-4">
-            <Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardContent className="p-5"><FolderOpen /><p className="text-sm text-zinc-400">Files</p><p className="text-xl font-semibold">{visibleFiles.length}</p></CardContent></Card>
-            <Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardContent className="p-5"><HardDrive /><p className="text-sm text-zinc-400">Used</p><p className="text-xl font-semibold">{bytes(view === "company" || view === "admin" ? companyBytes : summary?.totalBytes || 0)}</p></CardContent></Card>
-            <Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardContent className="p-5"><ShieldCheck /><p className="text-sm text-zinc-400">Protected</p><p className="text-xl font-semibold">{view === "company" || view === "admin" ? `${protectedCompanyFiles}/${companyFiles.length}` : "Smart"}</p>{repairCompanyFiles > 0 && <p className="mt-1 text-xs text-amber-300">{repairCompanyFiles} need repair</p>}</CardContent></Card>
-            <Card className="rounded-2xl border-zinc-800 bg-zinc-900"><CardContent className="p-5"><Wifi /><p className="text-sm text-zinc-400">Network</p><p className="text-xl font-semibold">{peerCount} peers</p><p className="mt-1 text-xs text-zinc-500">{summary?.safetyPeerUrl ? "live peers + safety" : "live peers"}</p></CardContent></Card>
-          </section>
-
-          {(view === "company" || view === "admin") && (
-            <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-              <CardContent className="flex flex-col gap-3 p-5 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <p className="text-sm text-zinc-400">Current company</p>
-                  <p className="text-lg font-semibold">{activeWorkspace?.name || "No company selected"}</p>
-                  <p className="text-xs text-zinc-500">Your role: {localRole || "none"} · signature: {activeWorkspace?.signatureValid ? "valid" : activeWorkspace ? "invalid" : "none"}</p>
-                </div>
-                <select value={activeWorkspace?.workspaceId || ""} onChange={(event) => setActiveWorkspaceId(event.target.value)} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">
-                  <option value="">Select company</option>
-                  {workspaces.map((workspace) => <option key={workspace.workspaceId} value={workspace.workspaceId}>{workspace.name}</option>)}
-                </select>
-              </CardContent>
-            </Card>
-          )}
-
-          <Tabs value={view === "admin" ? "admin" : "files"} onValueChange={(tab) => { if (tab === "admin") setView("admin"); }}>
-            <TabsList>
-              <TabsTrigger value="files">Files</TabsTrigger>
-              <TabsTrigger value="upload">Upload</TabsTrigger>
-              <TabsTrigger value="admin">Admin Panel</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="files" className="space-y-4">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
-                <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search files, folders, company, hash" className="pl-9" />
-              </div>
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {visibleFiles.map(renderFileCard)}
-                {visibleFiles.length === 0 && <Card className="rounded-2xl border-zinc-800 bg-zinc-900 md:col-span-2 xl:col-span-3"><CardContent className="p-8 text-center text-zinc-400">No files here yet.</CardContent></Card>}
-              </div>
-            </TabsContent>
-
-            <TabsContent value="upload">
-              <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-                <CardHeader><CardTitle><Upload className="mr-2 inline size-5" />Upload files</CardTitle></CardHeader>
-                <CardContent className="space-y-5">
-                  <div className="rounded-3xl border-2 border-dashed border-zinc-700 bg-zinc-950 p-8 text-center">
-                    <Upload className="mx-auto size-10" />
-                    <p className="mt-3 font-medium">Large-file safe mode</p>
-                    <p className="text-sm text-zinc-500">Current destination: {view === "company" || view === "admin" ? activeWorkspace?.name || "Company Drive" : "My Drive"}</p>
-                  </div>
-                  <label className="flex gap-3 rounded-2xl border border-zinc-800 bg-zinc-950 p-4"><Checkbox checked={isEncrypted} onCheckedChange={(value) => setIsEncrypted(Boolean(value))} /><span>Encrypted storage</span></label>
-                  <div className="space-y-2">
-                    <Label><KeyRound className="mr-2 inline size-4" />Drive Password</Label>
-                    <Input type="password" value={drivePassword} onChange={(event) => setDrivePassword(event.target.value)} placeholder={`Minimum ${minPasswordLength} characters`} />
-                  </div>
-                  <Button onClick={upload} disabled={busy || !walletConnected || ((view === "company" || view === "admin") ? !activeWorkspace || !canUpload(localRole) : false)}><Zap className="size-4" />Choose & Store files</Button>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            <TabsContent value="admin" className="space-y-4">
-              <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-                <CardHeader><CardTitle><Building2 className="mr-2 inline size-5" />Company setup</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="flex flex-col gap-2 md:flex-row"><Input value={workspaceNameInput} onChange={(event) => setWorkspaceNameInput(event.target.value)} placeholder="Company name" /><Button onClick={createWorkspace}><Building2 className="size-4" />Create company</Button></div>
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-2xl border-zinc-800 bg-zinc-900">
-                <CardHeader><CardTitle><Users className="mr-2 inline size-5" />Members & roles</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid gap-2 md:grid-cols-[1fr_160px_auto]">
-                    <Input value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} placeholder="member@company.com" />
-                    <select value={memberRole} onChange={(event) => setMemberRole(event.target.value as Role)} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">
-                      <option value="admin">Admin</option><option value="manager">Manager</option><option value="editor">Editor</option><option value="viewer">Viewer</option><option value="guest">Guest</option>
-                    </select>
-                    <Button onClick={inviteMember} disabled={!activeWorkspace || !canManage(localRole)}><UserPlus className="size-4" />Invite</Button>
-                  </div>
-                  <div className="space-y-2">
-                    {activeWorkspace?.members?.map((member) => (
-                      <div key={member.memberId} className="flex flex-col gap-2 rounded-xl border border-zinc-800 bg-zinc-950 p-3 md:flex-row md:items-center md:justify-between">
-                        <div><p className="font-medium">{member.email || member.displayName || short(member.deviceId)}</p><p className="text-xs text-zinc-500">{member.status} · {member.deviceId ? short(member.deviceId) : "pending invite"}</p>{member.inviteToken && <p className="mt-1 max-w-[520px] truncate text-xs text-blue-300">{member.inviteToken}</p>}</div>
-                        <div className="flex gap-2">
-                          <select value={member.role} onChange={(event) => changeMemberRole(member.memberId, event.target.value as Role)} disabled={!canManage(localRole) || member.role === "owner"} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm">
-                            <option value="owner">Owner</option><option value="admin">Admin</option><option value="manager">Manager</option><option value="editor">Editor</option><option value="viewer">Viewer</option><option value="guest">Guest</option>
-                          </select>
-                          <Button variant="destructive" size="sm" onClick={() => removeMember(member.memberId)} disabled={!canManage(localRole) || member.role === "owner"}>Remove</Button>
-                        </div>
-                      </div>
-                    )) || <p className="text-sm text-zinc-400">Create or select a company first.</p>}
-                  </div>
-                </CardContent>
-              </Card>
-            </TabsContent>
-          </Tabs>
-        </section>
-      </main>
-    </div>
-  );
-}
