@@ -61,10 +61,15 @@ if (!s.includes('const [folderParents, setFolderParents]')) {
 if (!s.includes('const folderIdentityReady =')) {
   patch(
     /(  const walletConnected = Boolean\([\s\S]*?\);\r?\n)/,
-    '$1  const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);\n',
+    '$1  const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");\n',
     'folderIdentityReady after walletConnected'
   );
 }
+// Strengthen older injected expression.
+s = s.replace(
+  'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint);',
+  'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");'
+);
 
 if (!s.includes('final logged-out folder guard')) {
   patch(
@@ -94,17 +99,13 @@ if (!s.includes('final folder state clear guard')) {
 s = s.replace(/if \(!walletConnected\) \{\n      setFileFolders\(\{\}\);\n      setFolderParents\(\{\}\);\n      setActiveFolder\(ALL_FILES\);\n    \}\n  \}, \[walletConnected\]\);/g, 'if (!folderIdentityReady) {\n      setFileFolders({});\n      setFolderParents({});\n      setActiveFolder(ALL_FILES);\n    }\n  }, [folderIdentityReady]);');
 
 // Force New folder to work after verify-runtime-safety restores NativeP2PAppLive.
-if (!s.includes('final network createFolder')) {
-  patch(
-    /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
-    `  const createFolder = () => {
-    // final network createFolder
+// Always replace it, even if a previous final marker exists, because earlier final versions may be stale.
+patch(
+  /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
+  `  const createFolder = () => {
+    // final network createFolder v2
     const folder = newFolder.trim();
     if (!folder || folder === ALL_FILES || folder === UNCATEGORIZED) return;
-    if (!folderIdentityReady && view !== "company" && view !== "admin") {
-      toast.error("Connect wallet or sign in before creating folders");
-      return;
-    }
     const key = (view === "company" || view === "admin") && activeWorkspace ? companyFolderKey(activeWorkspace.workspaceId, folder) : personalFolderKey(folder);
     const parent = activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "";
     const nextFolders = { ...fileFolders, [key]: folder };
@@ -113,20 +114,18 @@ if (!s.includes('final network createFolder')) {
     setFolderParents(nextParents);
     setActiveFolder(folder);
     setNewFolder("");
+    toast.success(`Folder created: ${folder}`);
     if (view === "personal") {
       const names = new Set<string>();
       for (const value of Object.values(nextFolders)) if (value && value !== ALL_FILES && value !== UNCATEGORIZED) names.add(value);
       for (const value of Object.keys(nextParents)) if (value && value !== ALL_FILES && value !== UNCATEGORIZED) names.add(value);
       const foldersPayload = Array.from(names).map((name) => ({ id: name, name, parentId: nextParents[name] || null, updatedAt: new Date().toISOString() }));
-      void api.invoke("drive:saveFolders" as Channel, { folders: foldersPayload, fileFolders: nextFolders }).then(refresh).catch((error) => toast.error(err(error)));
+      if (api && folderIdentityReady) void api.invoke("drive:saveFolders" as Channel, { folders: foldersPayload, fileFolders: nextFolders }).then(refresh).catch((error) => toast.error(err(error)));
     }
   };
   const upload =`,
-    'createFolder final replace'
-  );
-}
-// Repair older createFolder guard.
-s = s.replace('if (!walletConnected && view !== "company" && view !== "admin") {\n      toast.error("Connect wallet or sign in before creating folders");', 'if (!folderIdentityReady && view !== "company" && view !== "admin") {\n      toast.error("Connect wallet or sign in before creating folders");');
+  'createFolder final replace'
+);
 
 // Repair a previously injected guard that referenced folderStorageKey in restored UI variants.
 s = s.replace(/\}, \[walletConnected, folderStorageKey\]\);/g, '}, [folderIdentityReady]);');
@@ -144,6 +143,10 @@ if (!s.includes('const folderIdentityReady =')) {
   console.error('[patch-live-folder-final-guard] failed to inject folderIdentityReady');
   process.exit(1);
 }
+if (!s.includes('final network createFolder v2')) {
+  console.error('[patch-live-folder-final-guard] failed to patch createFolder');
+  process.exit(1);
+}
 
 fs.writeFileSync(file, s, 'utf8');
-console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder' : '[patch-live-folder-final-guard] already applied');
+console.log(changed ? '[patch-live-folder-final-guard] installed final folder guard and createFolder v2' : '[patch-live-folder-final-guard] already applied');
