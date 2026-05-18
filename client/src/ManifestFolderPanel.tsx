@@ -24,6 +24,7 @@ type Props = {
   api: Bridge;
   busy?: boolean;
   enabled?: boolean;
+  activeFolderName?: string;
   onRefresh?: () => Promise<void> | void;
   onSelectFolder?: (folder: DriveFolder | null) => void;
 };
@@ -31,7 +32,11 @@ type Props = {
 const ROOT_ID = "";
 
 function idOf(folder?: DriveFolder | null) {
-  return String(folder?.folderId || folder?.id || folder?.hash || "");
+  return String(folder?.folderId || "");
+}
+
+function itemIdOf(folder?: DriveFolder | null) {
+  return String(folder?.id || folder?.folderId || folder?.hash || folder?.rootHash || "");
 }
 
 function parentOf(folder?: DriveFolder | null) {
@@ -68,7 +73,7 @@ function collectRemovedIds(root: DriveFolder, folders: DriveFolder[]) {
   return removed;
 }
 
-export default function ManifestFolderPanel({ api, busy = false, enabled = true, onRefresh, onSelectFolder }: Props) {
+export default function ManifestFolderPanel({ api, busy = false, enabled = true, activeFolderName = "", onRefresh, onSelectFolder }: Props) {
   const [folders, setFolders] = useState<DriveFolder[]>([]);
   const [activeFolderId, setActiveFolderId] = useState(ROOT_ID);
   const [newFolderName, setNewFolderName] = useState("");
@@ -112,18 +117,26 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
   }, [folders]);
 
   const activeFolder = activeFolderId ? byId.get(activeFolderId) || null : null;
+  const externalActiveFolderName = String(activeFolderName || "");
 
   const refreshFolders = async () => {
     if (!enabled) {
       setFolders([]);
-      return;
+      return [] as DriveFolder[];
     }
     setLoading(true);
     try {
       const next = await api.invoke<DriveFolder[]>("p2p:listFolders");
-      setFolders(Array.isArray(next) ? next : []);
+      const safeFolders = Array.isArray(next) ? next.filter((folder) => idOf(folder)) : [];
+      setFolders(safeFolders);
+      if (activeFolderId && !safeFolders.some((folder) => idOf(folder) === activeFolderId)) {
+        setActiveFolderId(ROOT_ID);
+        onSelectFolder?.(null);
+      }
+      return safeFolders;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to load folders");
+      return [] as DriveFolder[];
     } finally {
       setLoading(false);
     }
@@ -133,6 +146,16 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
     void refreshFolders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
+
+  useEffect(() => {
+    if (!externalActiveFolderName || ["All Files", "All files", "Uncategorized"].includes(externalActiveFolderName)) {
+      if (activeFolderId) setActiveFolderId(ROOT_ID);
+      return;
+    }
+    const externalFolder = folders.find((folder) => folder.name === externalActiveFolderName);
+    const externalFolderId = idOf(externalFolder);
+    if (externalFolderId && externalFolderId !== activeFolderId) setActiveFolderId(externalFolderId);
+  }, [externalActiveFolderName, folders, activeFolderId]);
 
   const syncRefresh = async () => {
     await refreshFolders();
@@ -149,15 +172,15 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
     if (!name) return;
     setLoading(true);
     try {
-      const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", {
-        name,
-        parentFolderId: activeFolderId || "",
-      });
-      if (Array.isArray(result?.folders)) setFolders(result.folders);
-      else if (result?.folder) setFolders((current) => [...current, result.folder as DriveFolder]);
+      const parentFolderId = activeFolderId && byId.has(activeFolderId) ? activeFolderId : "";
+      const payload = parentFolderId ? { name, parentFolderId } : { name };
+      const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", payload);
+      if (Array.isArray(result?.folders)) setFolders(result.folders.filter((folder) => idOf(folder)));
+      else if (result?.folder) setFolders((current) => [...current, result.folder as DriveFolder].filter((folder) => idOf(folder)));
       if (result?.folder) selectFolder(result.folder);
       setNewFolderName("");
       toast.success("Folder created");
+      await refreshFolders();
       await onRefresh?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to create folder");
@@ -171,9 +194,10 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
     if (!name || name === folder.name) return;
     setLoading(true);
     try {
-      const item = await api.invoke<DriveFolder>("p2p:renameItem", { itemId: folder.id || folder.folderId || folder.hash, name });
+      const item = await api.invoke<DriveFolder>("p2p:renameItem", { itemId: itemIdOf(folder), name });
       setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, ...item, name: item?.name || name } : candidate));
       toast.success("Folder renamed");
+      await refreshFolders();
       await onRefresh?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to rename folder");
@@ -196,11 +220,12 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
     setLoading(true);
     try {
       await api.invoke("p2p:moveItem", {
-        itemId: folder.id || folder.folderId || folder.hash,
+        itemId: itemIdOf(folder),
         targetFolderId: target ? idOf(target) : null,
       });
       setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, parentFolderId: target ? idOf(target) : "" } : candidate));
       toast.success("Folder moved");
+      await refreshFolders();
       await onRefresh?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to move folder");
@@ -213,11 +238,12 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
     if (!window.confirm(`Delete folder ${folderPath(folder, byId)} from network manifests?`)) return;
     setLoading(true);
     try {
-      await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });
+      await api.invoke("p2p:deleteItem", { itemId: itemIdOf(folder) });
       const removed = collectRemovedIds(folder, folders);
-      setFolders((current) => current.filter((candidate) => !removed.has(idOf(candidate))));
+      setFolders((current) => current.filter((candidate) => !removed.has(idOf(candidate)) && itemIdOf(candidate) !== itemIdOf(folder)));
       if (activeFolderId && removed.has(activeFolderId)) selectFolder(null);
       toast.success("Folder deleted");
+      await refreshFolders();
       await onRefresh?.();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete folder");
@@ -256,7 +282,7 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
         {ordered.map(({ folder, depth }) => {
           const selected = activeFolderId === idOf(folder);
           return (
-            <div key={idOf(folder) || folder.name} className={`rounded-2xl border ${selected ? "border-blue-500/40 bg-blue-950/20" : "border-zinc-800 bg-zinc-950/60"}`} style={{ marginLeft: depth * 14 }}>
+            <div key={idOf(folder) || itemIdOf(folder) || folder.name} className={`rounded-2xl border ${selected ? "border-blue-500/40 bg-blue-950/20" : "border-zinc-800 bg-zinc-950/60"}`} style={{ marginLeft: depth * 14 }}>
               <button onClick={() => selectFolder(folder)} className={`block w-full px-4 py-3 text-left text-sm ${selected ? "text-blue-100" : "text-zinc-300"}`}>
                 <span className="flex items-center justify-between gap-2">
                   <span className="min-w-0 truncate"><FolderOpen className="mr-2 inline size-4" />{folder.name}</span>
