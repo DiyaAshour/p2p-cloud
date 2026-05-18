@@ -38,6 +38,21 @@ function forceIdentityAccountCard(src) {
   return src;
 }
 
+function ensureDriveFoldersState(src) {
+  if (src.includes('const [driveFolders, setDriveFolders]')) return src;
+  const line = '  const [driveFolders, setDriveFolders] = useState<DriveFolder[]>([]);\n';
+  const exact = '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n';
+  if (src.includes(exact)) return src.replace(exact, exact + line);
+  const fileFoldersRegex = /(  const \[fileFolders, setFileFolders\][^\n]*\r?\n)/;
+  if (fileFoldersRegex.test(src)) return src.replace(fileFoldersRegex, `$1${line}`);
+  const activeWorkspaceRegex = /(  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n)/;
+  if (activeWorkspaceRegex.test(src)) return src.replace(activeWorkspaceRegex, `${line}$1`);
+  const newFolderRegex = /(  const \[newFolder, setNewFolder\][^\n]*\r?\n)/;
+  if (newFolderRegex.test(src)) return src.replace(newFolderRegex, `$1${line}`);
+  console.warn('[live-network-folders] could not inject driveFolders state; folder action helpers will stay disabled');
+  return src;
+}
+
 function patch() {
   let src = fs.readFileSync(livePath, 'utf8');
   const before = src;
@@ -69,14 +84,13 @@ function patch() {
   src = src.replace('if (!walletConnected) throw new Error("Connect wallet before importing a shared link.");', 'if (!identityConnected) throw new Error("Sign in before importing a shared link.");');
   src = src.replace('disabled={busy || !walletConnected}>Save to My Drive', 'disabled={busy || !identityConnected}>Save to My Drive');
   src = src.replace('if (!walletConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");', 'if (!identityConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");');
+
+  src = ensureDriveFoldersState(src);
+
   src = src.replace(
     '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
     '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setDriveFolders([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
   );
-
-  if (!src.includes('const [driveFolders, setDriveFolders]')) {
-    src = src.replace('  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});', '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n  const [driveFolders, setDriveFolders] = useState<DriveFolder[]>([]);');
-  }
 
   src = src.replace(
     '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];\n  }, [fileFolders, activeWorkspace]);',
