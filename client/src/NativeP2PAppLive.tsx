@@ -648,24 +648,30 @@ const visibleFiles = useMemo(() => {
   const refresh = async () => {
     if (!api) return;
 
-    const [nextSummary, nextFiles, nextWallet, nextCompany, nextFolders] = await Promise.all([
-      api.invoke<Summary>("p2p:networkSummary"),
-      api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
-      api.invoke<WalletState>("wallet:status"),
-      api.invoke<CompanyState>("company:state"),
-      api.invoke<DriveFolder[]>("p2p:listFolders"),
-    ]);
+    const refresh = async () => {
+  if (!api) return;
 
-    setSummary(nextSummary);
-    setFiles(Array.isArray(nextFiles) ? nextFiles : []);
-    setWallet(nextWallet);
-    setCompany(nextCompany);
-    setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
+  // مهم: نقرأ الهوية أولًا، لأن seed:login يكتب wallet.json من IPC منفصل.
+  // بعدها نجيب الملفات والفولدرات حسب الهوية الجديدة.
+  const nextWallet = await api.invoke<WalletState>("wallet:status");
+  setWallet(nextWallet);
 
-    if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
-      setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
-    }
-  };
+  const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
+    api.invoke<Summary>("p2p:networkSummary"),
+    api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
+    api.invoke<CompanyState>("company:state"),
+    api.invoke<DriveFolder[]>("p2p:listFolders"),
+  ]);
+
+  setSummary(nextSummary);
+  setFiles(Array.isArray(nextFiles) ? nextFiles : []);
+  setCompany(nextCompany);
+  setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
+
+  if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
+    setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
+  }
+};
 
   useEffect(() => {
     if (!api) return;
