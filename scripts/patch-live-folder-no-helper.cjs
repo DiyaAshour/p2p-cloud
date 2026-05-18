@@ -12,6 +12,23 @@ if (!fs.existsSync(liveFile)) {
 let s = fs.readFileSync(liveFile, 'utf8');
 const before = s;
 
+// Some restore patches remove folder identity helpers while keeping their usages.
+if (!s.includes('function identityStorageId(')) {
+  const helper = `function identityStorageId(wallet: WalletState | null) {
+  if (!wallet?.connected) return "guest";
+  if (wallet.authMode === "seed") return \`seed:\${wallet.accountId || wallet.seedFingerprint || wallet.username || "unknown"}\`;
+  return \`wallet:\${wallet.address || wallet.accountId || "unknown"}\`;
+}
+`;
+  if (s.includes('function readJson<T>')) {
+    s = s.replace(/function readJson<T>\([\s\S]*?\n}\r?\n/, (match) => match + helper);
+  } else if (s.includes('function getBridge()')) {
+    s = s.replace(/function getBridge\([\s\S]*?\n}\r?\n/, (match) => match + helper);
+  } else {
+    s = s.replace('const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";\n', 'const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";\n\n' + helper);
+  }
+}
+
 // Keep folder code independent from helpers that are removed/reordered by other patches.
 s = s.replace(
   /const key = \(view === "company" \|\| view === "admin"\) && activeWorkspace \? companyFolderKey\(activeWorkspace\.workspaceId, folder\) : personalFolderKey\(folder\);/g,
@@ -178,6 +195,10 @@ if (s.includes('identityLabel !== "Guest"')) {
   console.error('[patch-live-folder-no-helper] identityLabel dependency still exists');
   process.exit(1);
 }
+if (!s.includes('function identityStorageId(')) {
+  console.error('[patch-live-folder-no-helper] identityStorageId injection failed');
+  process.exit(1);
+}
 if (!s.includes('wallet?.seedFingerprint || wallet?.authMode === "seed"')) {
   console.error('[patch-live-folder-no-helper] folderIdentityReady repair failed');
   process.exit(1);
@@ -216,7 +237,7 @@ if (fs.existsSync(preloadFile)) {
 }
 
 if (s !== before || preloadChanged) {
-  console.log('[patch-live-folder-no-helper] fixed live folders: folderStorageKey, single-click create, manifest display best-effort, and personal file move');
+  console.log('[patch-live-folder-no-helper] fixed live folders: identityStorageId, folderStorageKey, single-click create, manifest display best-effort, and personal file move');
 } else {
   console.log('[patch-live-folder-no-helper] already safe');
 }
