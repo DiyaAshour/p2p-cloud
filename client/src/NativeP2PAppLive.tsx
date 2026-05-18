@@ -1,2084 +1,1679 @@
-import { useEffect, useMemo, useState } from "react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Building2,
-  Cloud,
-  Download,
-  Eye,
-  EyeOff,
-  FileCheck2,
-  FolderOpen,
-  HardDrive,
-  KeyRound,
-  Lock,
-  Pencil,
-  RefreshCw,
-  Search,
-  Share2,
-  ShieldCheck,
-  Trash2,
-  Upload,
-  UserPlus,
-  Users,
-  Wallet,
-  Wifi,
-  Zap,
-  FolderPlus,
-  MoveRight,
-} from "lucide-react";
-import { toast } from "sonner";
-import SignClient from "@walletconnect/sign-client";
-import { WalletConnectModal } from "@walletconnect/modal";
+import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
+import { verifyMessage } from 'viem';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { buildMerkleTree, getMerkleProof } from './merkle-engine.js';
+import { startP2PTransport } from './p2p-transport.js';
+import { isManifestSyncEnabled, pullWalletManifests, pushWalletManifest, deleteWalletManifest } from './manifest-sync.js';
+import { replicateChunk, repairManifests, countUnderReplicatedChunks } from './replication-engine.js';
+import { putChunkToSafetyPeer, getChunkFromSafetyPeer, safetyPeerUrl } from './safety-peer.js';
+import './seed-auth-cooldown-ipc.js';
 
-// ─── Channel Types ────────────────────────────────────────────────────────────
-type Channel =
-  | "p2p:start"
-  | "p2p:listFiles"
-  | "p2p:listFolders"
-  | "p2p:createFolder"
-  | "p2p:deleteItem"
-  | "p2p:renameItem"
-  | "p2p:moveItem"
-  | "p2p:uploadFiles"
-  | "p2p:downloadToPath"
-  | "p2p:delete"
-  | "p2p:deleteFolder"
-  | "p2p:networkSummary"
-  | "p2p:prepareProof"
-  | "wallet:status"
-  | "wallet:connect"
-  | "wallet:disconnect"
-  | "seed:create"
-  | "seed:login"
-  | "seed:recover"
-  | "company:state"
-  | "company:deviceIdentity"
-  | "company:createWorkspace"
-  | "company:inviteMember"
-  | "company:changeMemberRole"
-  | "company:removeMember"
-  | "company:addFile"
-  | "company:updateFile";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const APP_TITLE = 'p2p.cloud';
+const IS_DEV = !app.isPackaged;
+const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
+const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
+const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
+const AUTO_REPAIR_INTERVAL_MS = Math.max(30_000, Number(process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 60_000));
+const UPLOAD_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.P2P_UPLOAD_CONCURRENCY || 4)));
+const DOWNLOAD_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.P2P_DOWNLOAD_CONCURRENCY || 6)));
+const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
+function keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }
+const KDF_ALGORITHM = 'pbkdf2-sha256';
+const KDF_ITERATIONS = 310000;
+const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
+const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
+const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
+const FOLDER_MANIFEST_KIND = 'folder';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };
-type Plan = { id: string; name: string; quotaBytes: number; priceUsd: number };
-
-type WalletState = {
-  connected: boolean;
-  address: string;
-  planId?: string;
-  accountId?: string;
-  authMode?: "wallet" | "seed" | null;
-  username?: string | null;
-  seedFingerprint?: string | null;
-  usedBytes: number;
-  remainingBytes: number;
-  plan: Plan;
-  plans: Plan[];
-  minDrivePasswordLength?: number;
+const PLANS = {
+  free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
+  tb1: { id: 'tb1', name: '1 TB', quotaBytes: 1 * 1024 ** 4, priceUsd: 1, locked: true },
+  tb3: { id: 'tb3', name: '3 TB', quotaBytes: 3 * 1024 ** 4, priceUsd: 2.5, locked: true },
+  tb7: { id: 'tb7', name: '7 TB', quotaBytes: 7 * 1024 ** 4, priceUsd: 4.99, locked: true },
+  tb10: { id: 'tb10', name: '10 TB', quotaBytes: 10 * 1024 ** 4, priceUsd: 7.99, locked: true },
 };
 
-type Summary = {
-  totalFiles: number;
-  encryptedFiles: number;
-  totalBytes: number;
-  connectedPeers: number;
-  safetyPeerUrl?: string;
-};
+let mainWindow = null;
+let transportNode = null;
+let autoRepairTimer = null;
+let autoRepairRunning = false;
+let lastAutoRepairStatus = { ok: true, active: false, intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: null, repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'not-started', error: null };
+let transferProgress = { upload: null, download: null };
+let dataDir = null;
+let manifestsPath = null;
+let walletPath = null;
+let manifests = [];
+let walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+let lastSyncStatus = { ok: false, lastPulledAt: null, lastPushedAt: null, error: null, remoteFiles: 0 };
 
-type Role = "owner" | "admin" | "manager" | "editor" | "viewer" | "guest";
-
-type DeviceIdentity = {
-  deviceId: string;
-  displayName?: string;
-  email?: string;
-};
-
-type Member = {
-  memberId: string;
-  deviceId: string;
-  email: string;
-  displayName?: string;
-  role: Role;
-  status: "active" | "invited";
-  inviteToken?: string;
-};
-
-type CompanyFile = {
-  fileId: string;
-  rootHash: string;
-  hash?: string;
-  name: string;
-  size: number;
-  totalChunks: number;
-  folder?: string;
-  uploadedAt: string;
-  uploadedByDeviceId: string;
-  uploadedByName?: string;
-  hidden?: boolean;
-  deleted?: boolean;
-};
-
-type Workspace = {
-  workspaceId: string;
-  name: string;
-  ownerWallet?: string;
-  signatureValid?: boolean;
-  members: Member[];
-  files: CompanyFile[];
-  createdAt: string;
-  updatedAt?: string;
-};
-
-type CompanyState = {
-  ok: boolean;
-  deviceIdentity: DeviceIdentity;
-  workspaces: Workspace[];
-};
-
-type P2PFile = {
-  id?: string;
-  name: string;
-  size: number;
-  hash: string;
-  rootHash: string;
-  uploadedAt: string;
-  isEncrypted: boolean;
-  totalChunks: number;
-  ownerWallet?: string;
-  replicas?: string[];
-  replicationStatus?: string;
-  protectedChunks?: number;
-  needsRepairChunks?: number;
-  folderId?: string;
-  parentFolderId?: string;
-  folderName?: string;
-  folder?: string;
-};
-
-type DriveFolder = {
-  id?: string;
-  hash?: string;
-  rootHash?: string;
-  kind?: string;
-  isFolder?: boolean;
-  folderId: string;
-  name: string;
-  parentFolderId?: string | null;
-};
-
-type CreateFolderResponse =
-  | DriveFolder
-  | {
-      ok?: boolean;
-      folder?: DriveFolder;
-      folders?: DriveFolder[];
-    };
-
-type View = "personal" | "company" | "shared" | "admin";
-
-declare global {
-  interface Window {
-    electron?: Bridge;
-  }
-}
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-const ALL_FILES = "All files";
-const UNCATEGORIZED = "Uncategorized";
-const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";
-const WALLETCONNECT_PROJECT_ID =
-  (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID ||
-  "821b9d64c996dc59c7d18583fc7081f0";
-
-const WALLETCONNECT_CHAIN_ID = "eip155:1"; // Ethereum Mainnet
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function getBridge(): Bridge | null {
-  return typeof window !== "undefined" && typeof window.electron?.invoke === "function"
-    ? window.electron
-    : null;
-}
-
-function readJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function bytes(n = 0) {
-  if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(2)} TB`;
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(2)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(2)} KB`;
-  return `${n} B`;
-}
-
-function short(value = "") {
-  return value ? `${value.slice(0, 6)}...${value.slice(-4)}` : "Guest";
-}
-
-function date(value?: string) {
-  const d = new Date(value || "");
-  return Number.isNaN(d.getTime()) ? "unknown" : d.toLocaleString();
-}
-
-function err(error: unknown) {
-  return error instanceof Error ? error.message : "Operation failed";
-}
-
-function canManage(role?: Role | null) {
-  return role === "owner" || role === "admin" || role === "manager";
-}
-
-function canUpload(role?: Role | null) {
-  return role === "owner" || role === "admin" || role === "manager" || role === "editor";
-}
-
-function keyFor(file: P2PFile) {
-  return file.rootHash || file.hash;
-}
-
-function itemIdFor(file: P2PFile) {
-  return file.id || file.rootHash || file.hash;
-}
-
-function fileKeyMatches(companyFile: CompanyFile, file: P2PFile) {
-  return (
-    companyFile.rootHash === file.rootHash ||
-    companyFile.hash === file.hash ||
-    companyFile.rootHash === file.hash
+function normalizeWallet(address = '') { return String(address || '').trim().toLowerCase(); }
+function activeWallet() { return normalizeWallet(walletState.accountId || walletState.address); }
+function isValidWallet(address = '') { return /^0x[a-fA-F0-9]{40}$/.test(String(address).trim()); }
+function isVerifiedSeedIdentity() {
+  const accountId = String(walletState.accountId || walletState.address || '');
+  return Boolean(
+    walletState.connected &&
+    walletState.verified &&
+    walletState.authMode === 'seed' &&
+    accountId.startsWith('seed:')
   );
 }
 
-function protection(file: P2PFile) {
-  const status = file.replicationStatus || "protecting";
+function assertVerifiedWallet() {
+  if (isVerifiedSeedIdentity()) return;
 
-  if (status === "protected") {
-    return {
-      label: "Protected",
-      tone: "text-emerald-300",
-      details: `${file.protectedChunks ?? file.totalChunks}/${file.totalChunks} chunks`,
+  if (!walletState.connected || !walletState.verified || !activeWallet()) {
+    throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
+  }
+}
+function nowSeconds() { return Math.floor(Date.now() / 1000); }
+function hashBufferHex(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
+function firstLanAddress() { const nets = os.networkInterfaces(); for (const list of Object.values(nets)) for (const net of list || []) if (net && !net.internal && net.family === 'IPv4' && !net.address.startsWith('169.254.')) return net.address; return '127.0.0.1'; }
+function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(app.getPath('userData'), 'native-p2p-storage', 'chunks'); }
+function publicPeerUrl(node) { return process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || `ws://${firstLanAddress()}:${node.port}`; }
+function validateDrivePassword(drivePassword) { const password = String(drivePassword || '').trim(); if (password.length < MIN_DRIVE_PASSWORD_LENGTH) throw new Error(`Drive Password required. Use at least ${MIN_DRIVE_PASSWORD_LENGTH} characters.`); return password; }
+function drivePasswordFromPayload(payload = {}) { return validateDrivePassword(payload.drivePassword); }
+function splitIntoChunks(buffer) { const chunks = []; for (let offset = 0; offset < buffer.length; offset += CHUNK_SIZE_BYTES) { const data = buffer.slice(offset, offset + CHUNK_SIZE_BYTES); chunks.push({ index: chunks.length, size: data.length, data, hash: hashBufferHex(data) }); } return chunks; }
+function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
+function hasEncryptionMetadata(manifest = {}) { return Boolean(manifest.encryption && manifest.encryption.algorithm && manifest.encryption.keySource && manifest.encryption.salt && manifest.encryption.iv && manifest.encryption.authTag); }
+function isUsableManifest(manifest = {}) { return !(manifest.isEncrypted === true && !hasEncryptionMetadata(manifest)); }
+function clampConcurrency(value, fallback, max) { return Math.max(1, Math.min(max, Number(value || fallback))); }
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex;
+      nextIndex += 1;
+      results[current] = await worker(items[current], current);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function createProgress(kind, { fileName, totalBytes, totalChunks, concurrency }) {
+  const now = Date.now();
+  transferProgress[kind] = {
+    active: true,
+    phase: 'running',
+    fileName,
+    totalBytes,
+    transferredBytes: 0,
+    percent: 0,
+    speedBytesPerSecond: 0,
+    etaSeconds: null,
+    chunksDone: 0,
+    totalChunks,
+    concurrency,
+    startedAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    error: null,
+  };
+}
+
+function updateProgress(kind, { bytesDelta = 0, chunkDelta = 0, phase = 'running', error = null } = {}) {
+  const progress = transferProgress[kind];
+  if (!progress) return;
+  const now = Date.now();
+  const started = new Date(progress.startedAt).getTime() || now;
+  const elapsedSeconds = Math.max(0.001, (now - started) / 1000);
+  const transferredBytes = Math.min(progress.totalBytes, Number(progress.transferredBytes || 0) + Number(bytesDelta || 0));
+  const chunksDone = Math.min(progress.totalChunks, Number(progress.chunksDone || 0) + Number(chunkDelta || 0));
+  const speedBytesPerSecond = transferredBytes / elapsedSeconds;
+  const remainingBytes = Math.max(0, progress.totalBytes - transferredBytes);
+  transferProgress[kind] = {
+    ...progress,
+    phase,
+    transferredBytes,
+    percent: progress.totalBytes ? (transferredBytes / progress.totalBytes) * 100 : 100,
+    speedBytesPerSecond,
+    etaSeconds: speedBytesPerSecond > 0 && remainingBytes > 0 ? remainingBytes / speedBytesPerSecond : 0,
+    chunksDone,
+    updatedAt: new Date(now).toISOString(),
+    error,
+  };
+}
+
+function finishProgress(kind, phase = 'complete', error = null) {
+  const progress = transferProgress[kind];
+  if (!progress) return;
+  updateProgress(kind, { bytesDelta: 0, chunkDelta: 0, phase, error });
+  transferProgress[kind] = { ...transferProgress[kind], active: false, phase, error };
+}
+
+function parseLoginMessageTime(message = '') {
+  const match = String(message).match(/^Time:\s*(.+)$/im);
+  if (!match) throw new Error('Wallet login message is missing timestamp');
+  const time = new Date(match[1]);
+  if (Number.isNaN(time.getTime())) throw new Error('Wallet login timestamp is invalid');
+  return time;
+}
+
+async function verifyWalletLoginPayload(payload = {}, address = '') {
+  const normalizedAddress = normalizeWallet(address);
+  const message = String(payload.loginMessage || '');
+  const signature = String(payload.signature || '');
+
+  if (!message || !signature) throw new Error('Missing wallet signature. Reconnect wallet.');
+  if (!message.startsWith('p2p.cloud login\n')) throw new Error('Unsupported wallet login message');
+  if (!message.toLowerCase().includes(`wallet: ${normalizedAddress}`)) throw new Error('Wallet login message does not match connected address');
+
+  const signedAt = parseLoginMessageTime(message);
+  const age = Date.now() - signedAt.getTime();
+  if (age > WALLET_LOGIN_MAX_AGE_MS) throw new Error('Wallet login signature expired. Reconnect wallet.');
+  if (age < -WALLET_LOGIN_MAX_FUTURE_MS) throw new Error('Wallet login timestamp is too far in the future');
+
+  const valid = await verifyMessage({ address: normalizedAddress, message, signature });
+  if (!valid) throw new Error('Wallet signature verification failed');
+
+  return { message, signature, signedAt: signedAt.toISOString() };
+}
+
+function isValidStorageIdentity(identity = '') {
+  const value = normalizeWallet(identity);
+  return isValidWallet(value) || value.startsWith('seed:');
+}
+
+function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
+  const identity = normalizeWallet(ownerWallet);
+
+  if (!isValidStorageIdentity(identity)) {
+    throw new Error('Valid wallet or seed identity required for private file encryption.');
+  }
+
+  const password = validateDrivePassword(drivePassword);
+  const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');
+
+  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
+}
+
+function encryptPrivateBuffer(plainBuffer, ownerWallet = activeWallet(), drivePassword) {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = deriveDriveKey({ ownerWallet, drivePassword, salt });
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plainBuffer), cipher.final()]);
+  return { ciphertext, encryption: { version: 4, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash: hashBufferHex(plainBuffer), originalSize: plainBuffer.length } };
+}
+
+function decryptPrivateBuffer(ciphertext, manifest, drivePassword) {
+  if (!manifest?.encryption || manifest.encryption.algorithm !== ENCRYPTION_ALGORITHM) throw new Error('Encrypted file metadata is missing or unsupported');
+  if (manifest.encryption.keySource !== ENCRYPTION_KEY_SOURCE) throw new Error(`This file was encrypted with an older key source (${manifest.encryption.keySource || 'unknown'}). Re-upload it with Drive Password encryption.`);
+  const key = deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: manifest.encryption.salt });
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(manifest.encryption.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(manifest.encryption.authTag, 'base64'));
+  const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  if (manifest.encryption.originalHash && hashBufferHex(plain) !== manifest.encryption.originalHash) throw new Error('Private file integrity failed after decrypt');
+  return plain;
+}
+
+function ensureDataDir() {
+  if (dataDir && manifestsPath && walletPath) return;
+  dataDir = path.join(app.getPath('userData'), 'native-p2p-storage');
+  manifestsPath = path.join(dataDir, 'manifests.json');
+  walletPath = path.join(dataDir, 'wallet.json');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(chunkStoreDir(), { recursive: true });
+  if (!fs.existsSync(manifestsPath)) fs.writeFileSync(manifestsPath, '[]', 'utf8');
+  if (!fs.existsSync(walletPath)) fs.writeFileSync(walletPath, JSON.stringify(walletState, null, 2), 'utf8');
+}
+
+function loadWallet() {
+  ensureDataDir();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(walletPath, 'utf8'));
+    walletState = { ...walletState, ...parsed, planId: PLANS[parsed?.planId] ? parsed.planId : 'free', encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+    if (walletState.planId !== 'free' && (!walletState.paidUntil || Number(walletState.paidUntil) < nowSeconds())) walletState = { ...walletState, planId: 'free', paidUntil: null, subscriptionTx: null };
+  } catch {
+    walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+  }
+}
+
+function persistWallet() { ensureDataDir(); const { encryptionSecret, loginSignature, ...safeWallet } = walletState; fs.writeFileSync(walletPath, JSON.stringify({ ...safeWallet, encryptionKeySource: ENCRYPTION_KEY_SOURCE }, null, 2), 'utf8'); }
+function loadManifests() { ensureDataDir(); try { const parsed = JSON.parse(fs.readFileSync(manifestsPath, 'utf8')); manifests = Array.isArray(parsed) ? parsed.filter(isUsableManifest) : []; persistManifests(); } catch { manifests = []; } }
+function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, JSON.stringify(manifests.filter(isUsableManifest), null, 2), 'utf8'); }
+function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
+function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }
+function sanitizeFolderManifest(folder = {}) { Object.assign(folder, { kind: 'folder', isFolder: true, isEncrypted: false, visibility: 'private', isPublic: false, size: 0, storedSize: 0, totalChunks: 0, chunkSize: 0, chunks: [], encryption: null, replicas: Array.isArray(folder.replicas) ? folder.replicas : [] }); return folder; }
+function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }
+function walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true || String(m.hash || '').startsWith('folder:')).map(sanitizeFolderManifest); }
+function folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }
+function assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }
+function sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }
+function folderIdFromName(name = '') { return crypto.createHash('sha256').update(folderOwnerIdentity() + ':folder:' + String(name || '').trim().toLowerCase() + ':' + Date.now() + ':' + crypto.randomBytes(8).toString('hex')).digest('hex'); }
+function findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }
+function findFolderByName(name = '') { return walletFolderManifests().find((folder) => String(folder.name || '').toLowerCase() === String(name || '').toLowerCase()); }
+function assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }
+function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
+function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }
+function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free; if (totalStoredBytesForWallet() + nextBytes > plan.quotaBytes) throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`); }
+function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletFileManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
+
+async function syncPull() {
+  const identity = activeWallet();
+
+  if (!isManifestSyncEnabled() || !walletState.connected || !identity) {
+    return { ok: false, skipped: true };
+  }
+
+  try {
+    const remote = await pullWalletManifests(identity);
+
+    if (!Array.isArray(remote)) return { ok: false, skipped: true };
+
+    const map = new Map(
+      manifests
+        .filter(isUsableManifest)
+        .map((m) => [`${normalizeWallet(m.ownerWallet)}:${m.hash}`, m])
+    );
+
+    for (const m of remote.filter(isUsableManifest)) {
+      const key = `${normalizeWallet(m.ownerWallet)}:${m.hash}`;
+      const local = map.get(key);
+
+      map.set(key, {
+        ...(local || {}),
+        ...m,
+        ownerWallet: normalizeWallet(m.ownerWallet),
+        encryption: m.encryption || local?.encryption || null,
+      });
+    }
+
+    manifests = Array.from(map.values()).filter(isUsableManifest);
+    persistManifests();
+
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: true,
+      lastPulledAt: new Date().toISOString(),
+      error: null,
+      remoteFiles: remote.length,
+    };
+
+    return { ok: true, remoteFiles: remote.length };
+  } catch (e) {
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: false,
+      error: e?.message || String(e),
+    };
+
+    console.warn('[manifest-sync] pull failed:', e?.message || e);
+    throw new Error(`Manifest sync pull failed: ${e?.message || e}`);
+  }
+}
+async function syncPush(manifest) {
+  if (!isManifestSyncEnabled()) return { ok: false, skipped: true };
+  try {
+    const result = await pushWalletManifest(manifest);
+    lastSyncStatus = { ...lastSyncStatus, ok: true, lastPushedAt: new Date().toISOString(), error: null };
+    return result || { ok: true };
+  } catch (e) {
+    lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) };
+    console.warn('[manifest-sync] push failed:', e?.message || e);
+    throw new Error(`File was saved locally, but cross-device sync failed: ${e?.message || e}`);
+  }
+}
+async function syncDelete(ownerWallet, hash) { try { if (isManifestSyncEnabled()) await deleteWalletManifest(ownerWallet, hash); } catch (e) { console.warn('[manifest-sync] delete failed:', e?.message || e); } }
+
+function ensureTransport(options = {}) {
+  if (!transportNode) {
+    const port = Number(process.env.P2P_TRANSPORT_PORT || 8787);
+    const publicUrl = process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || `ws://${firstLanAddress()}:${port}`;
+    transportNode = startP2PTransport({ ...options, publicUrl, chunkStoreDir: chunkStoreDir() });
+  }
+  return transportNode;
+}
+
+async function runAutoRepair(reason = 'interval') {
+  if (autoRepairRunning) {
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: true,
+      skippedReason: 'already-running',
+    };
+    return lastAutoRepairStatus;
+  }
+
+  if (!walletState.connected || !walletState.verified || !activeWallet()) {
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: Boolean(autoRepairTimer),
+      skippedReason: 'identity-not-verified',
+      error: null,
+    };
+    return lastAutoRepairStatus;
+  }
+
+  const node = ensureTransport({});
+  const own = walletManifests();
+  const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);
+
+  if (underReplicatedChunks <= 0) {
+    lastAutoRepairStatus = {
+      ok: true,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks: 0,
+      underReplicatedChunks: 0,
+      skippedReason: 'healthy',
+      error: null,
+    };
+    return lastAutoRepairStatus;
+  }
+
+  autoRepairRunning = true;
+
+  try {
+    console.log(`[auto-repair] ${reason}: repairing ${underReplicatedChunks} under-replicated chunk(s)`);
+
+    const result = await repairManifests({
+      node,
+      manifests: own,
+      configuredTargetReplicas: TARGET_REPLICAS,
+      persistManifests,
+      syncPush,
+    });
+
+    const repairedChunks = (result.report || []).filter((entry) => entry.repaired).length;
+
+    lastAutoRepairStatus = {
+      ok: true,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks,
+      underReplicatedChunks,
+      skippedReason: null,
+      error: null,
+    };
+
+    return lastAutoRepairStatus;
+  } catch (error) {
+    lastAutoRepairStatus = {
+      ok: false,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks: 0,
+      underReplicatedChunks,
+      skippedReason: null,
+      error: error?.message || String(error),
+    };
+
+    console.warn('[auto-repair] failed:', error?.message || error);
+    return lastAutoRepairStatus;
+  } finally {
+    autoRepairRunning = false;
+  }
+}
+
+function startAutoRepairLoop() {
+  if (autoRepairTimer) return;
+  autoRepairTimer = setInterval(() => {
+    runAutoRepair('interval').catch((error) => console.warn('[auto-repair] unhandled:', error?.message || error));
+  }, AUTO_REPAIR_INTERVAL_MS);
+  autoRepairTimer.unref?.();
+  lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, intervalMs: AUTO_REPAIR_INTERVAL_MS, skippedReason: 'waiting' };
+  runAutoRepair('startup').catch((error) => console.warn('[auto-repair] startup failed:', error?.message || error));
+}
+
+function stopAutoRepairLoop() {
+  if (!autoRepairTimer) return;
+  clearInterval(autoRepairTimer);
+  autoRepairTimer = null;
+  lastAutoRepairStatus = { ...lastAutoRepairStatus, active: false, skippedReason: 'stopped' };
+}
+
+function safePeerList(node) {
+  return Array.from(node.peerInfo?.values?.() || []).slice(0, 50).map((peer) => ({ peerId: String(peer.peerId || ''), url: peer.url || null, status: peer.status || null, direction: peer.direction || null, lastSeen: peer.lastSeen || null }));
+}
+
+function networkSummary() {
+  const node = ensureTransport({});
+  const own = walletManifests();
+  const connectedPeers = node.connectedPeerIds?.() || [];
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: safePeerList(node), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
+}
+
+function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
+function resolveRendererIndexPath() { const candidates = [path.join(app.getAppPath(), 'dist', 'public', 'index.html'), path.join(app.getAppPath(), 'public', 'index.html'), path.join(__dirname, '..', 'dist', 'public', 'index.html'), path.join(process.resourcesPath || '', 'app', 'dist', 'public', 'index.html')]; for (const c of candidates) if (c && fs.existsSync(c)) return c; throw new Error(`Renderer index.html not found. Tried: ${candidates.join(' | ')}`); }
+function createMainWindow() { mainWindow = new BrowserWindow({ title: APP_TITLE, width: 1280, height: 820, minWidth: 980, minHeight: 680, backgroundColor: '#09090b', show: false, webPreferences: { preload: resolvePreloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: false } }); mainWindow.once('ready-to-show', () => mainWindow?.show()); mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); if (IS_DEV) mainWindow.loadURL(DEV_SERVER_URL); else mainWindow.loadFile(resolveRendererIndexPath()); mainWindow.on('closed', () => { mainWindow = null; }); }
+
+ipcMain.handle('wallet:status', async () => {
+  loadWallet();
+  loadManifests();
+
+  if (walletState.connected && walletState.verified) {
+    try {
+      await syncPull();
+    } catch (error) {
+      lastSyncStatus = {
+        ...lastSyncStatus,
+        ok: false,
+        error: error?.message || String(error),
+      };
+    }
+  }
+
+  return walletSummary();
+});
+
+ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+
+  const address = normalizeWallet(payload.address);
+
+  if (!isValidWallet(address)) {
+    throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.');
+  }
+
+  const login = await verifyWalletLoginPayload(payload, address);
+  const sameWallet = address === activeWallet();
+
+  walletState = {
+    ...walletState,
+    connected: true,
+    verified: true,
+    authMode: 'wallet',
+    address,
+    accountId: address,
+    username: null,
+    seedFingerprint: null,
+    planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free',
+    connectedAt: new Date().toISOString(),
+    verifiedAt: login.signedAt,
+    loginMessage: login.message,
+    loginSignature: undefined,
+    encryptionSecret: undefined,
+    encryptionKeySource: ENCRYPTION_KEY_SOURCE,
+  };
+
+  persistWallet();
+
+  try {
+    await syncPull();
+  } catch (error) {
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: false,
+      error: error?.message || String(error),
     };
   }
 
-  if (status === "needs-repair") {
-    return {
-      label: "Needs repair",
-      tone: "text-amber-300",
-      details: `${file.needsRepairChunks ?? 0} chunk(s) need repair`,
-    };
+  startAutoRepairLoop();
+
+  return walletSummary();
+});
+
+ipcMain.handle('wallet:disconnect', async () => {
+  stopAutoRepairLoop();
+
+  walletState = {
+    ...walletState,
+    connected: false,
+    verified: false,
+    authMode: null,
+    address: '',
+    accountId: '',
+    username: null,
+    seedFingerprint: null,
+    planId: 'free',
+    connectedAt: null,
+    verifiedAt: null,
+    paidUntil: null,
+    subscriptionTx: null,
+    loginMessage: null,
+    loginSignature: undefined,
+    encryptionSecret: undefined,
+    encryptionKeySource: ENCRYPTION_KEY_SOURCE,
+  };
+
+  persistWallet();
+  return walletSummary();
+});
+ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
+ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
+ipcMain.handle('p2p:listFolders', async () => {
+  if (!walletState.connected || !walletState.verified) return [];
+  await syncPull();
+  return walletFolderManifests().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+});
+
+ipcMain.handle('p2p:createFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const ownerWallet = folderOwnerIdentity();
+  const name = sanitizeFolderName(payload.name);
+  const parentFolderId = String(payload.parentFolderId || '');
+  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');
+  if (walletFolderManifests().some((folder) => String(folder.parentFolderId || '') === parentFolderId && String(folder.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
+  const folderId = folderIdFromName(name);
+  const folder = { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, id: ownerWallet + ':folder:' + folderId, hash: 'folder:' + folderId, rootHash: 'folder:' + folderId, folderId, name, parentFolderId, ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
+  manifests.push(folder);
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:renameFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folderId = String(payload.folderId || '');
+  const name = sanitizeFolderName(payload.name);
+  const folder = findFolderById(folderId) || findFolderByName(payload.oldName || '');
+  if (!folder) throw new Error('Folder not found');
+  if (walletFolderManifests().some((candidate) => candidate.folderId !== folder.folderId && String(candidate.parentFolderId || '') === String(folder.parentFolderId || '') && String(candidate.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
+  Object.assign(folder, { name, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:moveFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folderId = String(payload.folderId || '');
+  const parentFolderId = String(payload.parentFolderId || '');
+  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');
+  if (!folder) throw new Error('Folder not found');
+  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Target folder not found');
+  assertFolderNotDescendant(folder.folderId, parentFolderId);
+  Object.assign(folder, { parentFolderId, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folder = findFolderById(String(payload.folderId || '')) || findFolderByName(payload.name || '');
+  if (!folder) throw new Error('Folder not found');
+  const removed = new Set([folder.folderId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const child of walletFolderManifests()) if (!removed.has(child.folderId) && removed.has(String(child.parentFolderId || ''))) { removed.add(child.folderId); changed = true; }
   }
+  const changedFiles = [];
+  for (const file of walletFileManifests()) {
+    if (removed.has(String(file.folderId || ''))) {
+      file.folderId = '';
+      file.folderName = '';
+      file.folder = '';
+      file.updatedAt = new Date().toISOString();
+      changedFiles.push(file);
+    }
+  }
+  const removedFolders = walletFolderManifests().filter((candidate) => removed.has(candidate.folderId));
+  manifests = manifests.filter((m) => !(m.kind === FOLDER_MANIFEST_KIND && removed.has(m.folderId)));
+  persistManifests();
+  for (const file of changedFiles) await syncPush(file);
+  for (const removedFolder of removedFolders) await syncDelete(folderOwnerIdentity(), removedFolder.hash);
+  await syncPull();
+  return { ok: true, removed: removed.size, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this identity');
+  const folderId = String(payload.folderId || '');
+  const folder = folderId ? findFolderById(folderId) : (payload.folderName ? findFolderByName(payload.folderName) : null);
+  if (folderId && !folder) throw new Error('Target folder not found');
+  manifest.folderId = folder?.folderId || '';
+  manifest.folderName = folder?.name || String(payload.folderName || '');
+  manifest.folder = manifest.folderName;
+  manifest.updatedAt = new Date().toISOString();
+  persistManifests();
+  await syncPush(manifest);
+  await syncPull();
+  return { ok: true, file: manifest };
+});
+
+
+ipcMain.handle('p2p:updateFile', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const hash = String(payload.hash || payload.rootHash || '');
+  const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : {};
+  const manifest = walletFileManifests().find((file) => file.hash === hash || file.rootHash === hash);
+  if (!manifest) throw new Error('File not found for this identity');
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'name')) {
+    const nextName = String(patch.name || '').trim();
+    if (!nextName) throw new Error('File name is required');
+    manifest.name = nextName;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'folder')) {
+    const folderName = String(patch.folder || '').trim();
+    if (!folderName) {
+      manifest.folderId = '';
+      manifest.folderName = '';
+      manifest.folder = '';
+    } else {
+      let folder = findFolderByName(folderName);
+      if (!folder) {
+        const ownerWallet = folderOwnerIdentity();
+        const folderId = folderIdFromName(folderName);
+        folder = { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, id: ownerWallet + ':folder:' + folderId, hash: 'folder:' + folderId, rootHash: 'folder:' + folderId, folderId, name: folderName, parentFolderId: '', ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
+        manifests.push(folder);
+        await syncPush(folder);
+      }
+      manifest.folderId = folder.folderId;
+      manifest.folderName = folder.name;
+      manifest.folder = folder.name;
+    }
+  }
+
+  manifest.updatedAt = new Date().toISOString();
+  persistManifests();
+  await syncPush(manifest);
+  await syncPull();
+  return { ok: true, file: manifest };
+});
+
+ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => {
+  if (!walletState.connected || !walletState.verified) return [];
+  await syncPull();
+  const query = String(payload.query || '').trim().toLowerCase();
+  const folders = typeof walletFolderManifests === 'function' ? walletFolderManifests() : walletManifests().filter((m) => m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:'));
+  const files = typeof walletFileManifests === 'function' ? walletFileManifests() : walletManifests().filter((m) => !(m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:')));
+  const folderById = new Map();
+  const folderByName = new Map();
+  for (const folder of folders) {
+    const name = String(folder.name || '').trim();
+    if (name) folderByName.set(name.toLowerCase(), folder);
+    for (const id of [folder.folderId, folder.id, folder.hash, folder.rootHash].filter(Boolean)) folderById.set(String(id), folder);
+  }
+  const changed = [];
+  for (const file of files) {
+    const rawId = String(file.parentFolderId || file.folderId || '').trim();
+    const rawName = String(file.folderName || file.folder || '').trim();
+    const folder = (rawId && folderById.get(rawId)) || (rawName && folderByName.get(rawName.toLowerCase())) || null;
+    const nextFolderId = folder ? String(folder.folderId || '') : '';
+    const nextFolderName = folder ? String(folder.name || '') : '';
+    if (String(file.folderId || '') !== nextFolderId || String(file.parentFolderId || '') !== nextFolderId || String(file.folderName || '') !== nextFolderName || String(file.folder || '') !== nextFolderName) {
+      file.folderId = nextFolderId;
+      file.parentFolderId = nextFolderId;
+      file.folderName = nextFolderName;
+      file.folder = nextFolderName;
+      file.updatedAt = new Date().toISOString();
+      changed.push(file);
+    }
+  }
+  if (changed.length) {
+    persistManifests();
+    for (const file of changed) await syncPush(file);
+    console.log('[p2p:listFiles] normalized stale folder labels', changed.length);
+  }
+  if (!query) return files;
+  return files.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || '', f.folder || ''].some((v) => String(v || '').toLowerCase().includes(query)));
+});
+
+ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
+  const node = ensureTransport({});
+  if (!payload.bytes) throw new Error('File bytes are required');
+  const originalBuffer = Buffer.from(payload.bytes);
+  assertWalletUploadAllowed(originalBuffer.length);
+  const ownerWallet = activeWallet();
+  const privateFile = Boolean(payload.isEncrypted);
+  const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
+  const secured = privateFile ? encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword) : { ciphertext: originalBuffer, encryption: null };
+  const storedBuffer = secured.ciphertext;
+  const chunks = splitIntoChunks(storedBuffer);
+  const tree = buildMerkleTree(chunks.map((c) => c.hash));
+  const storedHash = hashBufferHex(storedBuffer);
+  const fileReplicas = new Set([node.peerId]);
+  const chunkResults = new Array(chunks.length);
+  const uploadConcurrency = clampConcurrency(payload.uploadConcurrency, UPLOAD_CONCURRENCY, 12);
+  createProgress('upload', { fileName: String(payload.name || 'file'), totalBytes: storedBuffer.length, totalChunks: chunks.length, concurrency: uploadConcurrency });
+
+  try {
+    await mapWithConcurrency(chunks, uploadConcurrency, async (chunk) => {
+      const chunkPayload = { hash: chunk.hash, data: chunk.data.toString('base64'), index: chunk.index, size: chunk.size, ownerWallet, encrypted: privateFile };
+      const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
+      try {
+        await putChunkToSafetyPeer(chunkPayload, node.peerId);
+        replicas.push('aws-safety-peer');
+      } catch (error) {
+        throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+      }
+      chunkResults[chunk.index] = { index: chunk.index, hash: chunk.hash, size: chunk.size, replicas: unique(replicas), proof: getMerkleProof(tree, chunk.index) };
+      updateProgress('upload', { bytesDelta: chunk.size, chunkDelta: 1 });
+    });
+  } catch (error) {
+    finishProgress('upload', 'error', error?.message || String(error));
+    throw error;
+  }
+
+  const targetFolderId = String(payload.folderId || '');
+  const targetFolder = targetFolderId ? findFolderById(targetFolderId) : (payload.folderName ? findFolderByName(payload.folderName) : null);
+  if (targetFolderId && !targetFolder) throw new Error('Target folder not found');
+  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', folderId: targetFolder?.folderId || '', folderName: targetFolder?.name || String(payload.folderName || ''), folder: targetFolder?.name || String(payload.folderName || ''), chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };
+
+  for (const chunkMeta of manifest.chunks) {
+    for (const peerId of chunkMeta.replicas || []) fileReplicas.add(peerId);
+  }
+
+  manifest.replicas = unique(Array.from(fileReplicas));
+  manifests = manifests.filter((m) => !(normalizeWallet(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
+  manifests.push(manifest);
+  persistManifests();
+  persistWallet();
+  await syncPush(manifest);
+  await syncPull();
+  finishProgress('upload');
+  return { ok: true, file: manifest, summary: networkSummary(), sync: lastSyncStatus, progress: transferProgress.upload };
+});
+
+ipcMain.handle('p2p:download', async (_event, payload = {}) => {
+  assertVerifiedWallet();
+  await syncPull();
+  const node = ensureTransport({});
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this wallet');
+  const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
+  const buffers = new Array(orderedChunks.length);
+  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
+  createProgress('download', { fileName: manifest.name, totalBytes: Number(manifest.storedSize || manifest.size || 0), totalChunks: orderedChunks.length, concurrency: downloadConcurrency });
+
+  try {
+    await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+      const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+      let chunk = local;
+      if (!chunk) {
+        try {
+          chunk = await node.fetchChunkFromNetwork(meta.hash);
+        } catch (error) {
+          console.warn('[p2p:download] network fetch failed, trying safety peer:', error?.message || error);
+          chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+        }
+      }
+      node.storeLocalChunk?.(chunk);
+      const buffer = Buffer.from(chunk.data, 'base64');
+      if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
+      buffers[meta.index] = buffer;
+      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+    });
+  } catch (error) {
+    finishProgress('download', 'error', error?.message || String(error));
+    throw error;
+  }
+
+  const storedBuffer = Buffer.concat(buffers);
+  if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed');
+  const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
+  const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer;
+  finishProgress('download');
+  return { ok: true, file: manifest, bytes: Array.from(outputBuffer), progress: transferProgress.download };
+});
+ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
+for (const channel of [
+  'p2p:uploadFiles',
+  'p2p:downloadToPath',
+  'p2p:moveItem',
+  'p2p:renameItem',
+  'p2p:deleteItem',
+]) {
+  try { ipcMain.removeHandler(channel); } catch {}
+}
+
+function safeOutputName(name = 'download') {
+  return String(name || 'download').replace(/[\\/:*?"<>|]/g, '_');
+}
+
+function isFolderManifest(manifest = {}) {
+  return (
+    manifest.kind === 'folder' ||
+    manifest.type === 'folder' ||
+    manifest.isFolder === true ||
+    manifest.name === '.p2p-folder' ||
+    Boolean(manifest.folderId && !manifest.chunks?.length) ||
+    Boolean(manifest.folderId && String(manifest.hash || '').startsWith('folder:'))
+  );
+}
+
+function manifestItemId(manifest = {}) {
+  return String(manifest.folderId || manifest.id || manifest.rootHash || manifest.hash || '');
+}
+
+function canTouchManifest(manifest = {}) {
+  const owner = normalizeWallet(manifest.ownerWallet || manifest.owner || manifest.wallet || '');
+  return !owner || owner === activeWallet();
+}
+
+function ownedManifestCandidates() {
+  return manifests
+    .filter(isUsableManifest)
+    .filter(canTouchManifest);
+}
+
+function manifestValues(manifest = {}) {
+  const hash = String(manifest.hash || '').trim();
+  const rootHash = String(manifest.rootHash || '').trim();
+
+  return unique([
+    manifest.id,
+    manifest.fileId,
+    manifest.folderId,
+    manifest.itemId,
+    hash,
+    rootHash,
+    hash.replace(/^folder:/, ''),
+    rootHash.replace(/^folder:/, ''),
+    manifest.name,
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function payloadIds(payload = {}) {
+  return unique([
+    payload.itemId,
+    payload.folderId,
+    payload.fileId,
+    payload.id,
+    payload.rootHash,
+    payload.hash,
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function folderFromPayload(payload = {}) {
+  const folderId = String(payload.folderId || payload.itemId || payload.id || '').trim();
+
+  if (!folderId) return null;
 
   return {
-    label: "Protecting",
-    tone: "text-blue-300",
-    details: `${file.protectedChunks ?? 0}/${file.totalChunks} protected`,
+    kind: 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId,
+    id: folderId,
+    hash: `folder:${folderId}`,
+    rootHash: `folder:${folderId}`,
+    ownerWallet: activeWallet(),
+    name: String(payload.name || ''),
+    parentFolderId: String(payload.parentFolderId || ''),
+    updatedAt: new Date().toISOString(),
   };
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-type AskTextOptions = {
-  title: string;
-  message?: string;
-  defaultValue?: string;
-  placeholder?: string;
-  inputType?: "text" | "password";
-  confirmText?: string;
-  danger?: boolean;
-  hideInput?: boolean;
-};
+function findAnyItem(payload = {}) {
+  const ids = payloadIds(payload);
 
-function askText(options: AskTextOptions): Promise<string | null> {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className =
-      "fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4";
+  if (!ids.length) return null;
 
-    const card = document.createElement("div");
-    card.className =
-      "w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-5 text-zinc-50 shadow-2xl";
+  return ownedManifestCandidates().find((manifest) => {
+    const values = manifestValues(manifest);
+    return ids.some((id) => values.includes(id));
+  }) || null;
+}
 
-    const title = document.createElement("h2");
-    title.className = "text-base font-semibold";
-    title.textContent = options.title;
-    card.appendChild(title);
+function findFolderByAny(value = '') {
+  const id = String(value || '').trim();
 
-    if (options.message) {
-      const message = document.createElement("p");
-      message.className = "mt-2 whitespace-pre-wrap text-sm text-zinc-400";
-      message.textContent = options.message;
-      card.appendChild(message);
+  if (!id) return null;
+
+  return ownedManifestCandidates().find((manifest) => {
+    if (!isFolderManifest(manifest)) return false;
+    return manifestValues(manifest).includes(id);
+  }) || null;
+}
+
+function folderDisplayName(folder) {
+  return folder?.name || '';
+}
+
+function ensureManifestTracked(item) {
+  if (!item) return null;
+
+  const existing = findAnyItem({
+    itemId: item.folderId || item.id || item.hash || item.rootHash,
+    hash: item.hash,
+    rootHash: item.rootHash,
+  });
+
+  if (existing) return existing;
+
+  if (!item.ownerWallet) item.ownerWallet = activeWallet();
+
+  if (isFolderManifest(item)) {
+    const folderId = String(item.folderId || item.id || item.hash || crypto.randomUUID())
+      .replace(/^folder:/, '')
+      .trim();
+
+    item.folderId = folderId;
+    item.id = item.id || folderId;
+    item.hash = item.hash || `folder:${folderId}`;
+    item.rootHash = item.rootHash || item.hash;
+    item.kind = item.kind || 'folder';
+    item.type = item.type || 'folder';
+    item.isFolder = true;
+    item.updatedAt = new Date().toISOString();
+  }
+
+  manifests.push(item);
+  return item;
+}
+
+function assertFolderMoveSafe(folderId, targetFolderId) {
+  const source = String(folderId || '').replace(/^folder:/, '').trim();
+  const target = String(targetFolderId || '').replace(/^folder:/, '').trim();
+
+  if (!source || !target) return;
+
+  if (source === target) {
+    throw new Error('Cannot move folder into itself');
+  }
+
+  const folders = ownedManifestCandidates().filter(isFolderManifest);
+  let cursor = target;
+  const seen = new Set();
+
+  while (cursor) {
+    if (cursor === source) {
+      throw new Error('Cannot move folder inside its child');
     }
 
-    let input: HTMLInputElement | null = null;
-
-    if (!options.hideInput) {
-      input = document.createElement("input");
-      input.type = options.inputType || "text";
-      input.value = options.defaultValue || "";
-      input.placeholder = options.placeholder || "";
-      input.className =
-        "mt-4 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-50 outline-none";
-      card.appendChild(input);
+    if (seen.has(cursor)) {
+      throw new Error('Folder tree cycle detected');
     }
 
-    const actions = document.createElement("div");
-    actions.className = "mt-4 flex justify-end gap-2";
+    seen.add(cursor);
 
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className =
-      "rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800";
-    cancel.textContent = "Cancel";
+    const parent = folders.find((folder) => {
+      const id = String(folder.folderId || manifestItemId(folder) || '')
+        .replace(/^folder:/, '')
+        .trim();
 
-    const ok = document.createElement("button");
-    ok.type = "button";
-    ok.className = options.danger
-      ? "rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
-      : "rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500";
-    ok.textContent = options.confirmText || "OK";
-
-    const close = (value: string | null) => {
-      overlay.remove();
-      resolve(value);
-    };
-
-    cancel.onclick = () => close(null);
-    ok.onclick = () => close(options.hideInput ? "" : input?.value ?? "");
-
-    overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") close(null);
-      if (event.key === "Enter" && !options.hideInput) close(input?.value ?? "");
+      return id === cursor;
     });
 
-    actions.appendChild(cancel);
-    actions.appendChild(ok);
-    card.appendChild(actions);
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-
-    setTimeout(() => input?.focus(), 0);
-  });
+    cursor = String(parent?.parentFolderId || '')
+      .replace(/^folder:/, '')
+      .trim();
+  }
 }
 
-function showInfo(titleText: string, messageText: string): Promise<string | null> {
-  return askText({
-    title: titleText,
-    message: messageText,
-    hideInput: true,
-    confirmText: "OK",
-  });
-}
+function descendantFolderIds(rootFolderId) {
+  const root = String(rootFolderId || '').replace(/^folder:/, '').trim();
+  const removed = new Set();
 
-export default function NativeP2PAppLive() {
-  const api = getBridge();
+  if (root) removed.add(root);
 
-  // Core state
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [wallet, setWallet] = useState<WalletState | null>(null);
-  const [files, setFiles] = useState<P2PFile[]>([]);
-  const [manifestFolders, setManifestFolders] = useState<DriveFolder[]>([]);
-  const [company, setCompany] = useState<CompanyState | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<View>("personal");
-  const [search, setSearch] = useState("");
-  const [isEncrypted, setIsEncrypted] = useState(true);
-  const [drivePassword, setDrivePassword] = useState("");
-  const [activeFolder, setActiveFolder] = useState(ALL_FILES);
-  const [activeFolderId, setActiveFolderId] = useState<string>("");
-  const [newFolder, setNewFolder] = useState("");
-  const [workspaceNameInput, setWorkspaceNameInput] = useState("");
-  const [memberEmail, setMemberEmail] = useState("");
-  const [memberRole, setMemberRole] = useState<Role>("viewer");
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(
-    () => readJson(ACTIVE_WORKSPACE_KEY, "")
-  );
+  const folders = ownedManifestCandidates().filter(isFolderManifest);
 
-  // Bulk select state
-  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
-  const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
+  let changed = true;
 
-  const walletConnected = Boolean(
-  wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
-);
+  while (changed) {
+    changed = false;
 
-const seedConnected = Boolean(
-  wallet?.connected &&
-    wallet.authMode === "seed" &&
-    (wallet.accountId || wallet.username || wallet.seedFingerprint)
-);
+    for (const folder of folders) {
+      const id = String(folder.folderId || manifestItemId(folder) || '')
+        .replace(/^folder:/, '')
+        .trim();
 
-const identityConnected = walletConnected || seedConnected;
+      const parent = String(folder.parentFolderId || '')
+        .replace(/^folder:/, '')
+        .trim();
 
-const identityLabel = seedConnected
-  ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}`
-  : walletConnected
-    ? short(wallet?.address || wallet?.accountId || "")
-    : "Guest";
-
-  const workspaces = company?.workspaces || [];
-  const activeWorkspace =
-    workspaces.find((w) => w.workspaceId === activeWorkspaceId) || workspaces[0] || null;
-
-  const deviceId = company?.deviceIdentity?.deviceId || "";
-  const localMember = activeWorkspace?.members?.find((m) => m.deviceId === deviceId) || null;
-  const localRole = localMember?.role || null;
-  const minPasswordLength = wallet?.minDrivePasswordLength || 12;
-  const peerCount = (summary?.connectedPeers || 0) + (summary?.safetyPeerUrl ? 1 : 0);
-  const quota = wallet?.plan?.quotaBytes
-    ? Math.min(100, (wallet.usedBytes / wallet.plan.quotaBytes) * 100)
-    : 0;
-
-  const folderById = useMemo(() => {
-    const map = new Map<string, DriveFolder>();
-    for (const folder of manifestFolders) {
-      if (folder.folderId) map.set(folder.folderId, folder);
-      if (folder.id) map.set(folder.id, folder);
-      if (folder.hash) map.set(folder.hash, folder);
-      if (folder.rootHash) map.set(folder.rootHash, folder);
-    }
-    return map;
-  }, [manifestFolders]);
-
-  const folderChildren = useMemo(() => {
-    const map = new Map<string, DriveFolder[]>();
-
-    for (const folder of manifestFolders) {
-      const parent = String(folder.parentFolderId || "");
-      map.set(parent, [...(map.get(parent) || []), folder]);
-    }
-
-    for (const list of map.values()) {
-      list.sort((a, b) => a.name.localeCompare(b.name));
-    }
-
-    return map;
-  }, [manifestFolders]);
-
-  function folderPath(folder: DriveFolder): string {
-    const names: string[] = [];
-    const seen = new Set<string>();
-    let cursor: DriveFolder | undefined = folder;
-
-    while (cursor) {
-      const id = cursor.folderId || cursor.id || cursor.name;
-      if (seen.has(id)) break;
-      seen.add(id);
-      names.unshift(cursor.name);
-      cursor = cursor.parentFolderId ? folderById.get(cursor.parentFolderId) : undefined;
-    }
-
-    return names.join(" / ");
-  }
-
-  function folderByNameOrPath(value: string): DriveFolder | null {
-    const target = value.trim();
-    if (!target) return null;
-
-    return (
-      manifestFolders.find((folder) => folder.name === target || folderPath(folder) === target) ||
-      null
-    );
-  }
-
-  // Company file lookup map
-  const companyFileByKey = useMemo(() => {
-    const map = new Map<string, { workspace: Workspace; companyFile: CompanyFile }>();
-
-    for (const workspace of workspaces) {
-      for (const companyFile of workspace.files || []) {
-        if (companyFile.deleted) continue;
-        map.set(companyFile.rootHash, { workspace, companyFile });
-        if (companyFile.hash) map.set(companyFile.hash, { workspace, companyFile });
+      if (id && parent && removed.has(parent) && !removed.has(id)) {
+        removed.add(id);
+        changed = true;
       }
     }
+  }
 
-    return map;
-  }, [workspaces]);
+  return removed;
+}
 
-  // File groups
-  const personalFiles = useMemo(
-    () =>
-      files.filter(
-        (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
-      ),
-    [files, companyFileByKey]
+function findOrFallbackManifestItem(payload = {}) {
+  const lookupId = String(
+    payload.itemId ||
+    payload.id ||
+    payload.hash ||
+    payload.rootHash ||
+    payload.folderId ||
+    payload.folderPath ||
+    payload.name ||
+    ''
+  ).trim();
+
+  let item = findOwnedManifestItemById(lookupId);
+
+  if (item) return item;
+
+  const cleanId = lookupId.replace(/^folder:/, '').trim();
+
+  if (!cleanId) return null;
+
+  return {
+    kind: typeof FOLDER_MANIFEST_KIND !== 'undefined' ? FOLDER_MANIFEST_KIND : 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId: cleanId,
+    id: cleanId,
+    hash: `folder:${cleanId}`,
+    rootHash: `folder:${cleanId}`,
+    ownerWallet: typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(),
+    name: String(payload.name || payload.folderPath || cleanId),
+    visibility: 'private',
+    isPublic: false,
+    isEncrypted: false,
+    chunks: [],
+    chunkSize: 0,
+    totalChunks: 0,
+    size: 0,
+    storedSize: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+
+function manifestItemIsFolder(item = {}) {
+  if (typeof isFolderManifest === 'function') return isFolderManifest(item);
+
+  return (
+    item.kind === 'folder' ||
+    item.type === 'folder' ||
+    item.isFolder === true ||
+    item.name === '.p2p-folder' ||
+    Boolean(item.folderId && !item.chunks?.length) ||
+    String(item.hash || '').startsWith('folder:')
+  );
+}
+
+function manifestItemIds(item = {}) {
+  const hash = String(item.hash || '').trim();
+  const rootHash = String(item.rootHash || '').trim();
+
+  return Array.from(new Set([
+    item.itemId,
+    item.id,
+    item.fileId,
+    item.folderId,
+    hash,
+    rootHash,
+    hash.replace(/^folder:/, ''),
+    rootHash.replace(/^folder:/, ''),
+    item.name,
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
+function manifestItemMatchesAnyId(item = {}, ids = new Set()) {
+  const normalized = new Set(
+    Array.from(ids || [])
+      .map((value) => String(value || '').replace(/^folder:/, '').trim())
+      .filter(Boolean)
   );
 
-  const companyFiles = useMemo(() => {
-    if (!activeWorkspace) return [];
+  return manifestItemIds(item).some((id) => {
+    const clean = String(id || '').replace(/^folder:/, '').trim();
+    return normalized.has(id) || normalized.has(clean);
+  });
+}
 
-    const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
+function manifestOwnNameLower(item = {}) {
+  return String(item.name || '').trim().toLowerCase();
+}
 
-    return files.filter((file) =>
-      allowed.some((companyFile) => fileKeyMatches(companyFile, file))
-    );
-  }, [files, activeWorkspace]);
+function normalizeParentFolderId(value = '') {
+  return String(value || '').replace(/^folder:/, '').trim();
+}
 
-  const sharedFiles = useMemo(
-    () =>
-      files.filter(
-        (file) => companyFileByKey.has(keyFor(file)) || companyFileByKey.has(file.hash)
-      ),
-    [files, companyFileByKey]
-  );
+function manifestFolderNameLower(item = {}) {
+  return String(item.folderName || item.folder || '').trim().toLowerCase();
+}
 
-  // Manifest-based folder list for sidebar
-  const sidebarFolders = useMemo(() => {
-    if (view === "company" || view === "admin") {
-      const companyFolderNames = new Set(
-        (activeWorkspace?.files || [])
-          .map((file) => file.folder)
-          .filter(Boolean) as string[]
-      );
+function manifestDeleteOwnerIdentity() {
+  return typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet();
+}
 
-      return [ALL_FILES, UNCATEGORIZED, ...Array.from(companyFolderNames).sort()];
-    }
 
-    return [
-      ALL_FILES,
-      UNCATEGORIZED,
-      ...manifestFolders
-        .filter((folder) => !folder.parentFolderId)
-        .map((folder) => folder.name)
-        .sort(),
-    ];
-  }, [view, manifestFolders, activeWorkspace]);
+function assertValidMoveTarget(item = {}, targetFolderId = null) {
+  const targetId = String(targetFolderId || '').replace(/^folder:/, '').trim();
 
-  const baseFiles =
-    view === "company" || view === "admin"
-      ? companyFiles
-      : view === "shared"
-        ? sharedFiles
-        : personalFiles;
+  // empty target = root / uncategorized
+  if (!targetId) return null;
 
-  function getPersonalFileFolderObject(file: P2PFile): DriveFolder | null {
-    const directId = String(file.parentFolderId || file.folderId || "").trim();
-
-    if (directId) {
-      const byId = folderById.get(directId);
-      if (byId) return byId;
-    }
-
-    const legacyName = String(file.folderName || file.folder || "").trim();
-
-    if (legacyName) {
-      const byName = manifestFolders.find((folder) => folder.name === legacyName);
-      if (byName) return byName;
-    }
-
-    return null;
-  }
-
-  function getPersonalFileFolderId(file: P2PFile): string {
-    return getPersonalFileFolderObject(file)?.folderId || "";
-  }
-
-  function getPersonalFileFolder(file: P2PFile): string {
-    const folder = getPersonalFileFolderObject(file);
-    return folder ? folderPath(folder) : UNCATEGORIZED;
-  }
-const visibleFiles = useMemo(() => {
-  const q = search.trim().toLowerCase();
-
-  return baseFiles.filter((file) => {
-    const fileName = String(file.name || "").replace(/\\/g, "/");
-    if ((fileName.split("/").pop() || fileName) === ".p2p-folder") return false;
-
-    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-    const cf = match?.companyFile;
-    const displayName = cf?.name || file.name;
-
-    const personalFolderId = match ? "" : getPersonalFileFolderId(file);
-    const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
-
-      const folderOk = match
-        ? activeFolder === ALL_FILES ||
-          activeFolder === folderLabel ||
-          (activeFolder === UNCATEGORIZED && (!folderLabel || folderLabel === UNCATEGORIZED))
-        : activeFolder === ALL_FILES ||
-          (activeFolder === UNCATEGORIZED && !personalFolderId) ||
-          (activeFolderId ? personalFolderId === activeFolderId : activeFolder === folderLabel);
-
-      const queryOk =
-        !q ||
-        [displayName, file.hash, file.rootHash, folderLabel, match?.workspace.name, file.replicationStatus].some(
-          (value) => String(value || "").toLowerCase().includes(q)
+  const folders =
+    typeof walletFolderManifests === 'function'
+      ? walletFolderManifests()
+      : walletManifests().filter((m) =>
+          typeof manifestItemIsFolder === 'function'
+            ? manifestItemIsFolder(m)
+            : (m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:'))
         );
 
-      return folderOk && queryOk;
+  const targetFolder = folders.find((folder) => {
+    const ids =
+      typeof manifestItemIds === 'function'
+        ? manifestItemIds(folder)
+        : [folder.folderId, folder.id, folder.hash, folder.rootHash];
+
+    return ids
+      .map((id) => String(id || '').replace(/^folder:/, '').trim())
+      .includes(targetId);
+  });
+
+  if (!targetFolder) {
+    throw new Error(`Target folder not found: ${targetId}`);
+  }
+
+  const sourceIsFolder =
+    typeof manifestItemIsFolder === 'function'
+      ? manifestItemIsFolder(item)
+      : (item.kind === 'folder' || item.isFolder === true || String(item.hash || '').startsWith('folder:'));
+
+  if (!sourceIsFolder) {
+    return targetFolder;
+  }
+
+  const sourceIds =
+    typeof manifestItemIds === 'function'
+      ? manifestItemIds(item)
+      : [item.folderId, item.id, item.hash, item.rootHash];
+
+  const sourceSet = new Set(
+    sourceIds
+      .map((id) => String(id || '').replace(/^folder:/, '').trim())
+      .filter(Boolean)
+  );
+
+  if (sourceSet.has(targetId)) {
+    throw new Error('Cannot move folder into itself');
+  }
+
+  let cursor = String(targetFolder.parentFolderId || '')
+    .replace(/^folder:/, '')
+    .trim();
+
+  const seen = new Set();
+
+  while (cursor) {
+    if (sourceSet.has(cursor)) {
+      throw new Error('Cannot move folder inside its child');
+    }
+
+    if (seen.has(cursor)) {
+      throw new Error('Folder tree cycle detected');
+    }
+
+    seen.add(cursor);
+
+    const parent = folders.find((folder) => {
+      const ids =
+        typeof manifestItemIds === 'function'
+          ? manifestItemIds(folder)
+          : [folder.folderId, folder.id, folder.hash, folder.rootHash];
+
+      return ids
+        .map((id) => String(id || '').replace(/^folder:/, '').trim())
+        .includes(cursor);
     });
-  }, [
-    baseFiles,
-    search,
-    activeFolder,
-    activeFolderId,
-    manifestFolders,
-    folderById,
-    companyFileByKey,
-  ]);
 
-  const companyBytes = companyFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+    cursor = String(parent?.parentFolderId || '')
+      .replace(/^folder:/, '')
+      .trim();
+  }
 
-  useEffect(() => {
-    localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(activeWorkspace?.workspaceId || ""));
-  }, [activeWorkspace?.workspaceId]);
+  return targetFolder;
+}
 
-  const run = async (work: () => Promise<void>) => {
-    setBusy(true);
+ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  const targetFolder = assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? payload.folderId ?? null);
+  const nextParentId = targetFolder ? String(targetFolder.folderId || targetFolder.id) : '';
+  item.parentFolderId = nextParentId;
+  if (!manifestItemIsFolder(item)) {
+    item.folderId = nextParentId;
+    item.folderName = targetFolder?.name || '';
+    item.folder = item.folderName;
+  }
+  item.updatedAt = new Date().toISOString();
+  persistManifests();
+  await syncPush(item);
+  await syncPull();
+  return { ok: true, item };
+});
+
+ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  const name = sanitizeFolderName(payload.name);
+  const oldName = String(item.name || '').trim();
+  const oldNameLower = oldName.toLowerCase();
+  item.name = name;
+  item.updatedAt = new Date().toISOString();
+  const changedFiles = [];
+  if (manifestItemIsFolder(item)) {
+    Object.assign(item, { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, isEncrypted: false, chunks: [], chunkSize: 0, totalChunks: 0, size: 0, storedSize: 0 });
+    const folderId = String(item.folderId || item.id || '');
+    for (const candidate of walletManifests()) {
+      if (manifestItemIsFolder(candidate)) continue;
+      const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+      const candidateParentIdLower = candidateParentId.toLowerCase();
+      const candidateFolderName = manifestFolderNameLower(candidate);
+      if ((folderId && candidateParentId === folderId) || (oldNameLower && (candidateFolderName === oldNameLower || candidateParentIdLower === oldNameLower))) {
+        candidate.folderId = folderId;
+        candidate.parentFolderId = folderId;
+        candidate.folderName = name;
+        candidate.folder = name;
+        candidate.updatedAt = new Date().toISOString();
+        changedFiles.push(candidate);
+      }
+    }
+  }
+  persistManifests();
+  await syncPush(item);
+  for (const file of changedFiles) await syncPush(file);
+  await syncPull();
+  return { ok: true, item, renamedFiles: changedFiles.length };
+});
+
+function findOwnedManifestItemById(itemId = '') {
+  const id = String(itemId || '').trim();
+
+  if (!id) return null;
+
+  const cleanId = id.replace(/^folder:/, '').trim();
+
+  const list = Array.isArray(manifests) ? manifests : [];
+
+  const candidates = list
+    .filter(isUsableManifest)
+    .filter((manifest) => {
+      if (typeof canTouchManifest === 'function') return canTouchManifest(manifest);
+      return walletOwnsManifest(manifest);
+    });
+
+  const found = candidates.find((manifest) => {
+    const hash = String(manifest.hash || '').trim();
+    const rootHash = String(manifest.rootHash || '').trim();
+
+    const values = [
+      manifest.id,
+      manifest.fileId,
+      manifest.folderId,
+      manifest.itemId,
+      hash,
+      rootHash,
+      hash.replace(/^folder:/, ''),
+      rootHash.replace(/^folder:/, ''),
+      manifest.name,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+
+    return values.includes(id) || values.includes(cleanId);
+  });
+
+  if (found) return found;
+
+  // Folder fallback: بعض الفولدرات القديمة بتطلع في الواجهة بس مش محفوظة كـ manifest كامل.
+  return {
+    kind: 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId: cleanId,
+    id: cleanId,
+    hash: `folder:${cleanId}`,
+    rootHash: `folder:${cleanId}`,
+    ownerWallet: activeWallet(),
+    name: '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+
+  if (!manifestItemIsFolder(item)) {
+    const removedIds = new Set(manifestItemIds(item));
+    const beforeCount = manifests.length;
+    manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+    persistManifests();
+    await syncDelete(manifestDeleteOwnerIdentity(), item.hash || item.rootHash || item.folderId);
+    return { ok: true, deleted: beforeCount - manifests.length, movedFiles: 0, deletedFiles: 1, removedIds: Array.from(removedIds) };
+  }
+
+  const rootIds = manifestItemIds(item);
+  const removedFolderIds = new Set(rootIds);
+  const removedFolderNames = new Set([manifestOwnNameLower(item)].filter(Boolean));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of walletFolderManifests()) {
+      const folderIds = manifestItemIds(folder);
+      const parentId = normalizeParentFolderId(folder.parentFolderId);
+      const parentIdLower = parentId.toLowerCase();
+      if ((parentId && removedFolderIds.has(parentId)) || (parentIdLower && removedFolderNames.has(parentIdLower))) {
+        for (const id of folderIds) {
+          if (!removedFolderIds.has(id)) { removedFolderIds.add(id); changed = true; }
+        }
+        const folderName = manifestOwnNameLower(folder);
+        if (folderName && !removedFolderNames.has(folderName)) { removedFolderNames.add(folderName); changed = true; }
+      }
+    }
+  }
+
+  const foldersToRemove = [];
+  const filesInside = [];
+  for (const candidate of walletManifests()) {
+    if (manifestItemIsFolder(candidate)) {
+      if (manifestItemIds(candidate).some((id) => removedFolderIds.has(id)) || removedFolderNames.has(manifestOwnNameLower(candidate))) foldersToRemove.push(candidate);
+      continue;
+    }
+    const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+    const candidateParentIdLower = candidateParentId.toLowerCase();
+    const candidateFolderName = manifestFolderNameLower(candidate);
+    if ((candidateParentId && removedFolderIds.has(candidateParentId)) || (candidateFolderName && removedFolderNames.has(candidateFolderName)) || (candidateParentIdLower && removedFolderNames.has(candidateParentIdLower))) {
+      filesInside.push(candidate);
+    }
+  }
+
+  const disposition = String(payload.fileDisposition || 'move').trim().toLowerCase();
+  const deleteFiles = disposition === 'delete';
+  const targetFolder = deleteFiles ? null : assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? null);
+  if (targetFolder && manifestItemIds(targetFolder).some((id) => removedFolderIds.has(id))) throw new Error('Cannot move files into a folder that is being deleted');
+
+  const removedItems = deleteFiles ? [...foldersToRemove, ...filesInside] : foldersToRemove;
+  const removedIds = new Set(removedItems.flatMap((removed) => manifestItemIds(removed)));
+  const beforeCount = manifests.length;
+  manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+
+  let movedFiles = 0;
+  if (!deleteFiles) {
+    const targetFolderId = targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '';
+    const targetFolderName = targetFolder?.name || '';
+    for (const file of filesInside) {
+      file.parentFolderId = targetFolderId;
+      file.folderId = targetFolderId;
+      file.folderName = targetFolderName;
+      file.folder = targetFolderName;
+      file.updatedAt = new Date().toISOString();
+      movedFiles += 1;
+    }
+  }
+
+  persistManifests();
+  for (const removed of removedItems) await syncDelete(manifestDeleteOwnerIdentity(), removed.hash || removed.rootHash || removed.folderId);
+  if (!deleteFiles) for (const file of filesInside) await syncPush(file);
+
+  return {
+    ok: true,
+    deleted: beforeCount - manifests.length,
+    movedFiles,
+    deletedFiles: deleteFiles ? filesInside.length : 0,
+    removedIds: Array.from(removedIds),
+    targetFolderId: targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '',
+  };
+});
+
+ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+
+  const picked = await dialog.showOpenDialog({
+    title: 'Upload files',
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (picked.canceled || !picked.filePaths?.length) {
+    return { ok: true, cancelled: true, files: [] };
+  }
+
+  const uploaded = [];
+
+  for (const filePath of picked.filePaths) {
+    const buffer = fs.readFileSync(filePath);
+    const node = ensureTransport({});
+    const originalBuffer = Buffer.from(buffer);
+
+    assertWalletUploadAllowed(originalBuffer.length);
+
+    const ownerWallet = activeWallet();
+    const privateFile = Boolean(payload.isEncrypted);
+    const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
+    const secured = privateFile
+      ? encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword)
+      : { ciphertext: originalBuffer, encryption: null };
+
+    const storedBuffer = secured.ciphertext;
+    const chunks = splitIntoChunks(storedBuffer);
+    const tree = buildMerkleTree(chunks.map((c) => c.hash));
+    const storedHash = hashBufferHex(storedBuffer);
+    const fileReplicas = new Set([node.peerId]);
+    const chunkResults = new Array(chunks.length);
+    const uploadConcurrency = clampConcurrency(payload.uploadConcurrency, UPLOAD_CONCURRENCY, 12);
+
+    createProgress('upload', {
+      fileName: path.basename(filePath),
+      totalBytes: storedBuffer.length,
+      totalChunks: chunks.length,
+      concurrency: uploadConcurrency,
+    });
 
     try {
-      await work();
+      await mapWithConcurrency(chunks, uploadConcurrency, async (chunk) => {
+        const chunkPayload = {
+          hash: chunk.hash,
+          data: chunk.data.toString('base64'),
+          index: chunk.index,
+          size: chunk.size,
+          ownerWallet,
+          encrypted: privateFile,
+        };
+
+        const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
+
+        try {
+          await putChunkToSafetyPeer(chunkPayload, node.peerId);
+          replicas.push('aws-safety-peer');
+        } catch (error) {
+          throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+        }
+
+        chunkResults[chunk.index] = {
+          index: chunk.index,
+          hash: chunk.hash,
+          size: chunk.size,
+          replicas: unique(replicas),
+          proof: getMerkleProof(tree, chunk.index),
+        };
+
+        updateProgress('upload', { bytesDelta: chunk.size, chunkDelta: 1 });
+      });
     } catch (error) {
-      toast.error(err(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-    const refresh = async () => {
-  if (!api) return;
-
-  // مهم: نقرأ الهوية أولًا، لأن seed:login يكتب wallet.json من IPC منفصل.
-  // بعدها نجيب الملفات والفولدرات حسب الهوية الجديدة.
-  const nextWallet = await api.invoke<WalletState>("wallet:status");
-  setWallet(nextWallet);
-
-  const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
-    api.invoke<Summary>("p2p:networkSummary"),
-    api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
-    api.invoke<CompanyState>("company:state"),
-    api.invoke<DriveFolder[]>("p2p:listFolders"),
-  ]);
-
-  setSummary(nextSummary);
-  setFiles(Array.isArray(nextFiles) ? nextFiles : []);
-  setCompany(nextCompany);
-  setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
-
-  if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
-    setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
-  }
-};
-
-  useEffect(() => {
-    if (!api) return;
-
-    void run(async () => {
-      await api.invoke("p2p:start");
-      await api.invoke("company:deviceIdentity", {});
-      await refresh();
-    });
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  if (!api) {
-    return (
-      <div className="min-h-screen bg-zinc-950 p-8 text-zinc-50">
-        Electron required. Run pnpm run electron:dev
-      </div>
-    );
-  }
-
-  // ─── Actions ────────────────────────────────────────────────────────────────
-  const password = () => {
-    if (!isEncrypted) return null;
-
-    const value = drivePassword.trim();
-
-    if (value.length < minPasswordLength) {
-      throw new Error(`Drive Password must be at least ${minPasswordLength} characters.`);
+      finishProgress('upload', 'error', error?.message || String(error));
+      throw error;
     }
 
-    return value;
-  };
+    const targetFolderId = String(payload.folderId || '');
+    const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
 
-    const connectWallet = () =>
-  run(async () => {
-    if (!WALLETCONNECT_PROJECT_ID) {
-      throw new Error("Missing VITE_WALLETCONNECT_PROJECT_ID in .env");
+    if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+
+    const manifest = {
+      id: `${ownerWallet}:${storedHash}`,
+      name: path.basename(filePath),
+      size: originalBuffer.length,
+      storedSize: storedBuffer.length,
+      hash: storedHash,
+      rootHash: tree.root,
+      uploadedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      isEncrypted: privateFile,
+      visibility: privateFile ? 'private' : 'public',
+      isPublic: !privateFile,
+      encryption: secured.encryption,
+      mimeType: 'application/octet-stream',
+      folderId: targetFolder?.folderId || '',
+      parentFolderId: targetFolder?.folderId || '',
+      folderName: targetFolder?.name || String(payload.folderPath || ''),
+      folder: targetFolder?.name || String(payload.folderPath || ''),
+      chunkSize: CHUNK_SIZE_BYTES,
+      totalChunks: chunks.length,
+      ownerNodeId: node.peerId,
+      ownerWallet,
+      planId: walletState.planId,
+      replicas: [node.peerId],
+      chunks: chunkResults,
+    };
+
+    for (const chunkMeta of manifest.chunks) {
+      for (const peerId of chunkMeta.replicas || []) fileReplicas.add(peerId);
     }
 
-    const signClient = await SignClient.init({
-      projectId: WALLETCONNECT_PROJECT_ID,
-      metadata: {
-        name: "Chunknet",
-        description: "Chunknet P2P Cloud Wallet Login",
-        url: "https://chunknet.local",
-        icons: [],
-      },
-    });
+    manifest.replicas = unique(Array.from(fileReplicas));
 
-    const modal = new WalletConnectModal({
-      projectId: WALLETCONNECT_PROJECT_ID,
-      chains: [WALLETCONNECT_CHAIN_ID],
-    });
-
-    const { uri, approval } = await signClient.connect({
-      requiredNamespaces: {
-        eip155: {
-          methods: ["personal_sign"],
-          chains: [WALLETCONNECT_CHAIN_ID],
-          events: ["accountsChanged", "chainChanged"],
-        },
-      },
-    });
-
-    if (uri) {
-      await modal.openModal({ uri });
-    }
-
-    const session = await approval();
-    modal.closeModal();
-
-    const account = session.namespaces.eip155?.accounts?.[0];
-    if (!account) {
-      throw new Error("No wallet account returned from WalletConnect");
-    }
-
-    const address = account.split(":").pop()?.toLowerCase();
-    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      throw new Error("Invalid wallet address returned from WalletConnect");
-    }
-
-    const loginMessage = [
-      "p2p.cloud login",
-      `Wallet: ${address}`,
-      `Time: ${new Date().toISOString()}`,
-      "Purpose: unlock encrypted P2P cloud storage",
-    ].join("\n");
-
-    const signature = await signClient.request<string>({
-      topic: session.topic,
-      chainId: WALLETCONNECT_CHAIN_ID,
-      request: {
-        method: "personal_sign",
-        params: [loginMessage, address],
-      },
-    });
-
-    setWallet(
-      await api.invoke<WalletState>("wallet:connect", {
-        address,
-        loginMessage,
-        signature,
-      })
+    manifests = manifests.filter(
+      (m) => !(normalizeWallet(m.ownerWallet) === ownerWallet && m.hash === manifest.hash)
     );
 
-    await refresh();
-  });
+    manifests.push(manifest);
+    persistManifests();
+    persistWallet();
 
-  const seedLogin = () =>
-    run(async () => {
-      const username = (
-        await askText({
-          title: "Seed Login",
-          message: "Enter seed username",
-          placeholder: "username",
-          confirmText: "Next",
-        })
-      )?.trim();
+    await syncPush(manifest);
+    uploaded.push(manifest);
 
-      if (!username) return;
+    finishProgress('upload');
+  }
 
-      const pw = (
-        await askText({
-          title: "Seed Login",
-          message: "Enter seed password",
-          inputType: "password",
-          confirmText: "Login",
-        })
-      )?.trim();
+  await syncPull();
 
-      if (!pw) return;
-
-      setWallet(await api.invoke<WalletState>("seed:login", { username, password: pw }));
-      await refresh();
-    });
-
-  const seedCreate = () =>
-    run(async () => {
-      const username = (
-        await askText({
-          title: "Create Seed Account",
-          message: "Choose seed username",
-          placeholder: "username",
-          confirmText: "Next",
-        })
-      )?.trim();
-
-      if (!username) return;
-
-      const pw = (
-        await askText({
-          title: "Create Seed Account",
-          message: "Choose seed password / drive password",
-          inputType: "password",
-          confirmText: "Create",
-        })
-      )?.trim();
-
-      if (!pw) return;
-
-      const result = await api.invoke<WalletState & { seed?: string }>("seed:create", {
-        username,
-        password: pw,
-      });
-
-      setWallet(result);
-await api.invoke("p2p:start");
-await refresh();
-
-      if (result.seed) {
-        await showInfo("Recovery seed — save it now", result.seed);
-      }
-    });
-
-  const seedRecover = () =>
-    run(async () => {
-      const username = (
-        await askText({
-          title: "Recover Seed Account",
-          message: "Enter seed username",
-          placeholder: "username",
-          confirmText: "Next",
-        })
-      )?.trim();
-
-      if (!username) return;
-
-      const seed = (
-        await askText({
-          title: "Recover Seed Account",
-          message: "Enter recovery seed",
-          placeholder: "recovery seed",
-          confirmText: "Next",
-        })
-      )?.trim();
-
-      if (!seed) return;
-
-      const pw = (
-        await askText({
-          title: "Recover Seed Account",
-          message: "Enter new seed password / drive password",
-          inputType: "password",
-          confirmText: "Recover",
-        })
-      )?.trim();
-
-      if (!pw) return;
-
-      const result = await api.invoke<WalletState>("seed:recover", {
-  username,
-  seed,
-  password: pw,
+  return { ok: true, cancelled: false, files: uploaded, summary: networkSummary(), sync: lastSyncStatus };
 });
 
-setWallet(result);
-await api.invoke("p2p:start");
-await refresh();
-    });
+ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+  await syncPull();
 
-  const disconnectWallet = () =>
-    run(async () => {
-      setWallet(await api.invoke<WalletState>("wallet:disconnect"));
-      setManifestFolders([]);
-      setActiveFolder(ALL_FILES);
-      setActiveFolderId("");
-      setSelectedItemIds(new Set());
-      await refresh();
-    });
+  const node = ensureTransport({});
+  const manifest = findManifest(payload);
 
-  const createWorkspace = () =>
-    run(async () => {
-      const name = workspaceNameInput.trim();
-      if (!name) return;
+  if (!manifest) throw new Error('File not found for this wallet');
 
-      const ws = await api.invoke<Workspace>("company:createWorkspace", {
-        name,
-        ownerWallet: wallet?.address || wallet?.accountId || "",
-      });
-
-      setActiveWorkspaceId(ws.workspaceId);
-      setWorkspaceNameInput("");
-      setView("company");
-      await refresh();
-      toast.success("Company workspace created and signed");
-    });
-
-  const inviteMember = () =>
-    run(async () => {
-      if (!activeWorkspace) throw new Error("Select a company first");
-
-      const email = memberEmail.trim();
-      if (!email) return;
-
-      const result = await api.invoke<{ workspace: Workspace; inviteToken: string }>(
-        "company:inviteMember",
-        { workspaceId: activeWorkspace.workspaceId, email, role: memberRole }
-      );
-
-      await navigator.clipboard.writeText(result.inviteToken);
-      setMemberEmail("");
-      await refresh();
-      toast.success("Invite token copied.");
-    });
-
-  const changeMemberRole = (memberId: string, role: Role) =>
-    run(async () => {
-      if (!activeWorkspace) return;
-
-      await api.invoke("company:changeMemberRole", {
-        workspaceId: activeWorkspace.workspaceId,
-        memberId,
-        role,
-      });
-
-      await refresh();
-    });
-
-  const removeMember = (memberId: string) =>
-    run(async () => {
-      if (!activeWorkspace) return;
-
-      await api.invoke("company:removeMember", {
-        workspaceId: activeWorkspace.workspaceId,
-        memberId,
-      });
-
-      await refresh();
-    });
-
-  const createFolder = () =>
-    run(async () => {
-      const name = newFolder.trim();
-      if (!name) return;
-
-      const response = await api.invoke<CreateFolderResponse>("p2p:createFolder", {
-        name,
-        parentFolderId: activeFolderId || "",
-      });
-
-      const folder =
-        "folder" in response && response.folder ? response.folder : (response as DriveFolder);
-
-      if (!folder?.folderId) {
-        throw new Error("Folder was created but backend did not return folderId");
-      }
-
-      setNewFolder("");
-
-      if ("folders" in response && Array.isArray(response.folders)) {
-        setManifestFolders(response.folders);
-      } else {
-        setManifestFolders((prev) => [
-          ...prev.filter((existing) => existing.folderId !== folder.folderId),
-          folder,
-        ]);
-      }
-
-      setActiveFolder(folderPath(folder));
-      setActiveFolderId(folder.folderId);
-      await refresh();
-      toast.success(`Folder "${name}" created`);
-    });
-
-  const renameFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const name = (
-      await askText({
-        title: "Rename Folder",
-        message: `Rename "${folder.name}"`,
-        defaultValue: folder.name,
-        placeholder: "New folder name",
-        confirmText: "Rename",
-      })
-    )?.trim();
-
-    if (!name || name === folder.name) return;
-
-    await api.invoke("p2p:renameItem", { itemId: folder.folderId, name });
-    await refresh();
-
-    if (activeFolderId === folder.folderId) {
-      setActiveFolder(name);
-    }
-
-    toast.success("Folder renamed");
+  const save = await dialog.showSaveDialog({
+    title: 'Download file',
+    defaultPath: path.join(app.getPath('downloads'), safeOutputName(manifest.name || 'download')),
   });
 
-  const moveFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const target = await askText({
-      title: "Move Folder",
-      message: `Move "${folderPath(folder)}" inside folder.
+  if (save.canceled || !save.filePath) {
+    return { ok: true, cancelled: true };
+  }
 
-Leave empty = Root
-Type folder name or full path = move inside it`,
-      placeholder: "Target folder name/path",
-      confirmText: "Move",
-    });
+  const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
+  const buffers = new Array(orderedChunks.length);
+  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
 
-    if (target === null) return;
-
-    const targetFolder = folderByNameOrPath(target);
-    const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
-
-    if (target.trim() && !targetFolder) {
-      throw new Error("Target folder not found");
-    }
-
-    if (targetFolderId === folder.folderId) {
-      throw new Error("Cannot move folder into itself");
-    }
-
-    await api.invoke("p2p:moveItem", {
-      itemId: folder.folderId,
-      targetFolderId,
-    });
-
-    await refresh();
-    toast.success("Folder moved");
+  createProgress('download', {
+    fileName: manifest.name,
+    totalBytes: Number(manifest.storedSize || manifest.size || 0),
+    totalChunks: orderedChunks.length,
+    concurrency: downloadConcurrency,
   });
 
-  const deleteFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const disposition = await askText({
-      title: "Delete Folder",
-      message: `Files inside "${folderPath(folder)}":
+  try {
+    await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+      const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+      let chunk = local;
 
-Leave empty → Uncategorized
-Type a folder name/path → move files there
-Type DELETE → delete files too`,
-      placeholder: "empty / folder name / DELETE",
-      confirmText: "Delete Folder",
-      danger: true,
-    });
-
-    if (disposition === null) return;
-
-    const trimmed = disposition.trim();
-    const isDelete = trimmed.toUpperCase() === "DELETE";
-    const targetFolder = isDelete || !trimmed ? null : folderByNameOrPath(trimmed);
-
-    if (trimmed && !isDelete && !targetFolder) {
-      throw new Error("Target folder not found");
-    }
-
-    const folderAny = folder as any;
-
-const deleteFolderId = String(
-  folderAny.folderId ||
-  folderAny.id ||
-  folderAny.hash ||
-  folderAny.rootHash ||
-  folderAny.path ||
-  folder.name ||
-  folderPath(folder) ||
-  ""
-).trim();
-
-if (!deleteFolderId) {
-  throw new Error(`Cannot delete folder: missing folder identity. folder=${JSON.stringify(folder)}`);
-}
-
-await api.invoke("p2p:deleteItem", {
-  itemId: deleteFolderId,
-  folderId: deleteFolderId,
-  id: deleteFolderId,
-  name: folder.name,
-  folderPath: folderPath(folder),
-  fileDisposition: isDelete ? "delete" : "move",
-  targetFolderId: targetFolder?.folderId || "",
-});
-
-    await refresh();
-
-    if (activeFolderId === folder.folderId) {
-      setActiveFolder(ALL_FILES);
-      setActiveFolderId("");
-    }
-
-    toast.success(`Folder "${folder.name}" deleted`);
-  });
-
-  const upload = () =>
-    run(async () => {
-      if (!identityConnected) {
-  throw new Error("Connect wallet or sign in with Seed Account before uploading");
-}
-
-      if ((view === "company" || view === "admin") && !activeWorkspace) {
-        throw new Error("Create or select a company first");
-      }
-
-      if ((view === "company" || view === "admin") && !canUpload(localRole)) {
-        throw new Error("Your company role cannot upload files");
-      }
-
-      const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
-        "p2p:uploadFiles",
-        {
-          isEncrypted,
-          drivePassword: password(),
-          workspaceId:
-            view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
-          folderPath:
-            activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-          folderId: activeFolderId || "",
-        }
-      );
-
-      if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
-        for (const file of result.files) {
-          await api.invoke("company:addFile", {
-            workspaceId: activeWorkspace.workspaceId,
-            file,
-            folder:
-              activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-          });
+      if (!chunk) {
+        try {
+          chunk = await node.fetchChunkFromNetwork(meta.hash);
+        } catch (error) {
+          console.warn('[p2p:downloadToPath] network fetch failed, trying safety peer:', error?.message || error);
+          chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
         }
       }
 
-      if (!result?.cancelled) {
-        toast.success(`${result?.files?.length || 1} file(s) stored safely`);
+      node.storeLocalChunk?.(chunk);
+
+      const buffer = Buffer.from(chunk.data, 'base64');
+
+      if (hashBufferHex(buffer) !== meta.hash) {
+        throw new Error(`Chunk integrity failed: ${meta.hash}`);
       }
 
-      await refresh();
+      buffers[meta.index] = buffer;
+      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
     });
+  } catch (error) {
+    finishProgress('download', 'error', error?.message || String(error));
+    throw error;
+  }
 
-  const download = (file: P2PFile) =>
-    run(async () => {
-      const result = await api.invoke<{ cancelled?: boolean; path?: string }>(
-        "p2p:downloadToPath",
-        { hash: file.hash, drivePassword: file.isEncrypted ? password() : null }
-      );
+  const storedBuffer = Buffer.concat(buffers);
 
-      if (!result?.cancelled) {
-        toast.success(result?.path ? `Downloaded to ${result.path}` : "Download complete");
-      }
+  if (hashBufferHex(storedBuffer) !== manifest.hash) {
+    throw new Error('File integrity failed');
+  }
 
-      await refresh();
-    });
+  const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
+  const outputBuffer = manifest.isEncrypted
+    ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword)
+    : storedBuffer;
 
-  const renameCompanyFile = (file: P2PFile) =>
-    run(async () => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-      if (!match) return;
+  fs.writeFileSync(save.filePath, outputBuffer);
 
-      const name = window.prompt("New file name", match.companyFile.name || file.name)?.trim();
-      if (!name) return;
+  finishProgress('download');
 
-      await api.invoke("company:updateFile", {
-        workspaceId: match.workspace.workspaceId,
-        rootHash: match.companyFile.rootHash,
-        patch: { name },
-      });
+  return { ok: true, cancelled: false, path: save.filePath, file: manifest, progress: transferProgress.download };
+});
 
-      await refresh();
-    });
+ipcMain.handle('p2p:networkSummary', async () => {
+  loadWallet();
+  loadManifests();
 
-  const toggleHideCompanyFile = (file: P2PFile) =>
-    run(async () => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-      if (!match) return;
+  if (walletState.connected && walletState.verified) {
+    await syncPull();
+    startAutoRepairLoop();
+  }
 
-      await api.invoke("company:updateFile", {
-        workspaceId: match.workspace.workspaceId,
-        rootHash: match.companyFile.rootHash,
-        patch: { hidden: !match.companyFile.hidden },
-      });
+  return networkSummary();
+});
 
-      await refresh();
-    });
 
-  const remove = (file: P2PFile) =>
-    run(async () => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
+ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
+ipcMain.handle('p2p:repair', async () => { assertFolderIdentity(); const node = ensureTransport({}); const own = walletFileManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
+ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const chunk = manifest.chunks?.[0]; if (!chunk) throw new Error('No chunks available for proof'); return { ok: true, proof: { ownerWallet: activeWallet(), rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, encrypted: Boolean(manifest.isEncrypted), keySource: manifest.encryption?.keySource || null, preparedAt: new Date().toISOString() } }; });
 
-      if (match) {
-        await api.invoke("company:updateFile", {
-          workspaceId: match.workspace.workspaceId,
-          rootHash: match.companyFile.rootHash,
-          patch: { deleted: true },
-        });
+app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
+app.on('before-quit', () => { stopAutoRepairLoop(); persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
+app.on('window-all-closed', () => {});
 
-        await refresh();
-        toast.success("Removed from company manifest.");
-        return;
-      }
 
-      await api.invoke("p2p:delete", { hash: file.hash });
-      await refresh();
-    });
 
-  const proof = (file: P2PFile) =>
-    run(async () => {
-      const result = await api.invoke<{ proof: unknown }>("p2p:prepareProof", {
-        hash: file.hash,
-      });
 
-      await navigator.clipboard.writeText(JSON.stringify(result.proof, null, 2));
-      toast.success("Proof copied");
-    });
 
-  const share = (file: P2PFile) => {
-    const link = `chunknet://file/${file.rootHash || file.hash}`;
-    void navigator.clipboard.writeText(link).then(() => toast.success("Share link copied"));
-  };
-
-  const movePersonalFileTo = async (file: P2PFile, targetFolderId: string) => {
-    await api.invoke("p2p:moveItem", {
-      itemId: itemIdFor(file),
-      hash: file.hash,
-      rootHash: file.rootHash,
-      targetFolderId,
-    });
-  };
-
-  const bulkMove = () =>
-  run(async () => {
-    if (selectedItemIds.size === 0) return;
-
-    const filesToMove = visibleFiles.filter(
-      (file) =>
-        selectedItemIds.has(itemIdFor(file)) &&
-        !companyFileByKey.has(keyFor(file)) &&
-        !companyFileByKey.has(file.hash)
-    );
-
-    for (const file of filesToMove) {
-      await movePersonalFileTo(file, bulkTargetFolderId);
-    }
-
-    setSelectedItemIds(new Set());
-    setBulkTargetFolderId("");
-    await refresh();
-    toast.success(`Moved ${filesToMove.length} file(s)`);
-  });
-
-const toggleSelect = (itemId: string) => {
-  setSelectedItemIds((prev) => {
-    const next = new Set(prev);
-
-    if (next.has(itemId)) next.delete(itemId);
-    else next.add(itemId);
-
-    return next;
-  });
-};
-
-const selectAll = () => {
-  const personalVisible = visibleFiles.filter(
-    (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
-  );
-
-  setSelectedItemIds(new Set(personalVisible.map((file) => itemIdFor(file))));
-};
-
-const clearSelection = () => {
-  setSelectedItemIds(new Set());
-};
-
-const renderFolderNode = (folder: DriveFolder, depth = 0) => {
-  const selected = activeFolderId === folder.folderId;
-  const children = folderChildren.get(folder.folderId) || [];
-
-  return (
-    <div key={folder.folderId} className="space-y-1">
-      <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
-        <button
-          onClick={() => {
-            setActiveFolder(folderPath(folder));
-            setActiveFolderId(folder.folderId);
-          }}
-          className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-            selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
-          }`}
-        >
-          <FolderOpen className="mr-1.5 inline size-3" />
-          {folder.name}
-          <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
-            manifest
-          </Badge>
-        </button>
-
-        <button
-          onClick={() => renameFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
-          title="Rename"
-        >
-          <Pencil className="size-3" />
-        </button>
-
-        <button
-          onClick={() => moveFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
-          title="Move"
-        >
-          <MoveRight className="size-3" />
-        </button>
-
-        <button
-          onClick={() => deleteFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
-          title="Delete"
-        >
-          <Trash2 className="size-3" />
-        </button>
-      </div>
-
-      {children.map((child) => renderFolderNode(child, depth + 1))}
-    </div>
-  );
-};
-
-  const renderFileCard = (file: P2PFile) => {   
-    const p = protection(file);
-    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-    const cf = match?.companyFile;
-    const displayName = cf?.name || file.name;
-    const folderLabel = cf ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
-    const role = match?.workspace.members.find((m) => m.deviceId === deviceId)?.role;
-    const canControl = Boolean(
-      cf && (cf.uploadedByDeviceId === deviceId || role === "owner" || role === "admin")
-    );
-    const isPersonal = !match;
-    const isSelected = selectedItemIds.has(itemIdFor(file));
-    const currentPersonalFolderId = isPersonal ? getPersonalFileFolderId(file) : "";
-
-    return (
-      <Card
-        key={`${file.hash}:${file.uploadedAt}`}
-        className={`rounded-2xl border-zinc-800 bg-zinc-900 transition-all ${
-          isSelected ? "ring-2 ring-blue-500" : ""
-        }`}
-      >
-        <CardContent className="space-y-4 p-5">
-          {isPersonal && view === "personal" && (
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={() => toggleSelect(itemIdFor(file))}
-                className="h-4 w-4 cursor-pointer accent-blue-500"
-                aria-label="Select file"
-              />
-              <span className="text-xs text-zinc-500">Select</span>
-            </div>
-          )}
-
-          <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
-            <FileCheck2 className="size-9 text-zinc-500" />
-          </div>
-
-          <div>
-            <p className="truncate text-sm font-semibold">{displayName}</p>
-            <p className="text-xs text-zinc-400">
-              {bytes(file.size)} · {date(file.uploadedAt)}
-            </p>
-            <p className="mt-1 text-xs text-zinc-500">
-              <FolderOpen className="mr-1 inline size-3" />
-              {folderLabel}
-            </p>
-
-            {cf?.uploadedByName && (
-              <p className="text-xs text-zinc-500">by: {cf.uploadedByName}</p>
-            )}
-
-            <div className="mt-2 flex flex-wrap gap-1">
-              {file.isEncrypted && (
-                <Badge variant="secondary" className="text-xs">
-                  <Lock className="mr-1 size-3" />
-                  Encrypted
-                </Badge>
-              )}
-
-              <Badge variant="outline" className={`text-xs ${p.tone}`}>
-                <ShieldCheck className="mr-1 size-3" />
-                {p.label}
-              </Badge>
-
-              {match && (
-                <Badge variant="outline" className="text-xs">
-                  <Building2 className="mr-1 size-3" />
-                  {match.workspace.name}
-                </Badge>
-              )}
-
-              {cf?.hidden && (
-                <Badge variant="outline" className="text-xs text-amber-300">
-                  <EyeOff className="mr-1 size-3" />
-                  Hidden
-                </Badge>
-              )}
-            </div>
-
-            <p className="mt-1 text-xs text-zinc-600">{p.details}</p>
-          </div>
-
-          <div className="flex flex-wrap gap-1">
-            <Button size="sm" onClick={() => download(file)} disabled={busy} className="text-xs">
-              <Download className="size-3" />
-              Download
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => share(file)}
-              disabled={busy}
-              className="text-xs"
-            >
-              <Share2 className="size-3" />
-              Share
-            </Button>
-
-            {match && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => renameCompanyFile(file)}
-                disabled={busy || !canControl}
-                className="text-xs"
-              >
-                <Pencil className="size-3" />
-                Rename
-              </Button>
-            )}
-
-            {match && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => toggleHideCompanyFile(file)}
-                disabled={busy || !canControl}
-                className="text-xs"
-              >
-                {cf?.hidden ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
-                {cf?.hidden ? "Unhide" : "Hide"}
-              </Button>
-            )}
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => proof(file)}
-              disabled={busy}
-              className="text-xs"
-            >
-              Proof
-            </Button>
-
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => remove(file)}
-              disabled={busy || (Boolean(match) && !canControl)}
-              className="text-xs"
-            >
-              <Trash2 className="size-3" />
-              Delete
-            </Button>
-          </div>
-
-          <select
-            value={match ? folderLabel : currentPersonalFolderId}
-            onChange={(event) => {
-              const picked = event.target.value;
-
-              if (match) {
-                void api
-                  .invoke("company:updateFile", {
-                    workspaceId: match.workspace.workspaceId,
-                    rootHash: match.companyFile.rootHash,
-                    patch: { folder: picked === UNCATEGORIZED ? "" : picked },
-                  })
-                  .then(refresh)
-                  .catch((error) => toast.error(err(error)));
-                return;
-              }
-
-              void run(async () => {
-                await movePersonalFileTo(file, picked);
-                await refresh();
-              });
-            }}
-            className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-300"
-          >
-            {match ? (
-              <>
-                <option value={UNCATEGORIZED}>{UNCATEGORIZED}</option>
-                {Array.from(
-                  new Set(
-                    (activeWorkspace?.files || [])
-                      .map((item) => item.folder)
-                      .filter(Boolean) as string[]
-                  )
-                )
-                  .sort()
-                  .map((folderName) => (
-                    <option key={folderName} value={folderName}>
-                      {folderName}
-                    </option>
-                  ))}
-              </>
-            ) : (
-              <>
-                <option value="">{UNCATEGORIZED}</option>
-                {manifestFolders
-                  .slice()
-                  .sort((a, b) => folderPath(a).localeCompare(folderPath(b)))
-                  .map((folder) => (
-                    <option key={folder.folderId} value={folder.folderId}>
-                      {folderPath(folder)}
-                    </option>
-                  ))}
-              </>
-            )}
-          </select>
-        </CardContent>
-      </Card>
-    );
-  };
-
-  // ─── JSX ────────────────────────────────────────────────────────────────────
-  return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50">
-      <header className="sticky top-0 z-20 border-b border-zinc-800 bg-zinc-950/90 px-6 py-3 backdrop-blur">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <Cloud className="size-6 text-blue-400" />
-            <div>
-              <p className="text-sm font-bold leading-none">Native P2P Cloud</p>
-              <p className="mt-0.5 text-xs text-zinc-500">
-                Live Electron P2P drive with company manifests and chunk protection.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="font-mono text-xs">
-              {identityLabel}
-            </Badge>
-
-            {identityConnected ? (
-              <Button variant="outline" size="sm" onClick={disconnectWallet} disabled={busy}>
-                Disconnect
-              </Button>
-            ) : (
-              <div className="flex gap-2">
-                <Button size="sm" onClick={connectWallet} disabled={busy}>
-                  <Wallet className="size-4" />
-                  Connect Wallet
-                </Button>
-
-                <Button variant="outline" size="sm" onClick={seedLogin} disabled={busy}>
-                  <KeyRound className="size-4" />
-                  Seed Login
-                </Button>
-
-                <Button variant="outline" size="sm" onClick={seedCreate} disabled={busy}>
-                  Create Seed
-                </Button>
-
-                <Button variant="outline" size="sm" onClick={seedRecover} disabled={busy}>
-                  Recover
-                </Button>
-              </div>
-            )}
-
-            <Button variant="ghost" size="sm" onClick={() => run(refresh)} disabled={busy}>
-              <RefreshCw className={`size-4 ${busy ? "animate-spin" : ""}`} />
-            </Button>
-          </div>
-        </div>
-
-        <div className="mt-2 flex flex-wrap gap-4 text-xs text-zinc-400">
-          <span className="flex items-center gap-1">
-            <HardDrive className="size-3" />
-            {summary?.totalFiles || 0} Files
-          </span>
-
-          <span className="flex items-center gap-1">
-            <Zap className="size-3" />
-            {bytes(wallet?.usedBytes)} used
-          </span>
-
-          {wallet?.plan?.quotaBytes && (
-            <span className="flex items-center gap-1">
-              <span className="inline-block h-1.5 w-20 rounded-full bg-zinc-800">
-                <span
-                  className="block h-full rounded-full bg-blue-500 transition-all"
-                  style={{ width: `${quota}%` }}
-                />
-              </span>
-              {quota.toFixed(0)}%
-            </span>
-          )}
-
-          <span className="flex items-center gap-1">
-            <ShieldCheck className="size-3" />
-            Smart
-          </span>
-
-          <span className="flex items-center gap-1">
-            <Wifi className="size-3" />
-            {peerCount} peers
-          </span>
-
-          {wallet?.plan && (
-            <span className="flex items-center gap-1">
-              <Cloud className="size-3" />
-              {wallet.plan.name}
-            </span>
-          )}
-        </div>
-      </header>
-
-      {isEncrypted && (
-        <div className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-6 py-2">
-          <KeyRound className="size-4 shrink-0 text-zinc-500" />
-
-          <Input
-            type="password"
-            placeholder={`Drive password (min ${minPasswordLength} chars)`}
-            value={drivePassword}
-            onChange={(event) => setDrivePassword(event.target.value)}
-            className="h-8 max-w-xs border-zinc-700 bg-zinc-950 text-xs"
-          />
-
-          <button
-            onClick={() => setIsEncrypted(false)}
-            className="text-xs text-zinc-500 hover:text-zinc-300"
-          >
-            Upload unencrypted
-          </button>
-        </div>
-      )}
-
-      <div className="flex min-h-[calc(100vh-120px)]">
-        <aside className="w-72 shrink-0 space-y-4 border-r border-zinc-800 bg-zinc-900 p-4">
-          <div>
-            <p className="mb-2 text-xs font-semibold uppercase text-zinc-500">
-              {activeFolderId ? `Create inside: ${activeFolder}` : "Create inside: Root"}
-            </p>
-
-            <div className="flex gap-1">
-              <Input
-                placeholder="New folder"
-                value={newFolder}
-                onChange={(event) => setNewFolder(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && createFolder()}
-                className="h-8 border-zinc-700 bg-zinc-950 text-xs"
-              />
-
-              <Button size="sm" onClick={createFolder} disabled={busy || !newFolder.trim()}>
-                <FolderPlus className="size-4" />
-              </Button>
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <p className="mb-2 text-xs font-semibold uppercase text-zinc-500">Folders</p>
-
-            {[ALL_FILES, UNCATEGORIZED].map((label) => (
-              <button
-                key={label}
-                onClick={() => {
-                  setActiveFolder(label);
-                  setActiveFolderId("");
-                }}
-                className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-                  activeFolder === label
-                    ? "bg-blue-600 text-white"
-                    : "text-zinc-400 hover:bg-zinc-800"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-
-            {view === "company" || view === "admin"
-              ? Array.from(
-                  new Set(
-                    (activeWorkspace?.files || [])
-                      .map((file) => file.folder)
-                      .filter(Boolean) as string[]
-                  )
-                )
-                  .sort()
-                  .map((folderName) => (
-                    <button
-                      key={folderName}
-                      onClick={() => {
-                        setActiveFolder(folderName);
-                        setActiveFolderId("");
-                      }}
-                      className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-                        activeFolder === folderName
-                          ? "bg-blue-600 text-white"
-                          : "text-zinc-400 hover:bg-zinc-800"
-                      }`}
-                    >
-                      <FolderOpen className="mr-1.5 inline size-3" />
-                      {folderName}
-                    </button>
-                  ))
-              : (folderChildren.get("") || []).map((folder) => renderFolderNode(folder))}
-          </div>
-
-          {wallet?.connected && (
-            <div className="space-y-1 border-t border-zinc-800 pt-4 text-xs text-zinc-500">
-              {wallet.authMode === "seed" && (
-                <p className="truncate font-mono">
-                  <KeyRound className="mr-1 inline size-3" />
-                  {wallet.username}
-                </p>
-              )}
-
-              {wallet.address && <p className="truncate font-mono">{short(wallet.address)}</p>}
-
-              {wallet.accountId && wallet.authMode !== "seed" && (
-                <p className="truncate font-mono">{short(wallet.accountId)}</p>
-              )}
-            </div>
-          )}
-        </aside>
-
-        <main className="flex-1 overflow-auto">
-          <Tabs
-            value={view}
-            onValueChange={(value) => {
-              setView(value as View);
-              setActiveFolder(ALL_FILES);
-              setActiveFolderId("");
-              clearSelection();
-            }}
-          >
-            <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 px-6 pb-0 pt-4 backdrop-blur">
-              <TabsList className="bg-zinc-900">
-                <TabsTrigger value="personal">My Drive</TabsTrigger>
-                <TabsTrigger value="company">Company Drive</TabsTrigger>
-                <TabsTrigger value="shared">Shared With Me</TabsTrigger>
-                <TabsTrigger value="admin">Admin Panel</TabsTrigger>
-              </TabsList>
-
-              <div className="flex items-center gap-3 py-3">
-                <div className="relative max-w-sm flex-1">
-                  <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
-
-                  <Input
-                    placeholder="Search files, folders, hash…"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    className="h-9 border-zinc-700 bg-zinc-900 pl-9 text-sm"
-                  />
-                </div>
-
-                {(view === "personal" || view === "company" || view === "admin") && (
-                  <Button onClick={upload} disabled={busy}>
-                    <Upload className="size-4" />
-                    Upload
-                  </Button>
-                )}
-              </div>
-
-              {view === "personal" && (
-                <div className="flex flex-wrap items-center gap-2 pb-3">
-                  <span className="text-xs text-zinc-500">
-                    {selectedItemIds.size} file(s) selected
-                  </span>
-
-                  <button onClick={selectAll} className="text-xs text-blue-400 hover:underline">
-                    Select visible
-                  </button>
-
-                  <button
-                    onClick={clearSelection}
-                    className="text-xs text-zinc-500 hover:underline"
-                  >
-                    Clear
-                  </button>
-
-                  {selectedItemIds.size > 0 && (
-                    <>
-                      <select
-                        value={bulkTargetFolderId}
-                        onChange={(event) => setBulkTargetFolderId(event.target.value)}
-                        className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
-                      >
-                        <option value="">Uncategorized</option>
-                        {manifestFolders
-                          .slice()
-                          .sort((a, b) => folderPath(a).localeCompare(folderPath(b)))
-                          .map((folder) => (
-                            <option key={folder.folderId} value={folder.folderId}>
-                              {folderPath(folder)}
-                            </option>
-                          ))}
-                      </select>
-
-                      <Button size="sm" onClick={bulkMove} disabled={busy} className="text-xs">
-                        <MoveRight className="size-3" />
-                        Move selected
-                      </Button>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <TabsContent value="personal" className="p-6">
-              {personalFiles.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
-                  <HardDrive className="size-12" />
-                  <p>No personal files yet. Upload to get started.</p>
-                </div>
-              ) : visibleFiles.length > 0 ? (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {visibleFiles.map((file) => renderFileCard(file))}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
-                  <Search className="size-12" />
-                  <p>No files match this folder/search.</p>
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="company" className="space-y-6 p-6">
-              {workspaces.length > 1 && (
-                <div className="flex flex-wrap gap-2">
-                  {workspaces.map((workspace) => (
-                    <Button
-                      key={workspace.workspaceId}
-                      variant={
-                        activeWorkspace?.workspaceId === workspace.workspaceId
-                          ? "default"
-                          : "outline"
-                      }
-                      size="sm"
-                      onClick={() => setActiveWorkspaceId(workspace.workspaceId)}
-                    >
-                      <Building2 className="size-4" />
-                      {workspace.name}
-                      {workspace.signatureValid === false && (
-                        <Badge variant="destructive" className="ml-1 text-xs">
-                          !
-                        </Badge>
-                      )}
-                    </Button>
-                  ))}
-                </div>
-              )}
-
-              {canManage(localRole) || !activeWorkspace ? (
-                <Card className="border-zinc-800 bg-zinc-900">
-                  <CardHeader>
-                    <CardTitle className="text-sm">Create Company Workspace</CardTitle>
-                  </CardHeader>
-                  <CardContent className="flex gap-2">
-                    <Input
-                      placeholder="Company name"
-                      value={workspaceNameInput}
-                      onChange={(event) => setWorkspaceNameInput(event.target.value)}
-                      className="border-zinc-700 bg-zinc-950"
-                    />
-                    <Button onClick={createWorkspace} disabled={busy}>
-                      <Building2 className="size-4" />
-                      Create
-                    </Button>
-                  </CardContent>
-                </Card>
-              ) : null}
-
-              {activeWorkspace && (
-                <div className="flex gap-4 text-sm text-zinc-400">
-                  <span>{companyFiles.length} files</span>
-                  <span>{bytes(companyBytes)} used</span>
-                  <span>
-                    {companyFiles.filter((file) => file.replicationStatus === "protected").length}{" "}
-                    protected
-                  </span>
-                  <span>
-                    {companyFiles.filter((file) => file.replicationStatus === "needs-repair").length}{" "}
-                    need repair
-                  </span>
-                </div>
-              )}
-
-              {visibleFiles.length > 0 ? (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {visibleFiles.map((file) => renderFileCard(file))}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-3 py-16 text-zinc-600">
-                  <Building2 className="size-12" />
-                  <p>No company files. Upload to the company drive.</p>
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="shared" className="p-6">
-              {sharedFiles.length === 0 ? (
-                <div className="flex flex-col items-center gap-3 py-24 text-zinc-600">
-                  <Share2 className="size-12" />
-                  <p>No shared files yet.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {visibleFiles.map((file) => renderFileCard(file))}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="admin" className="space-y-6 p-6">
-              {!activeWorkspace ? (
-                <p className="text-zinc-500">No company workspace. Create one from the Company tab.</p>
-              ) : (
-                <>
-                  <Card className="border-zinc-800 bg-zinc-900">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-sm">
-                        <Users className="size-4" />
-                        Members — {activeWorkspace.name}
-                        {activeWorkspace.signatureValid === false && (
-                          <Badge variant="destructive">Signature invalid</Badge>
-                        )}
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {activeWorkspace.members.map((member) => (
-                        <div
-                          key={member.memberId}
-                          className="flex items-center justify-between gap-2 rounded-lg bg-zinc-950 p-2"
-                        >
-                          <div>
-                            <p className="text-sm font-medium">
-                              {member.displayName || member.email}
-                            </p>
-                            <p className="text-xs text-zinc-500">
-                              {member.email} · {member.status}
-                            </p>
-
-                            {member.inviteToken && (
-                              <button
-                                onClick={() =>
-                                  void navigator.clipboard
-                                    .writeText(member.inviteToken!)
-                                    .then(() => toast.success("Token copied"))
-                                }
-                                className="text-xs text-blue-400 hover:underline"
-                              >
-                                Copy invite token
-                              </button>
-                            )}
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            {canManage(localRole) && member.deviceId !== deviceId && (
-                              <>
-                                <select
-                                  value={member.role}
-                                  onChange={(event) =>
-                                    changeMemberRole(member.memberId, event.target.value as Role)
-                                  }
-                                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
-                                >
-                                  {(["owner", "admin", "manager", "editor", "viewer", "guest"] as Role[]).map(
-                                    (role) => (
-                                      <option key={role}>{role}</option>
-                                    )
-                                  )}
-                                </select>
-
-                                <Button
-                                  variant="destructive"
-                                  size="sm"
-                                  onClick={() => removeMember(member.memberId)}
-                                  disabled={busy}
-                                >
-                                  <Trash2 className="size-3" />
-                                </Button>
-                              </>
-                            )}
-
-                            {(!canManage(localRole) || member.deviceId === deviceId) && (
-                              <Badge variant="outline" className="text-xs">
-                                {member.role}
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </CardContent>
-                  </Card>
-
-                  {canManage(localRole) && (
-                    <Card className="border-zinc-800 bg-zinc-900">
-                      <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-sm">
-                          <UserPlus className="size-4" />
-                          Invite Member
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent className="flex flex-wrap gap-2">
-                        <Input
-                          placeholder="Email"
-                          value={memberEmail}
-                          onChange={(event) => setMemberEmail(event.target.value)}
-                          className="max-w-xs border-zinc-700 bg-zinc-950"
-                        />
-
-                        <select
-                          value={memberRole}
-                          onChange={(event) => setMemberRole(event.target.value as Role)}
-                          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm"
-                        >
-                          {(["admin", "manager", "editor", "viewer", "guest"] as Role[]).map(
-                            (role) => (
-                              <option key={role}>{role}</option>
-                            )
-                          )}
-                        </select>
-
-                        <Button onClick={inviteMember} disabled={busy}>
-                          <UserPlus className="size-4" />
-                          Invite
-                        </Button>
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  <div>
-                    <p className="mb-3 text-sm font-semibold">Company Files ({companyFiles.length})</p>
-
-                    {visibleFiles.length > 0 ? (
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        {visibleFiles.map((file) => renderFileCard(file))}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-zinc-500">No files.</p>
-                    )}
-                  </div>
-                </>
-              )}
-            </TabsContent>
-          </Tabs>
-        </main>
-      </div>
-    </div>
-  );
-}
