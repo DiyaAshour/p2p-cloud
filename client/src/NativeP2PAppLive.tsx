@@ -1512,7 +1512,7 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
               {view === "personal" && (
                 <div className="flex flex-wrap items-center gap-2 pb-3">
                   <span className="text-xs text-zinc-500">
-                    {selectedHashes.size} file(s) selected
+                    {selectedItemIds.size} file(s) selected
                   </span>
 
                   <button onClick={selectAll} className="text-xs text-blue-400 hover:underline">
@@ -1526,7 +1526,7 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
                     Clear
                   </button>
 
-                  {selectedHashes.size > 0 && (
+                  {selectedItemIds.size > 0 && (
                     <>
                       <select
                         value={bulkTargetFolderId}
