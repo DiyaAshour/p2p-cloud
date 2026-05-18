@@ -12,6 +12,18 @@ function hasNetworkFolders(source) { return source.includes("ipcMain.handle('p2p
 function hasDriveCompat(source) { return source.includes("ipcMain.handle('drive:getFolders'") && source.includes("ipcMain.handle('drive:saveFolders'"); }
 function hasFolderHelpers(source) { return source.includes('function walletFileManifests()') && source.includes('function walletFolderManifests()') && source.includes('function assertFolderIdentity()'); }
 
+const helperBlock = `function sanitizeFolderManifest(folder = {}) { Object.assign(folder, { kind: 'folder', isFolder: true, isEncrypted: false, visibility: 'private', isPublic: false, size: 0, storedSize: 0, totalChunks: 0, chunkSize: 0, chunks: [], encryption: null, replicas: Array.isArray(folder.replicas) ? folder.replicas : [] }); return folder; }
+function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }
+function walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true || String(m.hash || '').startsWith('folder:')).map(sanitizeFolderManifest); }
+function folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }
+function assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }
+function sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }
+function folderIdFromName(name = '') { return crypto.createHash('sha256').update(folderOwnerIdentity() + ':folder:' + String(name || '').trim().toLowerCase() + ':' + Date.now() + ':' + crypto.randomBytes(8).toString('hex')).digest('hex'); }
+function findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }
+function findFolderByName(name = '') { return walletFolderManifests().find((folder) => String(folder.name || '').toLowerCase() === String(name || '').toLowerCase()); }
+function assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }
+`;
+
 function patchFolderHelpers(source) {
   let next = source;
 
@@ -22,20 +34,27 @@ function patchFolderHelpers(source) {
     );
   }
 
-  if (!next.includes('function walletFileManifests()')) {
+  if (next.includes('function walletFileManifests()')) {
+    const start = next.indexOf('function walletFileManifests()');
+    let end = next.indexOf('function totalStoredBytesForWallet()', start);
+    if (end === -1) end = start;
+    if (end > start) next = next.slice(0, start) + helperBlock + next.slice(end);
+  } else {
     next = next.replace(
       /function walletManifests\(\) \{ return walletState\.connected \? manifests\.filter\(walletOwnsManifest\)\.filter\(isUsableManifest\) : \[\]; \}\r?\n/,
-      (match) => `${match}function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }\nfunction walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true); }\nfunction folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }\nfunction assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }\nfunction sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\\r\\n\\t]/g, ' ').replace(/\\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }\nfunction folderIdFromName(name = '') { return crypto.createHash('sha256').update(folderOwnerIdentity() + ':folder:' + String(name || '').trim().toLowerCase() + ':' + Date.now() + ':' + crypto.randomBytes(8).toString('hex')).digest('hex'); }\nfunction findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }\nfunction findFolderByName(name = '') { return walletFolderManifests().find((folder) => String(folder.name || '').toLowerCase() === String(name || '').toLowerCase()); }\nfunction assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }\n`
+      (match) => `${match}${helperBlock}`
     );
   }
 
-  // If the helper insertion anchor was missed, add a compact fallback before totalStoredBytesForWallet.
+  // Fallback if the exact walletManifests anchor was missed.
   if (!next.includes('function walletFileManifests()') && next.includes('function totalStoredBytesForWallet()')) {
-    next = next.replace(
-      /function totalStoredBytesForWallet\(\)/,
-      `function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }\nfunction walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true); }\nfunction folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }\nfunction assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }\nfunction sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/[\\r\\n\\t]/g, ' ').replace(/\\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }\nfunction folderIdFromName(name = '') { return crypto.createHash('sha256').update(folderOwnerIdentity() + ':folder:' + String(name || '').trim().toLowerCase() + ':' + Date.now() + ':' + crypto.randomBytes(8).toString('hex')).digest('hex'); }\nfunction findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }\nfunction findFolderByName(name = '') { return walletFolderManifests().find((folder) => String(folder.name || '').toLowerCase() === String(name || '').toLowerCase()); }\nfunction assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }\nfunction totalStoredBytesForWallet()`
-    );
+    next = next.replace(/function totalStoredBytesForWallet\(\)/, `${helperBlock}function totalStoredBytesForWallet()`);
   }
+
+  // New and existing folder objects must be private in local runtime too, not only sync layer.
+  next = next.replace(/isPublic: true/g, 'isPublic: false');
+  next = next.replace(/visibility: 'public',\s*isPublic: false/g, "visibility: 'private', isPublic: false");
+  next = next.replace(/kind: FOLDER_MANIFEST_KIND, id:/g, "kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, id:");
 
   // Network summaries and quotas should count files only, not folder manifests.
   next = next.replace(/function totalStoredBytesForWallet\(\) \{ return walletManifests\(\)\.reduce\(/g, 'function totalStoredBytesForWallet() { return walletFileManifests().reduce(');
@@ -78,7 +97,7 @@ if (!hasFolderHelpers(stable)) {
 write(stablePath, stable);
 
 if (hasNetworkFolders(stable) || hasDriveCompat(stable)) {
-  console.log('[folder-runtime-stable] synced network folder handlers and helpers into electron/main-stable.js');
+  console.log('[folder-runtime-stable] synced network folder handlers, helpers, and private folder manifests into electron/main-stable.js');
 } else {
   console.log('[folder-runtime-stable] installed folder helpers; network folder handlers not present yet');
 }
