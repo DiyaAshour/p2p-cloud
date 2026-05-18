@@ -31,6 +31,8 @@ import {
   MoveRight,
 } from "lucide-react";
 import { toast } from "sonner";
+import SignClient from "@walletconnect/sign-client";
+import { WalletConnectModal } from "@walletconnect/modal";
 
 // ─── Channel Types ────────────────────────────────────────────────────────────
 type Channel =
