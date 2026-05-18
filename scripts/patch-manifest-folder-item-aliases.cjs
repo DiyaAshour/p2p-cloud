@@ -86,13 +86,33 @@ const renameHandler = String.raw`ipcMain.handle('p2p:renameItem', async (_event,
   const item = findOwnedManifestItemById(payload.itemId || payload.id || payload.hash || payload.rootHash || payload.folderId);
   if (!item) throw new Error('Item not found');
   const name = sanitizeFolderName(payload.name);
+  const oldName = String(item.name || '').trim();
+  const oldNameLower = oldName.toLowerCase();
   item.name = name;
   item.updatedAt = new Date().toISOString();
-  if (manifestItemIsFolder(item)) Object.assign(item, { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, isEncrypted: false, chunks: [], chunkSize: 0, totalChunks: 0, size: 0, storedSize: 0 });
+  const changedFiles = [];
+  if (manifestItemIsFolder(item)) {
+    Object.assign(item, { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, isEncrypted: false, chunks: [], chunkSize: 0, totalChunks: 0, size: 0, storedSize: 0 });
+    const folderId = String(item.folderId || item.id || '');
+    for (const candidate of walletManifests()) {
+      if (manifestItemIsFolder(candidate)) continue;
+      const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+      const candidateFolderName = manifestFolderNameLower(candidate);
+      if ((folderId && candidateParentId === folderId) || (oldNameLower && candidateFolderName === oldNameLower)) {
+        candidate.folderId = folderId;
+        candidate.parentFolderId = folderId;
+        candidate.folderName = name;
+        candidate.folder = name;
+        candidate.updatedAt = new Date().toISOString();
+        changedFiles.push(candidate);
+      }
+    }
+  }
   persistManifests();
   await syncPush(item);
+  for (const file of changedFiles) await syncPush(file);
   await syncPull();
-  return { ok: true, item };
+  return { ok: true, item, renamedFiles: changedFiles.length };
 });`;
 
 const moveHandler = String.raw`ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
@@ -238,9 +258,11 @@ for (const file of runtimeFiles) {
     }
   } else {
     src = ensureHelpers(src);
+    src = replaceIpcHandler(src, 'p2p:renameItem', renameHandler);
+    src = replaceIpcHandler(src, 'p2p:moveItem', moveHandler);
     src = replaceIpcHandler(src, 'p2p:deleteItem', deleteHandler);
   }
   if (src !== before) write(file, src);
 }
 
-console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed and deleteItem handler supports file disposition.');
+console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed; rename/move/delete update manifests consistently.');
