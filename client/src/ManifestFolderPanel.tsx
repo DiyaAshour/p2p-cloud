@@ -72,7 +72,94 @@ function collectRemovedIds(root: DriveFolder, folders: DriveFolder[]) {
   }
   return removed;
 }
+type AskTextOptions = {
+  title: string;
+  message?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  inputType?: "text" | "password";
+  confirmText?: string;
+  danger?: boolean;
+  hideInput?: boolean;
+};
 
+function askText(options: AskTextOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className =
+      "fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4";
+
+    const card = document.createElement("div");
+    card.className =
+      "w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-5 text-zinc-50 shadow-2xl";
+
+    const title = document.createElement("h2");
+    title.className = "text-base font-semibold";
+    title.textContent = options.title;
+    card.appendChild(title);
+
+    if (options.message) {
+      const message = document.createElement("p");
+      message.className = "mt-2 whitespace-pre-wrap text-sm text-zinc-400";
+      message.textContent = options.message;
+      card.appendChild(message);
+    }
+
+    let input: HTMLInputElement | null = null;
+
+    if (!options.hideInput) {
+      input = document.createElement("input");
+      input.type = options.inputType || "text";
+      input.value = options.defaultValue || "";
+      input.placeholder = options.placeholder || "";
+      input.className =
+        "mt-4 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-50 outline-none";
+      card.appendChild(input);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "mt-4 flex justify-end gap-2";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className =
+      "rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800";
+    cancel.textContent = "Cancel";
+
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = options.danger
+      ? "rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+      : "rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500";
+    ok.textContent = options.confirmText || "OK";
+
+    const close = (value: string | null) => {
+      overlay.remove();
+      resolve(value);
+    };
+
+    cancel.onclick = () => close(null);
+    ok.onclick = () => close(options.hideInput ? "" : input?.value ?? "");
+
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") close(null);
+      if (event.key === "Enter" && !options.hideInput) close(input?.value ?? "");
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    card.appendChild(actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    setTimeout(() => input?.focus(), 0);
+  });
+}
+
+async function askConfirm(options: Omit<AskTextOptions, "hideInput">) {
+  const answer = await askText({ ...options, hideInput: true });
+  return answer !== null;
+}
 export default function ManifestFolderPanel({ api, busy = false, enabled = true, activeFolderName = "", onRefresh, onSelectFolder }: Props) {
   const [folders, setFolders] = useState<DriveFolder[]>([]);
   const [activeFolderId, setActiveFolderId] = useState(ROOT_ID);
@@ -190,87 +277,165 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
   };
 
   const renameFolder = async (folder: DriveFolder) => {
-    const name = window.prompt("Rename folder", folder.name)?.trim();
-    if (!name || name === folder.name) return;
-    setLoading(true);
-    try {
-      const item = await api.invoke<DriveFolder>("p2p:renameItem", { itemId: itemIdOf(folder), name });
-      setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, ...item, name: item?.name || name } : candidate));
-      toast.success("Folder renamed");
-      await refreshFolders();
-      await onRefresh?.();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to rename folder");
-    } finally {
-      setLoading(false);
-    }
+  const name = (
+    await askText({
+      title: "Rename folder",
+      message: "New folder name",
+      defaultValue: folder.name,
+      confirmText: "Rename",
+    })
+  )?.trim();
+
+  if (!name || name === folder.name) return;
+
+  setLoading(true);
+  try {
+    const item = await api.invoke<DriveFolder>("p2p:renameItem", {
+      itemId: itemIdOf(folder),
+      name,
+    });
+
+    setFolders((current) =>
+      current.map((candidate) =>
+        idOf(candidate) === idOf(folder)
+          ? { ...candidate, ...item, name: item?.name || name }
+          : candidate
+      )
+    );
+
+    toast.success("Folder renamed");
+    await refreshFolders();
+    await onRefresh?.();
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to rename folder");
+  } finally {
+    setLoading(false);
+  }
+    
   };
 
   const moveFolder = async (folder: DriveFolder) => {
-    const targetName = window.prompt("Move inside folder name. Leave empty for root", "")?.trim() || "";
-    const target = targetName ? folders.find((candidate) => candidate.name === targetName) : null;
-    if (targetName && !target) {
-      toast.error("Target folder not found");
-      return;
-    }
-    if (target && idOf(target) === idOf(folder)) {
-      toast.error("Cannot move folder inside itself");
-      return;
-    }
-    setLoading(true);
-    try {
-      await api.invoke("p2p:moveItem", {
-        itemId: itemIdOf(folder),
-        targetFolderId: target ? idOf(target) : null,
-      });
-      setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, parentFolderId: target ? idOf(target) : "" } : candidate));
-      toast.success("Folder moved");
-      await refreshFolders();
-      await onRefresh?.();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to move folder");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const targetName =
+    (
+      await askText({
+        title: "Move folder",
+        message: "Move inside folder name.\n\nLeave empty = Root",
+        defaultValue: "",
+        placeholder: "Target folder name",
+        confirmText: "Move",
+      })
+    )?.trim() || "";
+
+  const target = targetName ? folders.find((candidate) => candidate.name === targetName) : null;
+
+  if (targetName && !target) {
+    toast.error("Target folder not found");
+    return;
+  }
+
+  if (target && idOf(target) === idOf(folder)) {
+    toast.error("Cannot move folder inside itself");
+    return;
+  }
+
+  setLoading(true);
+  try {
+    await api.invoke("p2p:moveItem", {
+      itemId: itemIdOf(folder),
+      targetFolderId: target ? idOf(target) : "",
+    });
+
+    setFolders((current) =>
+      current.map((candidate) =>
+        idOf(candidate) === idOf(folder)
+          ? { ...candidate, parentFolderId: target ? idOf(target) : "" }
+          : candidate
+      )
+    );
+
+    toast.success("Folder moved");
+    await refreshFolders();
+    await onRefresh?.();
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to move folder");
+  } finally {
+    setLoading(false);
+  }
+};
 
   const deleteFolder = async (folder: DriveFolder) => {
-    if (!window.confirm(`Delete folder ${folderPath(folder, byId)}?`)) return;
-    const removed = collectRemovedIds(folder, folders);
-    const targetAnswer = window.prompt(
-      "Where should files inside this folder go?\n\nLeave empty = Uncategorized\nType another folder name = move files there\nType DELETE = delete files too",
-      ""
+  const confirmed = await askConfirm({
+    title: "Delete folder",
+    message: `Delete folder ${folderPath(folder, byId)}?`,
+    confirmText: "Continue",
+    danger: true,
+  });
+
+  if (!confirmed) return;
+
+  const removed = collectRemovedIds(folder, folders);
+
+  const targetAnswer = await askText({
+    title: "Where should files go?",
+    message:
+      "Leave empty = Uncategorized\nType another folder name = move files there\nType DELETE = delete files too",
+    defaultValue: "",
+    placeholder: "Folder name or DELETE",
+    confirmText: "Delete folder",
+    danger: true,
+  });
+
+  if (targetAnswer === null) return;
+
+  const trimmedTarget = targetAnswer.trim();
+  const deleteFilesToo = trimmedTarget.toUpperCase() === "DELETE";
+  const target =
+    !trimmedTarget || deleteFilesToo
+      ? null
+      : folders.find((candidate) => candidate.name === trimmedTarget);
+
+  if (trimmedTarget && !deleteFilesToo && !target) {
+    toast.error("Target folder not found");
+    return;
+  }
+
+  if (target && removed.has(idOf(target))) {
+    toast.error("Cannot move files into a folder that is being deleted");
+    return;
+  }
+
+  setLoading(true);
+  try {
+    await api.invoke("p2p:deleteItem", {
+      itemId: itemIdOf(folder),
+      fileDisposition: deleteFilesToo ? "delete" : "move",
+      targetFolderId: target ? idOf(target) : "",
+    });
+
+    setFolders((current) =>
+      current.filter(
+        (candidate) => !removed.has(idOf(candidate)) && itemIdOf(candidate) !== itemIdOf(folder)
+      )
     );
-    if (targetAnswer === null) return;
-    const trimmedTarget = targetAnswer.trim();
-    const deleteFilesToo = trimmedTarget.toUpperCase() === "DELETE";
-    const target = !trimmedTarget || deleteFilesToo ? null : folders.find((candidate) => candidate.name === trimmedTarget);
-    if (trimmedTarget && !deleteFilesToo && !target) {
-      toast.error("Target folder not found");
-      return;
-    }
-    if (target && removed.has(idOf(target))) {
-      toast.error("Cannot move files into a folder that is being deleted");
-      return;
-    }
-    setLoading(true);
-    try {
-      await api.invoke("p2p:deleteItem", {
-        itemId: itemIdOf(folder),
-        fileDisposition: deleteFilesToo ? "delete" : "move",
-        targetFolderId: target ? idOf(target) : "",
-      });
-      setFolders((current) => current.filter((candidate) => !removed.has(idOf(candidate)) && itemIdOf(candidate) !== itemIdOf(folder)));
-      if (activeFolderId && removed.has(activeFolderId)) selectFolder(null);
-      toast.success(deleteFilesToo ? "Folder and files deleted" : target ? `Folder deleted, files moved to ${target.name}` : "Folder deleted, files moved to Uncategorized");
-      await refreshFolders();
-      await onRefresh?.();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to delete folder");
-    } finally {
-      setLoading(false);
-    }
-  };
+
+    if (activeFolderId && removed.has(activeFolderId)) selectFolder(null);
+
+    toast.success(
+      deleteFilesToo
+        ? "Folder and files deleted"
+        : target
+          ? `Folder deleted, files moved to ${target.name}`
+          : "Folder deleted, files moved to Uncategorized"
+    );
+
+    await refreshFolders();
+    await onRefresh?.();
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to delete folder");
+  } finally {
+    setLoading(false);
+  }
+};
 
   const disabled = busy || loading || !enabled;
 
