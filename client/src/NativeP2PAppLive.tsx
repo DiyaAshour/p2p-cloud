@@ -1027,37 +1027,44 @@ const visibleFiles = useMemo(() => {
     });
 
   const deleteFolder = (folder: DriveFolder) =>
-    run(async () => {
-      const disposition = window.prompt(
-        `Files inside "${folderPath(folder)}":\n\nLeave empty → Uncategorized\nType a folder name/path → move files there\nType DELETE → delete files too`,
-        ""
-      );
+  run(async () => {
+    const disposition = await askText({
+      title: "Delete Folder",
+      message: `Files inside "${folderPath(folder)}":
 
-      if (disposition === null) return;
-
-      const trimmed = disposition.trim();
-      const isDelete = trimmed.toUpperCase() === "DELETE";
-      const targetFolder = isDelete || !trimmed ? null : folderByNameOrPath(trimmed);
-
-      if (trimmed && !isDelete && !targetFolder) {
-        throw new Error("Target folder not found");
-      }
-
-      await api.invoke("p2p:deleteItem", {
-        itemId: folder.folderId,
-        fileDisposition: isDelete ? "delete" : "move",
-        targetFolderId: targetFolder?.folderId || "",
-      });
-
-      await refresh();
-
-      if (activeFolderId === folder.folderId) {
-        setActiveFolder(ALL_FILES);
-        setActiveFolderId("");
-      }
-
-      toast.success(`Folder "${folder.name}" deleted`);
+Leave empty → Uncategorized
+Type a folder name/path → move files there
+Type DELETE → delete files too`,
+      placeholder: "empty / folder name / DELETE",
+      confirmText: "Delete Folder",
+      danger: true,
     });
+
+    if (disposition === null) return;
+
+    const trimmed = disposition.trim();
+    const isDelete = trimmed.toUpperCase() === "DELETE";
+    const targetFolder = isDelete || !trimmed ? null : folderByNameOrPath(trimmed);
+
+    if (trimmed && !isDelete && !targetFolder) {
+      throw new Error("Target folder not found");
+    }
+
+    await api.invoke("p2p:deleteItem", {
+      itemId: folder.folderId,
+      fileDisposition: isDelete ? "delete" : "move",
+      targetFolderId: targetFolder?.folderId || "",
+    });
+
+    await refresh();
+
+    if (activeFolderId === folder.folderId) {
+      setActiveFolder(ALL_FILES);
+      setActiveFolderId("");
+    }
+
+    toast.success(`Folder "${folder.name}" deleted`);
+  });
 
   const upload = () =>
     run(async () => {
