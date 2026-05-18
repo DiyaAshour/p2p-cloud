@@ -671,6 +671,11 @@ function manifestItemId(manifest = {}) {
   return String(manifest.folderId || manifest.id || manifest.rootHash || manifest.hash || '');
 }
 
+function canTouchManifest(manifest = {}) {
+  const owner = normalizeWallet(manifest.ownerWallet || manifest.owner || manifest.wallet || '');
+  return !owner || owner === activeWallet();
+}
+
 function findAnyItem(payload = {}) {
   const ids = [
     payload.itemId,
@@ -683,37 +688,47 @@ function findAnyItem(payload = {}) {
     .map((v) => String(v || '').trim())
     .filter(Boolean);
 
-  return walletManifests().find((manifest) => {
-    const values = [
-      manifest.id,
-      manifest.folderId,
-      manifest.hash,
-      manifest.rootHash,
-    ]
-      .map((v) => String(v || '').trim())
-      .filter(Boolean);
+  if (!ids.length) return null;
 
-    return ids.some((id) => values.includes(id));
-  });
+  return manifests
+    .filter(isUsableManifest)
+    .filter(canTouchManifest)
+    .find((manifest) => {
+      const values = [
+        manifest.id,
+        manifest.fileId,
+        manifest.folderId,
+        manifest.hash,
+        manifest.rootHash,
+        manifest.name,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+
+      return ids.some((id) => values.includes(id));
+    }) || null;
 }
 
 function findFolderByAny(value = '') {
   const id = String(value || '').trim();
   if (!id) return null;
 
-  return walletManifests().find((manifest) => {
-    if (!isFolderManifest(manifest)) return false;
+  return manifests
+    .filter(isUsableManifest)
+    .filter(canTouchManifest)
+    .find((manifest) => {
+      if (!isFolderManifest(manifest)) return false;
 
-    return [
-      manifest.folderId,
-      manifest.id,
-      manifest.hash,
-      manifest.rootHash,
-      manifest.name,
-    ]
-      .map((v) => String(v || '').trim())
-      .includes(id);
-  }) || null;
+      return [
+        manifest.folderId,
+        manifest.id,
+        manifest.hash,
+        manifest.rootHash,
+        manifest.name,
+      ]
+        .map((v) => String(v || '').trim())
+        .includes(id);
+    }) || null;
 }
 
 function folderDisplayName(folder) {
@@ -739,8 +754,13 @@ function assertFolderMoveSafe(folderId, targetFolderId) {
 }
 
 function descendantFolderIds(rootFolderId) {
-  const removed = new Set([String(rootFolderId || '')]);
-  const folders = walletManifests().filter(isFolderManifest);
+  const root = String(rootFolderId || '').trim();
+  const removed = new Set([root]);
+
+  const folders = manifests
+    .filter(isUsableManifest)
+    .filter(canTouchManifest)
+    .filter(isFolderManifest);
 
   let changed = true;
 
@@ -748,8 +768,8 @@ function descendantFolderIds(rootFolderId) {
     changed = false;
 
     for (const folder of folders) {
-      const id = String(folder.folderId || '');
-      const parent = String(folder.parentFolderId || '');
+      const id = String(folder.folderId || '').trim();
+      const parent = String(folder.parentFolderId || '').trim();
 
       if (id && parent && removed.has(parent) && !removed.has(id)) {
         removed.add(id);
@@ -862,11 +882,15 @@ ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
 
     const changedFiles = [];
     const deletedFiles = [];
-    const removedFolders = walletManifests().filter(
-      (manifest) => isFolderManifest(manifest) && removedFolderIds.has(String(manifest.folderId || ''))
-    );
+    const ownedManifests = manifests
+  .filter(isUsableManifest)
+  .filter(canTouchManifest);
 
-    for (const manifest of walletManifests()) {
+const removedFolders = ownedManifests.filter(
+  (manifest) => isFolderManifest(manifest) && removedFolderIds.has(String(manifest.folderId || ''))
+);
+
+for (const manifest of ownedManifests) {
       if (isFolderManifest(manifest)) continue;
 
       const currentFolderId = String(manifest.folderId || manifest.parentFolderId || '');
@@ -886,7 +910,7 @@ ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
     }
 
     manifests = manifests.filter((manifest) => {
-      if (!walletOwnsManifest(manifest)) return true;
+  if (!canTouchManifest(manifest)) return true;
 
       if (isFolderManifest(manifest)) {
         return !removedFolderIds.has(String(manifest.folderId || ''));
@@ -907,8 +931,8 @@ ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
   }
 
   manifests = manifests.filter(
-    (manifest) => !(walletOwnsManifest(manifest) && manifest.hash === item.hash)
-  );
+  (manifest) => !(canTouchManifest(manifest) && manifest.hash === item.hash)
+);
 
   persistManifests();
   await syncDelete(activeWallet(), item.hash);
