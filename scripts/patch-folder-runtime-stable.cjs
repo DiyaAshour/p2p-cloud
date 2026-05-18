@@ -38,8 +38,31 @@ function removeBrokenSanitizeFolderName(source) {
   return next;
 }
 
+function stripExistingFolderHelperBlock(source) {
+  let next = source;
+  let guard = 0;
+  while (guard < 10) {
+    guard += 1;
+    const totalIndex = next.indexOf('function totalStoredBytesForWallet()');
+    if (totalIndex === -1) break;
+    const markers = [
+      'function sanitizeFolderManifest(',
+      'function walletFileManifests()',
+      'function walletFolderManifests()',
+      'function folderOwnerIdentity()',
+      'function assertFolderIdentity()',
+      'function sanitizeFolderName(name = \'\')',
+    ];
+    const starts = markers.map((marker) => next.indexOf(marker)).filter((idx) => idx !== -1 && idx < totalIndex);
+    if (!starts.length) break;
+    const start = Math.min(...starts);
+    next = next.slice(0, start) + next.slice(totalIndex);
+  }
+  return next;
+}
+
 function patchFolderHelpers(source) {
-  let next = removeBrokenSanitizeFolderName(source);
+  let next = stripExistingFolderHelperBlock(removeBrokenSanitizeFolderName(source));
 
   if (!next.includes("const FOLDER_MANIFEST_KIND = 'folder';")) {
     next = next.replace(
@@ -48,12 +71,7 @@ function patchFolderHelpers(source) {
     );
   }
 
-  if (next.includes('function walletFileManifests()')) {
-    const start = next.indexOf('function walletFileManifests()');
-    let end = next.indexOf('function totalStoredBytesForWallet()', start);
-    if (end === -1) end = start;
-    if (end > start) next = next.slice(0, start) + helperBlock + next.slice(end);
-  } else {
+  if (next.includes('function walletManifests()')) {
     next = next.replace(
       /function walletManifests\(\) \{ return walletState\.connected \? manifests\.filter\(walletOwnsManifest\)\.filter\(isUsableManifest\) : \[\]; \}\r?\n/,
       (match) => `${match}${helperBlock}`
