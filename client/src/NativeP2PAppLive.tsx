@@ -278,6 +278,99 @@ function protection(file: P2PFile) {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
+type AskTextOptions = {
+  title: string;
+  message?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  inputType?: "text" | "password";
+  confirmText?: string;
+  danger?: boolean;
+  hideInput?: boolean;
+};
+
+function askText(options: AskTextOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className =
+      "fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4";
+
+    const card = document.createElement("div");
+    card.className =
+      "w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-5 text-zinc-50 shadow-2xl";
+
+    const title = document.createElement("h2");
+    title.className = "text-base font-semibold";
+    title.textContent = options.title;
+    card.appendChild(title);
+
+    if (options.message) {
+      const message = document.createElement("p");
+      message.className = "mt-2 whitespace-pre-wrap text-sm text-zinc-400";
+      message.textContent = options.message;
+      card.appendChild(message);
+    }
+
+    let input: HTMLInputElement | null = null;
+
+    if (!options.hideInput) {
+      input = document.createElement("input");
+      input.type = options.inputType || "text";
+      input.value = options.defaultValue || "";
+      input.placeholder = options.placeholder || "";
+      input.className =
+        "mt-4 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-50 outline-none";
+      card.appendChild(input);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "mt-4 flex justify-end gap-2";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className =
+      "rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800";
+    cancel.textContent = "Cancel";
+
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = options.danger
+      ? "rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+      : "rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500";
+    ok.textContent = options.confirmText || "OK";
+
+    const close = (value: string | null) => {
+      overlay.remove();
+      resolve(value);
+    };
+
+    cancel.onclick = () => close(null);
+    ok.onclick = () => close(options.hideInput ? "" : input?.value ?? "");
+
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") close(null);
+      if (event.key === "Enter" && !options.hideInput) close(input?.value ?? "");
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(ok);
+    card.appendChild(actions);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+
+    setTimeout(() => input?.focus(), 0);
+  });
+}
+
+function showInfo(titleText: string, messageText: string): Promise<string | null> {
+  return askText({
+    title: titleText,
+    message: messageText,
+    hideInput: true,
+    confirmText: "OK",
+  });
+}
+
 export default function NativeP2PAppLive() {
   const api = getBridge();
 
@@ -589,9 +682,17 @@ const visibleFiles = useMemo(() => {
     return value;
   };
 
-  const connectWallet = () =>
+    const connectWallet = () =>
     run(async () => {
-      const address = window.prompt("Wallet address 0x...")?.trim();
+      const address = (
+        await askText({
+          title: "Connect Wallet",
+          message: "Enter wallet address",
+          placeholder: "0x...",
+          confirmText: "Connect",
+        })
+      )?.trim();
+
       if (!address) return;
 
       setWallet(await api.invoke<WalletState>("wallet:connect", { address }));
@@ -600,10 +701,26 @@ const visibleFiles = useMemo(() => {
 
   const seedLogin = () =>
     run(async () => {
-      const username = window.prompt("Seed username")?.trim();
+      const username = (
+        await askText({
+          title: "Seed Login",
+          message: "Enter seed username",
+          placeholder: "username",
+          confirmText: "Next",
+        })
+      )?.trim();
+
       if (!username) return;
 
-      const pw = window.prompt("Seed password")?.trim();
+      const pw = (
+        await askText({
+          title: "Seed Login",
+          message: "Enter seed password",
+          inputType: "password",
+          confirmText: "Login",
+        })
+      )?.trim();
+
       if (!pw) return;
 
       setWallet(await api.invoke<WalletState>("seed:login", { username, password: pw }));
@@ -612,10 +729,26 @@ const visibleFiles = useMemo(() => {
 
   const seedCreate = () =>
     run(async () => {
-      const username = window.prompt("Choose seed username")?.trim();
+      const username = (
+        await askText({
+          title: "Create Seed Account",
+          message: "Choose seed username",
+          placeholder: "username",
+          confirmText: "Next",
+        })
+      )?.trim();
+
       if (!username) return;
 
-      const pw = window.prompt("Choose seed password / drive password")?.trim();
+      const pw = (
+        await askText({
+          title: "Create Seed Account",
+          message: "Choose seed password / drive password",
+          inputType: "password",
+          confirmText: "Create",
+        })
+      )?.trim();
+
       if (!pw) return;
 
       const result = await api.invoke<WalletState & { seed?: string }>("seed:create", {
@@ -627,19 +760,43 @@ const visibleFiles = useMemo(() => {
       await refresh();
 
       if (result.seed) {
-        window.alert(`Recovery seed — save it now:\n\n${result.seed}`);
+        await showInfo("Recovery seed — save it now", result.seed);
       }
     });
 
   const seedRecover = () =>
     run(async () => {
-      const username = window.prompt("Seed username")?.trim();
+      const username = (
+        await askText({
+          title: "Recover Seed Account",
+          message: "Enter seed username",
+          placeholder: "username",
+          confirmText: "Next",
+        })
+      )?.trim();
+
       if (!username) return;
 
-      const seed = window.prompt("Recovery seed")?.trim();
+      const seed = (
+        await askText({
+          title: "Recover Seed Account",
+          message: "Enter recovery seed",
+          placeholder: "recovery seed",
+          confirmText: "Next",
+        })
+      )?.trim();
+
       if (!seed) return;
 
-      const pw = window.prompt("New seed password / drive password")?.trim();
+      const pw = (
+        await askText({
+          title: "Recover Seed Account",
+          message: "Enter new seed password / drive password",
+          inputType: "password",
+          confirmText: "Recover",
+        })
+      )?.trim();
+
       if (!pw) return;
 
       setWallet(await api.invoke<WalletState>("seed:recover", { username, seed, password: pw }));
