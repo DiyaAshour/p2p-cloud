@@ -52,6 +52,9 @@ const helperBlock = String.raw`
 function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }
 function manifestItemIds(item = {}) { return [item.id, item.rootHash, item.hash, item.folderId].filter(Boolean).map((value) => String(value)); }
 function manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }
+function manifestFolderName(item = {}) { return String(item.folderName || item.folder || '').trim(); }
+function manifestFolderNameLower(item = {}) { return manifestFolderName(item).toLowerCase(); }
+function manifestOwnNameLower(item = {}) { return String(item.name || '').trim().toLowerCase(); }
 function findOwnedManifestItemById(itemId = '') {
   const id = String(itemId || '');
   return walletManifests().find((item) => manifestItemId(item) === id || item.id === id || item.hash === id || item.rootHash === id || item.folderId === id);
@@ -117,39 +120,85 @@ const deleteHandler = String.raw`ipcMain.handle('p2p:deleteItem', async (_event,
   await syncPull();
   const item = findOwnedManifestItemById(payload.itemId || payload.id || payload.hash || payload.rootHash || payload.folderId);
   if (!item) throw new Error('Item not found');
-  const removedItems = [];
+
   if (!manifestItemIsFolder(item)) {
-    removedItems.push(item);
-  } else {
-    const rootIds = manifestItemIds(item);
-    const removedFolderIds = new Set(rootIds);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const folder of walletFolderManifests()) {
-        const folderIds = manifestItemIds(folder);
-        const parentId = normalizeParentFolderId(folder.parentFolderId);
-        if (parentId && removedFolderIds.has(parentId)) {
-          for (const id of folderIds) {
-            if (!removedFolderIds.has(id)) { removedFolderIds.add(id); changed = true; }
-          }
+    const removedIds = new Set(manifestItemIds(item));
+    const beforeCount = manifests.length;
+    manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+    persistManifests();
+    await syncDelete(manifestDeleteOwnerIdentity(), item.hash || item.rootHash || item.folderId);
+    return { ok: true, deleted: beforeCount - manifests.length, movedFiles: 0, deletedFiles: 1, removedIds: Array.from(removedIds) };
+  }
+
+  const rootIds = manifestItemIds(item);
+  const removedFolderIds = new Set(rootIds);
+  const removedFolderNames = new Set([manifestOwnNameLower(item)].filter(Boolean));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of walletFolderManifests()) {
+      const folderIds = manifestItemIds(folder);
+      const parentId = normalizeParentFolderId(folder.parentFolderId);
+      if (parentId && removedFolderIds.has(parentId)) {
+        for (const id of folderIds) {
+          if (!removedFolderIds.has(id)) { removedFolderIds.add(id); changed = true; }
         }
-      }
-    }
-    for (const candidate of walletManifests()) {
-      if (manifestItemIsFolder(candidate)) {
-        if (manifestItemIds(candidate).some((id) => removedFolderIds.has(id))) removedItems.push(candidate);
-      } else if (removedFolderIds.has(normalizeParentFolderId(candidate.parentFolderId || candidate.folderId))) {
-        removedItems.push(candidate);
+        const folderName = manifestOwnNameLower(folder);
+        if (folderName && !removedFolderNames.has(folderName)) { removedFolderNames.add(folderName); changed = true; }
       }
     }
   }
+
+  const foldersToRemove = [];
+  const filesInside = [];
+  for (const candidate of walletManifests()) {
+    if (manifestItemIsFolder(candidate)) {
+      if (manifestItemIds(candidate).some((id) => removedFolderIds.has(id))) foldersToRemove.push(candidate);
+      continue;
+    }
+    const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+    const candidateFolderName = manifestFolderNameLower(candidate);
+    if ((candidateParentId && removedFolderIds.has(candidateParentId)) || (candidateFolderName && removedFolderNames.has(candidateFolderName))) {
+      filesInside.push(candidate);
+    }
+  }
+
+  const disposition = String(payload.fileDisposition || 'move').trim().toLowerCase();
+  const deleteFiles = disposition === 'delete';
+  const targetFolder = deleteFiles ? null : assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? null);
+  if (targetFolder && manifestItemIds(targetFolder).some((id) => removedFolderIds.has(id))) throw new Error('Cannot move files into a folder that is being deleted');
+
+  const removedItems = deleteFiles ? [...foldersToRemove, ...filesInside] : foldersToRemove;
   const removedIds = new Set(removedItems.flatMap((removed) => manifestItemIds(removed)));
   const beforeCount = manifests.length;
   manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+
+  let movedFiles = 0;
+  if (!deleteFiles) {
+    const targetFolderId = targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '';
+    const targetFolderName = targetFolder?.name || '';
+    for (const file of filesInside) {
+      file.parentFolderId = targetFolderId;
+      file.folderId = targetFolderId;
+      file.folderName = targetFolderName;
+      file.folder = targetFolderName;
+      file.updatedAt = new Date().toISOString();
+      movedFiles += 1;
+    }
+  }
+
   persistManifests();
   for (const removed of removedItems) await syncDelete(manifestDeleteOwnerIdentity(), removed.hash || removed.rootHash || removed.folderId);
-  return { ok: true, deleted: beforeCount - manifests.length, removedIds: Array.from(removedIds) };
+  if (!deleteFiles) for (const file of filesInside) await syncPush(file);
+
+  return {
+    ok: true,
+    deleted: beforeCount - manifests.length,
+    movedFiles,
+    deletedFiles: deleteFiles ? filesInside.length : 0,
+    removedIds: Array.from(removedIds),
+    targetFolderId: targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '',
+  };
 });`;
 
 const aliasHandlers = `${helperBlock}\n${renameHandler}\n\n${moveHandler}\n\n${deleteHandler}\n`;
@@ -159,7 +208,13 @@ function ensureHelpers(source) {
   if (!next.includes('function manifestItemIds(item = {})')) {
     next = next.replace(
       "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }",
-      "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }\nfunction manifestItemIds(item = {}) { return [item.id, item.rootHash, item.folderId, item.hash].filter(Boolean).map((value) => String(value)); }\nfunction manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }"
+      "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }\nfunction manifestItemIds(item = {}) { return [item.id, item.rootHash, item.hash, item.folderId].filter(Boolean).map((value) => String(value)); }\nfunction manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }"
+    );
+  }
+  if (!next.includes('function manifestFolderNameLower(item = {})')) {
+    next = next.replace(
+      "function manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }",
+      "function manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }\nfunction manifestFolderName(item = {}) { return String(item.folderName || item.folder || '').trim(); }\nfunction manifestFolderNameLower(item = {}) { return manifestFolderName(item).toLowerCase(); }\nfunction manifestOwnNameLower(item = {}) { return String(item.name || '').trim().toLowerCase(); }"
     );
   }
   if (!next.includes('function manifestDeleteOwnerIdentity()')) {
@@ -188,4 +243,4 @@ for (const file of runtimeFiles) {
   if (src !== before) write(file, src);
 }
 
-console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed and deleteItem handler force-replaced.');
+console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed and deleteItem handler supports file disposition.');
