@@ -839,7 +839,8 @@ const visibleFiles = useMemo(() => {
       });
 
       setWallet(result);
-      await refresh();
+await api.invoke("p2p:start");
+await refresh();
 
       if (result.seed) {
         await showInfo("Recovery seed — save it now", result.seed);
@@ -881,8 +882,15 @@ const visibleFiles = useMemo(() => {
 
       if (!pw) return;
 
-      setWallet(await api.invoke<WalletState>("seed:recover", { username, seed, password: pw }));
-      await refresh();
+      const result = await api.invoke<WalletState>("seed:recover", {
+  username,
+  seed,
+  password: pw,
+});
+
+setWallet(result);
+await api.invoke("p2p:start");
+await refresh();
     });
 
   const disconnectWallet = () =>
