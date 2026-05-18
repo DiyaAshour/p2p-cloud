@@ -8,6 +8,15 @@ if (!fs.existsSync(p)) {
   let s = fs.readFileSync(p, 'utf8');
   const before = s;
 
+  if (!s.includes('activeFolderName?: string;')) {
+    s = s.replace('  enabled?: boolean;\n  onRefresh?: () => Promise<void> | void;', '  enabled?: boolean;\n  activeFolderName?: string;\n  onRefresh?: () => Promise<void> | void;');
+  }
+
+  s = s.replace(
+    'export default function ManifestFolderPanel({ api, busy = false, enabled = true, onRefresh, onSelectFolder }: Props) {',
+    'export default function ManifestFolderPanel({ api, busy = false, enabled = true, activeFolderName = "", onRefresh, onSelectFolder }: Props) {'
+  );
+
   s = s.replace(
     'function idOf(folder?: DriveFolder | null) {\n  return String(folder?.folderId || folder?.id || folder?.hash || "");\n}',
     'function idOf(folder?: DriveFolder | null) {\n  return String(folder?.folderId || "");\n}\n\nfunction itemIdOf(folder?: DriveFolder | null) {\n  return String(folder?.id || folder?.folderId || folder?.hash || folder?.rootHash || "");\n}'
@@ -20,6 +29,13 @@ if (!fs.existsSync(p)) {
     } else {
       console.warn('[manifest-folder-panel-contract] warning: itemIdOf is used but idOf block was not found');
     }
+  }
+
+  if (!s.includes('const externalActiveFolderName = String(activeFolderName || "");')) {
+    s = s.replace(
+      '  const activeFolder = activeFolderId ? byId.get(activeFolderId) || null : null;\n',
+      '  const activeFolder = activeFolderId ? byId.get(activeFolderId) || null : null;\n  const externalActiveFolderName = String(activeFolderName || "");\n\n  useEffect(() => {\n    if (!externalActiveFolderName || ["All Files", "All files", "Uncategorized"].includes(externalActiveFolderName)) {\n      if (activeFolderId) setActiveFolderId(ROOT_ID);\n      return;\n    }\n    const externalFolder = folders.find((folder) => folder.name === externalActiveFolderName);\n    const externalFolderId = idOf(externalFolder);\n    if (externalFolderId && externalFolderId !== activeFolderId) setActiveFolderId(externalFolderId);\n  }, [externalActiveFolderName, folders, activeFolderId]);\n'
+    );
   }
 
   s = s.replace(
@@ -43,9 +59,23 @@ if (!fs.existsSync(p)) {
 
   if (s !== before) {
     fs.writeFileSync(p, s, 'utf8');
-    console.log('[manifest-folder-panel-contract] enforced folderId/itemId contract');
+    console.log('[manifest-folder-panel-contract] enforced folderId/itemId/active-folder contract');
   } else {
-    console.log('[manifest-folder-panel-contract] folderId/itemId contract already valid');
+    console.log('[manifest-folder-panel-contract] folder panel contract already valid');
+  }
+}
+
+const shellPath = path.join(process.cwd(), 'scripts', 'patch-live-folder-panel-shell.cjs');
+if (fs.existsSync(shellPath)) {
+  let shell = fs.readFileSync(shellPath, 'utf8');
+  const beforeShell = shell;
+  shell = shell.replace(
+    '<ManifestFolderPanel api={api} busy={busy} enabled={view === "personal"} onRefresh={refresh} onSelectFolder={(folder) => setActiveFolder(folder?.name || ALL_FILES)} />',
+    '<ManifestFolderPanel api={api} busy={busy} enabled={view === "personal"} activeFolderName={activeFolder} onRefresh={refresh} onSelectFolder={(folder) => setActiveFolder(folder?.name || ALL_FILES)} />'
+  );
+  if (shell !== beforeShell) {
+    fs.writeFileSync(shellPath, shell, 'utf8');
+    console.log('[manifest-folder-panel-contract] shell now passes activeFolderName');
   }
 }
 
