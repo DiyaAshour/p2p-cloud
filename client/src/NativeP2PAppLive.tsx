@@ -1076,11 +1076,32 @@ Type DELETE → delete files too`,
       throw new Error("Target folder not found");
     }
 
-    await api.invoke("p2p:deleteItem", {
-      itemId: folder.folderId,
-      fileDisposition: isDelete ? "delete" : "move",
-      targetFolderId: targetFolder?.folderId || "",
-    });
+    const folderAny = folder as any;
+
+const deleteFolderId = String(
+  folderAny.folderId ||
+  folderAny.id ||
+  folderAny.hash ||
+  folderAny.rootHash ||
+  folderAny.path ||
+  folder.name ||
+  folderPath(folder) ||
+  ""
+).trim();
+
+if (!deleteFolderId) {
+  throw new Error(`Cannot delete folder: missing folder identity. folder=${JSON.stringify(folder)}`);
+}
+
+await api.invoke("p2p:deleteItem", {
+  itemId: deleteFolderId,
+  folderId: deleteFolderId,
+  id: deleteFolderId,
+  name: folder.name,
+  folderPath: folderPath(folder),
+  fileDisposition: isDelete ? "delete" : "move",
+  targetFolderId: targetFolder?.folderId || "",
+});
 
     await refresh();
 
