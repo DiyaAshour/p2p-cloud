@@ -10,6 +10,7 @@ import { startP2PTransport } from './p2p-transport.js';
 import { isManifestSyncEnabled, pullWalletManifests, pushWalletManifest, deleteWalletManifest } from './manifest-sync.js';
 import { replicateChunk, repairManifests, countUnderReplicatedChunks } from './replication-engine.js';
 import { putChunkToSafetyPeer, getChunkFromSafetyPeer, safetyPeerUrl } from './safety-peer.js';
+import './seed-auth-cooldown-ipc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,7 +69,7 @@ function isVerifiedSeedIdentity() {
 function assertVerifiedWallet() {
   if (isVerifiedSeedIdentity()) return;
 
-  if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) {
+  if (!walletState.connected || !walletState.verified || !activeWallet()) {
     throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
   }
 }
@@ -177,12 +178,22 @@ async function verifyWalletLoginPayload(payload = {}, address = '') {
   return { message, signature, signedAt: signedAt.toISOString() };
 }
 
+function isValidStorageIdentity(identity = '') {
+  const value = normalizeWallet(identity);
+  return isValidWallet(value) || value.startsWith('seed:');
+}
+
 function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
-  const wallet = normalizeWallet(ownerWallet);
-  if (!isValidWallet(wallet)) throw new Error('Valid wallet address required for private file encryption.');
+  const identity = normalizeWallet(ownerWallet);
+
+  if (!isValidStorageIdentity(identity)) {
+    throw new Error('Valid wallet or seed identity required for private file encryption.');
+  }
+
   const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');
-  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
+
+  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function encryptPrivateBuffer(plainBuffer, ownerWallet = activeWallet(), drivePassword) {
@@ -238,22 +249,54 @@ function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); cons
 function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
 
 async function syncPull() {
-  if (!isManifestSyncEnabled() || !walletState.connected || !walletState.address) return { ok: false, skipped: true };
+  const identity = activeWallet();
+
+  if (!isManifestSyncEnabled() || !walletState.connected || !identity) {
+    return { ok: false, skipped: true };
+  }
+
   try {
-    const remote = await pullWalletManifests(activeWallet());
+    const remote = await pullWalletManifests(identity);
+
     if (!Array.isArray(remote)) return { ok: false, skipped: true };
-    const map = new Map(manifests.filter(isUsableManifest).map((m) => [`${normalizeWallet(m.ownerWallet)}:${m.hash}`, m]));
+
+    const map = new Map(
+      manifests
+        .filter(isUsableManifest)
+        .map((m) => [`${normalizeWallet(m.ownerWallet)}:${m.hash}`, m])
+    );
+
     for (const m of remote.filter(isUsableManifest)) {
       const key = `${normalizeWallet(m.ownerWallet)}:${m.hash}`;
       const local = map.get(key);
-      map.set(key, { ...(local || {}), ...m, ownerWallet: normalizeWallet(m.ownerWallet), encryption: m.encryption || local?.encryption || null });
+
+      map.set(key, {
+        ...(local || {}),
+        ...m,
+        ownerWallet: normalizeWallet(m.ownerWallet),
+        encryption: m.encryption || local?.encryption || null,
+      });
     }
+
     manifests = Array.from(map.values()).filter(isUsableManifest);
     persistManifests();
-    lastSyncStatus = { ...lastSyncStatus, ok: true, lastPulledAt: new Date().toISOString(), error: null, remoteFiles: remote.length };
+
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: true,
+      lastPulledAt: new Date().toISOString(),
+      error: null,
+      remoteFiles: remote.length,
+    };
+
     return { ok: true, remoteFiles: remote.length };
   } catch (e) {
-    lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) };
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: false,
+      error: e?.message || String(e),
+    };
+
     console.warn('[manifest-sync] pull failed:', e?.message || e);
     throw new Error(`Manifest sync pull failed: ${e?.message || e}`);
   }
@@ -283,32 +326,81 @@ function ensureTransport(options = {}) {
 
 async function runAutoRepair(reason = 'interval') {
   if (autoRepairRunning) {
-    lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, skippedReason: 'already-running' };
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: true,
+      skippedReason: 'already-running',
+    };
     return lastAutoRepairStatus;
   }
 
-  if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) {
-    lastAutoRepairStatus = { ...lastAutoRepairStatus, active: Boolean(autoRepairTimer), skippedReason: 'wallet-not-verified', error: null };
+  if (!walletState.connected || !walletState.verified || !activeWallet()) {
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: Boolean(autoRepairTimer),
+      skippedReason: 'identity-not-verified',
+      error: null,
+    };
     return lastAutoRepairStatus;
   }
 
   const node = ensureTransport({});
   const own = walletManifests();
   const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);
+
   if (underReplicatedChunks <= 0) {
-    lastAutoRepairStatus = { ok: true, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks: 0, underReplicatedChunks: 0, skippedReason: 'healthy', error: null };
+    lastAutoRepairStatus = {
+      ok: true,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks: 0,
+      underReplicatedChunks: 0,
+      skippedReason: 'healthy',
+      error: null,
+    };
     return lastAutoRepairStatus;
   }
 
   autoRepairRunning = true;
+
   try {
     console.log(`[auto-repair] ${reason}: repairing ${underReplicatedChunks} under-replicated chunk(s)`);
-    const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush });
+
+    const result = await repairManifests({
+      node,
+      manifests: own,
+      configuredTargetReplicas: TARGET_REPLICAS,
+      persistManifests,
+      syncPush,
+    });
+
     const repairedChunks = (result.report || []).filter((entry) => entry.repaired).length;
-    lastAutoRepairStatus = { ok: true, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks, underReplicatedChunks, skippedReason: null, error: null };
+
+    lastAutoRepairStatus = {
+      ok: true,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks,
+      underReplicatedChunks,
+      skippedReason: null,
+      error: null,
+    };
+
     return lastAutoRepairStatus;
   } catch (error) {
-    lastAutoRepairStatus = { ok: false, active: Boolean(autoRepairTimer), intervalMs: AUTO_REPAIR_INTERVAL_MS, lastRunAt: new Date().toISOString(), repairedChunks: 0, underReplicatedChunks, skippedReason: null, error: error?.message || String(error) };
+    lastAutoRepairStatus = {
+      ok: false,
+      active: Boolean(autoRepairTimer),
+      intervalMs: AUTO_REPAIR_INTERVAL_MS,
+      lastRunAt: new Date().toISOString(),
+      repairedChunks: 0,
+      underReplicatedChunks,
+      skippedReason: null,
+      error: error?.message || String(error),
+    };
+
     console.warn('[auto-repair] failed:', error?.message || error);
     return lastAutoRepairStatus;
   } finally {
@@ -344,11 +436,29 @@ function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preloa
 function resolveRendererIndexPath() { const candidates = [path.join(app.getAppPath(), 'dist', 'public', 'index.html'), path.join(app.getAppPath(), 'public', 'index.html'), path.join(__dirname, '..', 'dist', 'public', 'index.html'), path.join(process.resourcesPath || '', 'app', 'dist', 'public', 'index.html')]; for (const c of candidates) if (c && fs.existsSync(c)) return c; throw new Error(`Renderer index.html not found. Tried: ${candidates.join(' | ')}`); }
 function createMainWindow() { mainWindow = new BrowserWindow({ title: APP_TITLE, width: 1280, height: 820, minWidth: 980, minHeight: 680, backgroundColor: '#09090b', show: false, webPreferences: { preload: resolvePreloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: false } }); mainWindow.once('ready-to-show', () => mainWindow?.show()); mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); if (IS_DEV) mainWindow.loadURL(DEV_SERVER_URL); else mainWindow.loadFile(resolveRendererIndexPath()); mainWindow.on('closed', () => { mainWindow = null; }); }
 
-ipcMain.handle('electron:openDevTools', async () => { mainWindow?.webContents.openDevTools({ mode: 'detach' }); return { ok: true }; });
-ipcMain.handle('electron:diagnostics', async () => ({ ok: true, cwd: process.cwd(), dirname: __dirname, preloadPath: resolvePreloadPath(), rendererPath: IS_DEV ? DEV_SERVER_URL : resolveRendererIndexPath(), isPackaged: app.isPackaged, appPath: app.getAppPath() }));
-ipcMain.handle('system:open-external', async (_event, payload = {}) => { const url = String(payload.url || ''); if (!/^https?:\/\//i.test(url)) throw new Error('Invalid external URL'); await shell.openExternal(url); return { ok: true }; });
-ipcMain.handle('wallet:status', async () => walletSummary());
+ipcMain.handle('wallet:status', async () => {
+  loadWallet();
+  loadManifests();
+
+  if (walletState.connected && walletState.verified) {
+    try {
+      await syncPull();
+    } catch (error) {
+      lastSyncStatus = {
+        ...lastSyncStatus,
+        ok: false,
+        error: error?.message || String(error),
+      };
+    }
+  }
+
+  return walletSummary();
+});
+
 ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+
   const address = normalizeWallet(payload.address);
 
   if (!isValidWallet(address)) {
@@ -377,20 +487,68 @@ ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
   };
 
   persistWallet();
-  await syncPull();
+
+  try {
+    await syncPull();
+  } catch (error) {
+    lastSyncStatus = {
+      ...lastSyncStatus,
+      ok: false,
+      error: error?.message || String(error),
+    };
+  }
+
   startAutoRepairLoop();
 
   return walletSummary();
 });
+
+ipcMain.handle('wallet:disconnect', async () => {
+  stopAutoRepairLoop();
+
+  walletState = {
+    ...walletState,
+    connected: false,
+    verified: false,
+    authMode: null,
+    address: '',
+    accountId: '',
+    username: null,
+    seedFingerprint: null,
+    planId: 'free',
+    connectedAt: null,
+    verifiedAt: null,
+    paidUntil: null,
+    subscriptionTx: null,
+    loginMessage: null,
+    loginSignature: undefined,
+    encryptionSecret: undefined,
+    encryptionKeySource: ENCRYPTION_KEY_SOURCE,
+  };
+
   persistWallet();
-  await syncPull();
-  startAutoRepairLoop();
   return walletSummary();
 });
-ipcMain.handle('wallet:disconnect', async () => { stopAutoRepairLoop(); walletState = { ...walletState, connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, loginMessage: null, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE }; persistWallet(); return walletSummary(); });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
 ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
-ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => { if (!walletState.connected || !walletState.verified) return []; await syncPull(); const query = String(payload.query || '').trim().toLowerCase(); const own = walletManifests(); if (!query) return own; return own.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || ''].some((v) => String(v || '').toLowerCase().includes(query))); });
+ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+
+  if (!walletState.connected || !walletState.verified) return [];
+
+  await syncPull();
+
+  const query = String(payload.query || '').trim().toLowerCase();
+  const own = walletManifests();
+
+  if (!query) return own;
+
+  return own.filter((f) =>
+    [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || '', f.folder || '']
+      .some((v) => String(v || '').toLowerCase().includes(query))
+  );
+});
 
 ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   const node = ensureTransport({});
@@ -487,7 +645,17 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   return { ok: true, file: manifest, bytes: Array.from(outputBuffer), progress: transferProgress.download };
 });
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
-ipcMain.handle('p2p:networkSummary', async () => { if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
+ipcMain.handle('p2p:networkSummary', async () => {
+  loadWallet();
+  loadManifests();
+
+  if (walletState.connected && walletState.verified) {
+    await syncPull();
+    startAutoRepairLoop();
+  }
+
+  return networkSummary();
+});
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
