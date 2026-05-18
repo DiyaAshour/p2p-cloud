@@ -46,6 +46,7 @@ type Channel =
   | "p2p:uploadFiles"
   | "p2p:downloadToPath"
   | "p2p:delete"
+  | "p2p:deleteFolder"
   | "p2p:networkSummary"
   | "p2p:prepareProof"
   | "wallet:status"
