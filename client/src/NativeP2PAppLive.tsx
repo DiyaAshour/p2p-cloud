@@ -303,7 +303,7 @@ export default function NativeP2PAppLive() {
   );
 
   // Bulk select state
-  const [selectedItemIds, setSelectedHashes] = useState<Set<string>>(new Set());
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
 
   const walletConnected = Boolean(wallet?.connected && (wallet.accountId || wallet.address));
@@ -476,17 +476,19 @@ export default function NativeP2PAppLive() {
     const folder = getPersonalFileFolderObject(file);
     return folder ? folderPath(folder) : UNCATEGORIZED;
   }
+const visibleFiles = useMemo(() => {
+  const q = search.trim().toLowerCase();
 
-  const visibleFiles = useMemo(() => {
-    const q = search.trim().toLowerCase();
+  return baseFiles.filter((file) => {
+    const fileName = String(file.name || "").replace(/\\/g, "/");
+    if ((fileName.split("/").pop() || fileName) === ".p2p-folder") return false;
 
-    return baseFiles.filter((file) => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-      const cf = match?.companyFile;
-      const displayName = cf?.name || file.name;
+    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+    const cf = match?.companyFile;
+    const displayName = cf?.name || file.name;
 
-      const personalFolderId = match ? "" : getPersonalFileFolderId(file);
-      const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
+    const personalFolderId = match ? "" : getPersonalFileFolderId(file);
+    const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
 
       const folderOk = match
         ? activeFolder === ALL_FILES ||
@@ -650,7 +652,7 @@ export default function NativeP2PAppLive() {
       setManifestFolders([]);
       setActiveFolder(ALL_FILES);
       setActiveFolderId("");
-      setSelectedHashes(new Set());
+      setSelectedItemIds(new Set());
       await refresh();
     });
 
@@ -960,103 +962,103 @@ export default function NativeP2PAppLive() {
   };
 
   const bulkMove = () =>
-    run(async () => {
-      if (selectedHashes.size === 0) return;
+  run(async () => {
+    if (selectedItemIds.size === 0) return;
 
-      const filesToMove = visibleFiles.filter(
-        (file) =>
-          selectedHashes.has(file.hash) &&
-          !companyFileByKey.has(keyFor(file)) &&
-          !companyFileByKey.has(file.hash)
-      );
-
-      for (const file of filesToMove) {
-        await movePersonalFileTo(file, bulkTargetFolderId);
-      }
-
-      setSelectedHashes(new Set());
-      setBulkTargetFolderId("");
-      await refresh();
-      toast.success(`Moved ${filesToMove.length} file(s)`);
-    });
-
-  const toggleSelect = (hash: string) => {
-    setSelectedHashes((prev) => {
-      const next = new Set(prev);
-
-      if (next.has(hash)) next.delete(hash);
-      else next.add(hash);
-
-      return next;
-    });
-  };
-
-  const selectAll = () => {
-    const personalVisible = visibleFiles.filter(
-      (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
+    const filesToMove = visibleFiles.filter(
+      (file) =>
+        selectedItemIds.has(itemIdFor(file)) &&
+        !companyFileByKey.has(keyFor(file)) &&
+        !companyFileByKey.has(file.hash)
     );
 
-    setSelectedHashes(new Set(personalVisible.map((file) => file.hash)));
-  };
+    for (const file of filesToMove) {
+      await movePersonalFileTo(file, bulkTargetFolderId);
+    }
 
-  const clearSelection = () => {
-    setSelectedHashes(new Set());
-  };
+    setSelectedItemIds(new Set());
+    setBulkTargetFolderId("");
+    await refresh();
+    toast.success(`Moved ${filesToMove.length} file(s)`);
+  });
 
-  const renderFolderNode = (folder: DriveFolder, depth = 0): JSX.Element => {
-    const selected = activeFolderId === folder.folderId;
-    const children = folderChildren.get(folder.folderId) || [];
+const toggleSelect = (itemId: string) => {
+  setSelectedItemIds((prev) => {
+    const next = new Set(prev);
 
-    return (
-      <div key={folder.folderId} className="space-y-1">
-        <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
-          <button
-            onClick={() => {
-              setActiveFolder(folderPath(folder));
-              setActiveFolderId(folder.folderId);
-            }}
-            className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-              selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
-            }`}
-          >
-            <FolderOpen className="mr-1.5 inline size-3" />
-            {folder.name}
-            <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
-              manifest
-            </Badge>
-          </button>
+    if (next.has(itemId)) next.delete(itemId);
+    else next.add(itemId);
 
-          <button
-            onClick={() => renameFolder(folder)}
-            className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
-            title="Rename"
-          >
-            <Pencil className="size-3" />
-          </button>
+    return next;
+  });
+};
 
-          <button
-            onClick={() => moveFolder(folder)}
-            className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
-            title="Move"
-          >
-            <MoveRight className="size-3" />
-          </button>
+const selectAll = () => {
+  const personalVisible = visibleFiles.filter(
+    (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
+  );
 
-          <button
-            onClick={() => deleteFolder(folder)}
-            className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
-            title="Delete"
-          >
-            <Trash2 className="size-3" />
-          </button>
-        </div>
+  setSelectedItemIds(new Set(personalVisible.map((file) => itemIdFor(file))));
+};
 
-        {children.map((child) => renderFolderNode(child, depth + 1))}
+const clearSelection = () => {
+  setSelectedItemIds(new Set());
+};
+
+const renderFolderNode = (folder: DriveFolder, depth = 0) => {
+  const selected = activeFolderId === folder.folderId;
+  const children = folderChildren.get(folder.folderId) || [];
+
+  return (
+    <div key={folder.folderId} className="space-y-1">
+      <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
+        <button
+          onClick={() => {
+            setActiveFolder(folderPath(folder));
+            setActiveFolderId(folder.folderId);
+          }}
+          className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
+            selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
+          }`}
+        >
+          <FolderOpen className="mr-1.5 inline size-3" />
+          {folder.name}
+          <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
+            manifest
+          </Badge>
+        </button>
+
+        <button
+          onClick={() => renameFolder(folder)}
+          className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
+          title="Rename"
+        >
+          <Pencil className="size-3" />
+        </button>
+
+        <button
+          onClick={() => moveFolder(folder)}
+          className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
+          title="Move"
+        >
+          <MoveRight className="size-3" />
+        </button>
+
+        <button
+          onClick={() => deleteFolder(folder)}
+          className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
+          title="Delete"
+        >
+          <Trash2 className="size-3" />
+        </button>
       </div>
-    );
-  };
 
-  const renderFileCard = (file: P2PFile) => {
+      {children.map((child) => renderFolderNode(child, depth + 1))}
+    </div>
+  );
+};
+
+  const renderFileCard = (file: P2PFile) => {   
     const p = protection(file);
     const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
     const cf = match?.companyFile;
@@ -1067,7 +1069,7 @@ export default function NativeP2PAppLive() {
       cf && (cf.uploadedByDeviceId === deviceId || role === "owner" || role === "admin")
     );
     const isPersonal = !match;
-    const isSelected = selectedHashes.has(file.hash);
+    const isSelected = selectedItemIds.has(itemIdFor(file));
     const currentPersonalFolderId = isPersonal ? getPersonalFileFolderId(file) : "";
 
     return (
@@ -1083,7 +1085,7 @@ export default function NativeP2PAppLive() {
               <input
                 type="checkbox"
                 checked={isSelected}
-                onChange={() => toggleSelect(file.hash)}
+                onChange={() => toggleSelect(itemIdFor(file))}
                 className="h-4 w-4 cursor-pointer accent-blue-500"
                 aria-label="Select file"
               />
