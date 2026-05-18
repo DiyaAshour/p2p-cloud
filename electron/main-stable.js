@@ -67,7 +67,23 @@ function hasEncryptionMetadata(manifest = {}) {
 function isUsableManifest(manifest = {}) { return !(manifest.isEncrypted === true && !hasEncryptionMetadata(manifest)); }
 function validateDrivePassword(drivePassword) { const password = String(drivePassword || '').trim(); if (password.length < MIN_DRIVE_PASSWORD_LENGTH) throw new Error(`Drive Password required. Use at least ${MIN_DRIVE_PASSWORD_LENGTH} characters.`); return password; }
 function drivePasswordFromPayload(payload = {}) { return validateDrivePassword(payload.drivePassword); }
-function assertVerifiedWallet() { if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) throw new Error('Verified wallet required. Connect wallet first.'); }
+function isVerifiedSeedIdentity() {
+  const accountId = String(walletState.accountId || walletState.address || '');
+  return Boolean(
+    walletState.connected &&
+    walletState.verified &&
+    walletState.authMode === 'seed' &&
+    accountId.startsWith('seed:')
+  );
+}
+
+function assertVerifiedWallet() {
+  if (isVerifiedSeedIdentity()) return;
+
+  if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) {
+    throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
+  }
+}
 function chunkPath(chunkHash) { const safe = String(chunkHash || '').replace(/[^a-fA-F0-9]/g, ''); return path.join(chunkStoreDir(), `${safe}.json`); }
 
 function ensureDataDir() {
