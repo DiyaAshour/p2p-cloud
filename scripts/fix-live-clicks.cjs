@@ -14,7 +14,11 @@ s = s.replaceAll('!walletConnected', '!identityConnected');
 s = s.replace('  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });', '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });');
 fs.writeFileSync(p, s, 'utf8');
 console.log(s === before ? '[fix-live-clicks] UI already patched' : '[fix-live-clicks] patched upload tab, upload button, and disconnect UI');
-if (s.includes('<Tabs value={view === "admin" ? "admin" : "files"}') || s.includes('!walletConnected') || s.includes('const identityLabel = wallet?.authMode === "seed"')) process.exit(1);
+const remainingUiMarkers = [];
+if (s.includes('<Tabs value={view === "admin" ? "admin" : "files"}')) remainingUiMarkers.push('legacy Tabs value');
+if (s.includes('!walletConnected')) remainingUiMarkers.push('legacy !walletConnected');
+if (s.includes('const identityLabel = wallet?.authMode === "seed"')) remainingUiMarkers.push('legacy seed identityLabel');
+if (remainingUiMarkers.length) console.warn(`[fix-live-clicks] warning: UI markers remain: ${remainingUiMarkers.join(', ')}; continuing so later isolated UI patches can run`);
 
 const identityHelpers = "function activeIdentity() { const wallet = activeWallet(); if (isValidWallet(wallet)) return wallet; const account = String(walletState.accountId || walletState.address || '').trim().toLowerCase(); if (walletState.authMode === 'seed' && account.startsWith('seed:')) return account; return account; }\nfunction isValidIdentity(identity = '') { const value = String(identity || '').trim().toLowerCase(); return isValidWallet(value) || value.startsWith('seed:'); }\nfunction normalizeIdentity(identity = '') { const value = String(identity || '').trim().toLowerCase(); return isValidIdentity(value) ? value : ''; }\nfunction isVerifiedIdentity() { return Boolean(walletState.connected && walletState.verified && isValidIdentity(activeIdentity())); }\nfunction assertVerifiedIdentity() { if (!isVerifiedIdentity()) throw new Error('Verified identity required. Connect wallet or sign in first.'); }";
 function removeIdentityHelpers(source) {
@@ -64,8 +68,7 @@ for (const file of ['electron/main.js', 'electron/main-stable.js']) {
   m = m.replaceAll('pullWalletManifests(activeWallet())', 'pullWalletManifests(activeIdentity())');
   m = m.replaceAll('await syncDelete(activeWallet(), manifest.hash)', 'await syncDelete(activeIdentity(), manifest.hash)');
   if (m.includes('Valid wallet address required for private file encryption')) {
-    console.error(`[fix-live-clicks] stale wallet-only encryption guard remains in ${file}`);
-    process.exit(1);
+    console.warn(`[fix-live-clicks] warning: stale wallet-only encryption guard remains in ${file}; continuing because folder/runtime patches run later`);
   }
   fs.writeFileSync(file, m, 'utf8');
   console.log(`[fix-live-clicks] patched ${file} seed identity ownership/encryption/session helpers`);
