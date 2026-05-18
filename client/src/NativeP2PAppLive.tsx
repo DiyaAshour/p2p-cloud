@@ -192,7 +192,8 @@ const ALL_FILES = "All files";
 const UNCATEGORIZED = "Uncategorized";
 const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";
 const WALLETCONNECT_PROJECT_ID =
-  (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID || "";
+  (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID ||
+  "821b9d64c996dc59c7d18583fc7081f0";
 
 const WALLETCONNECT_CHAIN_ID = "eip155:1"; // Ethereum Mainnet
 
