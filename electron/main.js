@@ -794,8 +794,28 @@ ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
   assertVerifiedWallet();
   await syncPull();
 
-  const item = findAnyItem(payload);
-  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+  let item = findAnyItem(payload);
+
+if (!item) {
+  const fallbackFolderId = String(payload.itemId || payload.folderId || '').trim();
+
+  if (fallbackFolderId) {
+    item = {
+      kind: 'folder',
+      type: 'folder',
+      isFolder: true,
+      folderId: fallbackFolderId,
+      id: fallbackFolderId,
+      hash: `folder:${fallbackFolderId}`,
+      ownerWallet: activeWallet(),
+      name: String(payload.name || ''),
+    };
+  }
+}
+
+if (!item) {
+  throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+}
 
   const targetFolderId = String(payload.targetFolderId || payload.folderId || '');
   const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
