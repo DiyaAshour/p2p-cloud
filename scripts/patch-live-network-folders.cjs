@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const livePath = path.join(process.cwd(), 'client', 'src', 'NativeP2PAppLive.tsx');
 
@@ -19,6 +20,11 @@ const looksTruncated =
 if (looksTruncated) {
   console.warn('[live-network-folders] NativeP2PAppLive.tsx is incomplete. Run: git restore client/src/NativeP2PAppLive.tsx && git pull');
   process.exit(0);
+}
+
+const bulkMovePatch = path.join(process.cwd(), 'scripts', 'patch-live-bulk-file-move.cjs');
+if (fs.existsSync(bulkMovePatch)) {
+  execFileSync(process.execPath, [bulkMovePatch], { stdio: 'inherit' });
 }
 
 // Retired unsafe patch.
