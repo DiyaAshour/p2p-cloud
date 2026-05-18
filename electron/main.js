@@ -679,95 +679,164 @@ function canTouchManifest(manifest = {}) {
   return !owner || owner === activeWallet();
 }
 
-function findAnyItem(payload = {}) {
-  const ids = [
+function ownedManifestCandidates() {
+  return manifests
+    .filter(isUsableManifest)
+    .filter(canTouchManifest);
+}
+
+function manifestValues(manifest = {}) {
+  const hash = String(manifest.hash || '').trim();
+  const rootHash = String(manifest.rootHash || '').trim();
+
+  return unique([
+    manifest.id,
+    manifest.fileId,
+    manifest.folderId,
+    manifest.itemId,
+    hash,
+    rootHash,
+    hash.replace(/^folder:/, ''),
+    rootHash.replace(/^folder:/, ''),
+    manifest.name,
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function payloadIds(payload = {}) {
+  return unique([
     payload.itemId,
     payload.folderId,
     payload.fileId,
     payload.id,
     payload.rootHash,
     payload.hash,
-  ]
-    .map((v) => String(v || '').trim())
-    .filter(Boolean);
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function folderFromPayload(payload = {}) {
+  const folderId = String(payload.folderId || payload.itemId || payload.id || '').trim();
+
+  if (!folderId) return null;
+
+  return {
+    kind: 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId,
+    id: folderId,
+    hash: `folder:${folderId}`,
+    rootHash: `folder:${folderId}`,
+    ownerWallet: activeWallet(),
+    name: String(payload.name || ''),
+    parentFolderId: String(payload.parentFolderId || ''),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function findAnyItem(payload = {}) {
+  const ids = payloadIds(payload);
 
   if (!ids.length) return null;
 
-  return manifests
-    .filter(isUsableManifest)
-    .filter(canTouchManifest)
-    .find((manifest) => {
-      const values = [
-        manifest.id,
-        manifest.fileId,
-        manifest.folderId,
-        manifest.hash,
-        manifest.rootHash,
-        manifest.name,
-      ]
-        .map((v) => String(v || '').trim())
-        .filter(Boolean);
-
-      return ids.some((id) => values.includes(id));
-    }) || null;
+  return ownedManifestCandidates().find((manifest) => {
+    const values = manifestValues(manifest);
+    return ids.some((id) => values.includes(id));
+  }) || null;
 }
 
 function findFolderByAny(value = '') {
   const id = String(value || '').trim();
+
   if (!id) return null;
 
-  return manifests
-    .filter(isUsableManifest)
-    .filter(canTouchManifest)
-    .find((manifest) => {
-      if (!isFolderManifest(manifest)) return false;
-
-      return [
-        manifest.folderId,
-        manifest.id,
-        manifest.hash,
-        manifest.rootHash,
-        manifest.name,
-      ]
-        .map((v) => String(v || '').trim())
-        .includes(id);
-    }) || null;
+  return ownedManifestCandidates().find((manifest) => {
+    if (!isFolderManifest(manifest)) return false;
+    return manifestValues(manifest).includes(id);
+  }) || null;
 }
 
 function folderDisplayName(folder) {
   return folder?.name || '';
 }
 
-function assertFolderMoveSafe(folderId, targetFolderId) {
-  if (!folderId || !targetFolderId) return;
-  if (folderId === targetFolderId) throw new Error('Cannot move folder into itself');
+function ensureManifestTracked(item) {
+  if (!item) return null;
 
-  const folders = manifests
-  .filter(isUsableManifest)
-  .filter(canTouchManifest)
-  .filter(isFolderManifest);
-  
-  let cursor = targetFolderId;
+  const existing = findAnyItem({
+    itemId: item.folderId || item.id || item.hash || item.rootHash,
+    hash: item.hash,
+    rootHash: item.rootHash,
+  });
+
+  if (existing) return existing;
+
+  if (!item.ownerWallet) item.ownerWallet = activeWallet();
+
+  if (isFolderManifest(item)) {
+    const folderId = String(item.folderId || item.id || item.hash || crypto.randomUUID())
+      .replace(/^folder:/, '')
+      .trim();
+
+    item.folderId = folderId;
+    item.id = item.id || folderId;
+    item.hash = item.hash || `folder:${folderId}`;
+    item.rootHash = item.rootHash || item.hash;
+    item.kind = item.kind || 'folder';
+    item.type = item.type || 'folder';
+    item.isFolder = true;
+    item.updatedAt = new Date().toISOString();
+  }
+
+  manifests.push(item);
+  return item;
+}
+
+function assertFolderMoveSafe(folderId, targetFolderId) {
+  const source = String(folderId || '').replace(/^folder:/, '').trim();
+  const target = String(targetFolderId || '').replace(/^folder:/, '').trim();
+
+  if (!source || !target) return;
+
+  if (source === target) {
+    throw new Error('Cannot move folder into itself');
+  }
+
+  const folders = ownedManifestCandidates().filter(isFolderManifest);
+  let cursor = target;
   const seen = new Set();
 
   while (cursor) {
-    if (cursor === folderId) throw new Error('Cannot move folder inside its child');
-    if (seen.has(cursor)) throw new Error('Folder tree cycle detected');
+    if (cursor === source) {
+      throw new Error('Cannot move folder inside its child');
+    }
+
+    if (seen.has(cursor)) {
+      throw new Error('Folder tree cycle detected');
+    }
 
     seen.add(cursor);
-    const parent = folders.find((folder) => String(folder.folderId || '') === cursor);
-    cursor = String(parent?.parentFolderId || '');
+
+    const parent = folders.find((folder) => {
+      const id = String(folder.folderId || manifestItemId(folder) || '')
+        .replace(/^folder:/, '')
+        .trim();
+
+      return id === cursor;
+    });
+
+    cursor = String(parent?.parentFolderId || '')
+      .replace(/^folder:/, '')
+      .trim();
   }
 }
 
 function descendantFolderIds(rootFolderId) {
-  const root = String(rootFolderId || '').trim();
-  const removed = new Set([root]);
+  const root = String(rootFolderId || '').replace(/^folder:/, '').trim();
+  const removed = new Set();
 
-  const folders = manifests
-    .filter(isUsableManifest)
-    .filter(canTouchManifest)
-    .filter(isFolderManifest);
+  if (root) removed.add(root);
+
+  const folders = ownedManifestCandidates().filter(isFolderManifest);
 
   let changed = true;
 
@@ -775,8 +844,13 @@ function descendantFolderIds(rootFolderId) {
     changed = false;
 
     for (const folder of folders) {
-      const id = String(folder.folderId || '').trim();
-      const parent = String(folder.parentFolderId || '').trim();
+      const id = String(folder.folderId || manifestItemId(folder) || '')
+        .replace(/^folder:/, '')
+        .trim();
+
+      const parent = String(folder.parentFolderId || '')
+        .replace(/^folder:/, '')
+        .trim();
 
       if (id && parent && removed.has(parent) && !removed.has(id)) {
         removed.add(id);
@@ -796,34 +870,29 @@ ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
 
   let item = findAnyItem(payload);
 
-if (!item) {
-  const fallbackFolderId = String(payload.itemId || payload.folderId || '').trim();
-
-  if (fallbackFolderId) {
-    item = {
-      kind: 'folder',
-      type: 'folder',
-      isFolder: true,
-      folderId: fallbackFolderId,
-      id: fallbackFolderId,
-      hash: `folder:${fallbackFolderId}`,
-      ownerWallet: activeWallet(),
-      name: String(payload.name || ''),
-    };
+  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
+    item = folderFromPayload(payload);
   }
-}
 
-if (!item) {
-  throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
-}
+  if (!item) {
+    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  }
 
-  const targetFolderId = String(payload.targetFolderId || payload.folderId || '');
+  const targetFolderId = String(payload.targetFolderId || '').trim();
   const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
 
-  if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+  if (targetFolderId && !targetFolder) {
+    throw new Error(`Target folder not found: ${targetFolderId}`);
+  }
 
   if (isFolderManifest(item)) {
-    assertFolderMoveSafe(String(item.folderId || ''), targetFolderId);
+    item = ensureManifestTracked(item);
+
+    const sourceFolderId = String(item.folderId || manifestItemId(item) || '')
+      .replace(/^folder:/, '')
+      .trim();
+
+    assertFolderMoveSafe(sourceFolderId, targetFolderId);
 
     item.parentFolderId = targetFolder?.folderId || '';
     item.updatedAt = new Date().toISOString();
@@ -854,11 +923,23 @@ ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
   assertVerifiedWallet();
   await syncPull();
 
-  const item = findAnyItem(payload);
-  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+  let item = findAnyItem(payload);
+
+  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
+    item = folderFromPayload(payload);
+  }
+
+  if (!item) {
+    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  }
 
   const name = String(payload.name || '').trim();
-  if (!name) throw new Error('Name is required');
+
+  if (!name) {
+    throw new Error('Name is required');
+  }
+
+  item = ensureManifestTracked(item);
 
   item.name = name;
   item.updatedAt = new Date().toISOString();
@@ -870,58 +951,61 @@ ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
   return { ok: true, item };
 });
 
-function findOwnedManifestItemById(itemId = '') {
-  const id = String(itemId || '').trim();
-
-  if (!id) return null;
-
-  return walletManifests().find((manifest) => {
-    const values = [
-      manifest.id,
-      manifest.fileId,
-      manifest.folderId,
-      manifest.hash,
-      manifest.rootHash,
-    ]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean);
-
-    return values.includes(id);
-  }) || null;
-}
-
 ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
   loadWallet();
   loadManifests();
   assertVerifiedWallet();
   await syncPull();
 
-  const item = findAnyItem(payload);
-  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+  let item = findAnyItem(payload);
+
+  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
+    item = folderFromPayload(payload);
+  }
+
+  if (!item) {
+    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  }
 
   if (isFolderManifest(item)) {
-    const itemFolderId = String(item.folderId || manifestItemId(item) || '').trim();
+    const itemFolderId = String(item.folderId || manifestItemId(item) || '')
+      .replace(/^folder:/, '')
+      .trim();
+
     const removedFolderIds = descendantFolderIds(itemFolderId);
+
+    if (itemFolderId) {
+      removedFolderIds.add(itemFolderId);
+    }
+
     const fileDisposition = String(payload.fileDisposition || 'move');
-    const targetFolderId = String(payload.targetFolderId || '');
+    const targetFolderId = String(payload.targetFolderId || '').trim();
     const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
 
-    if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+    if (targetFolderId && !targetFolder) {
+      throw new Error(`Target folder not found: ${targetFolderId}`);
+    }
 
     const changedFiles = [];
     const deletedFiles = [];
-    const ownedManifests = manifests
-  .filter(isUsableManifest)
-  .filter(canTouchManifest);
+    const ownedManifests = ownedManifestCandidates();
 
-const removedFolders = ownedManifests.filter(
-  (manifest) => isFolderManifest(manifest) && removedFolderIds.has(String(manifest.folderId || ''))
-);
+    const removedFolders = ownedManifests.filter((manifest) => {
+      if (!isFolderManifest(manifest)) return false;
 
-for (const manifest of ownedManifests) {
+      const folderId = String(manifest.folderId || manifestItemId(manifest) || '')
+        .replace(/^folder:/, '')
+        .trim();
+
+      return removedFolderIds.has(folderId);
+    });
+
+    for (const manifest of ownedManifests) {
       if (isFolderManifest(manifest)) continue;
 
-      const currentFolderId = String(manifest.folderId || manifest.parentFolderId || '');
+      const currentFolderId = String(manifest.folderId || manifest.parentFolderId || '')
+        .replace(/^folder:/, '')
+        .trim();
 
       if (removedFolderIds.has(currentFolderId)) {
         if (fileDisposition === 'delete') {
@@ -938,10 +1022,14 @@ for (const manifest of ownedManifests) {
     }
 
     manifests = manifests.filter((manifest) => {
-  if (!canTouchManifest(manifest)) return true;
+      if (!canTouchManifest(manifest)) return true;
 
       if (isFolderManifest(manifest)) {
-        return !removedFolderIds.has(String(manifest.folderId || ''));
+        const folderId = String(manifest.folderId || manifestItemId(manifest) || '')
+          .replace(/^folder:/, '')
+          .trim();
+
+        return !removedFolderIds.has(folderId);
       }
 
       return !deletedFiles.some((file) => file.hash === manifest.hash);
@@ -949,21 +1037,43 @@ for (const manifest of ownedManifests) {
 
     persistManifests();
 
-    for (const file of changedFiles) await syncPush(file);
-    for (const file of deletedFiles) await syncDelete(activeWallet(), file.hash);
-    for (const folder of removedFolders) await syncDelete(activeWallet(), folder.hash || folder.rootHash);
+    for (const file of changedFiles) {
+      await syncPush(file);
+    }
+
+    for (const file of deletedFiles) {
+      await syncDelete(activeWallet(), file.hash);
+    }
+
+    for (const folder of removedFolders) {
+      await syncDelete(activeWallet(), folder.hash || folder.rootHash || `folder:${folder.folderId}`);
+    }
+
+    if (!removedFolders.length && item.hash) {
+      await syncDelete(activeWallet(), item.hash);
+    }
 
     await syncPull();
 
-    return { ok: true, removedFolders: removedFolders.length, changedFiles: changedFiles.length, deletedFiles: deletedFiles.length };
+    return {
+      ok: true,
+      removedFolders: removedFolders.length || 1,
+      changedFiles: changedFiles.length,
+      deletedFiles: deletedFiles.length,
+    };
   }
 
-  manifests = manifests.filter(
-  (manifest) => !(canTouchManifest(manifest) && manifest.hash === item.hash)
-);
+  const removeValues = manifestValues(item);
+
+  manifests = manifests.filter((manifest) => {
+    if (!canTouchManifest(manifest)) return true;
+
+    const values = manifestValues(manifest);
+    return !values.some((value) => removeValues.includes(value));
+  });
 
   persistManifests();
-  await syncDelete(activeWallet(), item.hash);
+  await syncDelete(activeWallet(), item.hash || item.rootHash || item.id);
   await syncPull();
 
   return { ok: true };
