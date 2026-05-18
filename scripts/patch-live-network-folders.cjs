@@ -149,10 +149,6 @@ function patchFolderEffects(src) {
     '    setFileFolders(readJson(folderStorageKey, {}));\n    setActiveFolder(ALL_FILES);',
     '    setFileFolders({});\n    setActiveFolder(ALL_FILES);\n    setActiveFolderId("");'
   );
-  src = src.replace(
-    '    localStorage.setItem(folderStorageKey, JSON.stringify(fileFolders));',
-    '    localStorage.setItem(folderStorageKey, JSON.stringify(fileFolders));'
-  );
   return src;
 }
 
@@ -208,7 +204,7 @@ const folderActionsBlock = `  const createFolder = () => run(async () => {
   const deleteFolder = (folderName: string, folderId?: string) => run(async () => {
     const folder = folderId ? folderById(folderId) : folderByName(folderName);
     if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");
-    if (!window.confirm(`Delete folder ${folderPath(folder)} from network manifests?`)) return;
+    if (!window.confirm("Delete folder " + folderPath(folder) + " from network manifests?")) return;
     await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });
     const removed = new Set<string>([String(folder.folderId || folder.id || "")]);
     let changed = true;
