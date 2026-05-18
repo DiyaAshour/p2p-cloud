@@ -31,6 +31,7 @@ const KDF_ITERATIONS = 310000;
 const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
 const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
+const FOLDER_MANIFEST_KIND = 'folder';
 
 const PLANS = {
   free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
@@ -243,10 +244,20 @@ function loadManifests() { ensureDataDir(); try { const parsed = JSON.parse(fs.r
 function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, JSON.stringify(manifests.filter(isUsableManifest), null, 2), 'utf8'); }
 function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
 function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }
-function totalStoredBytesForWallet() { return walletManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
+function sanitizeFolderManifest(folder = {}) { Object.assign(folder, { kind: 'folder', isFolder: true, isEncrypted: false, visibility: 'private', isPublic: false, size: 0, storedSize: 0, totalChunks: 0, chunkSize: 0, chunks: [], encryption: null, replicas: Array.isArray(folder.replicas) ? folder.replicas : [] }); return folder; }
+function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }
+function walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true || String(m.hash || '').startsWith('folder:')).map(sanitizeFolderManifest); }
+function folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }
+function assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }
+function sanitizeFolderName(name = '') { const clean = String(name || '').trim().replace(/\s+/g, ' '); if (!clean) throw new Error('Folder name is required'); if (clean.length > 80) throw new Error('Folder name is too long'); if (['all files', 'uncategorized'].includes(clean.toLowerCase())) throw new Error('Reserved folder name'); return clean; }
+function folderIdFromName(name = '') { return crypto.createHash('sha256').update(folderOwnerIdentity() + ':folder:' + String(name || '').trim().toLowerCase() + ':' + Date.now() + ':' + crypto.randomBytes(8).toString('hex')).digest('hex'); }
+function findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }
+function findFolderByName(name = '') { return walletFolderManifests().find((folder) => String(folder.name || '').toLowerCase() === String(name || '').toLowerCase()); }
+function assertFolderNotDescendant(folderId, parentFolderId) { let cursor = String(parentFolderId || ''); const seen = new Set(); while (cursor) { if (cursor === folderId) throw new Error('Cannot move folder inside itself or its child'); if (seen.has(cursor)) throw new Error('Folder tree cycle detected'); seen.add(cursor); const parent = findFolderById(cursor); cursor = parent?.parentFolderId || ''; } }
+function totalStoredBytesForWallet() { return walletFileManifests().reduce((sum, file) => sum + Number(file.size || 0), 0); }
 function walletSummary() { const plan = PLANS[walletState.planId] || PLANS.free; const usedBytes = walletState.connected ? totalStoredBytesForWallet() : 0; return { ok: true, ...walletState, encryptionSecret: null, loginSignature: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE, minDrivePasswordLength: MIN_DRIVE_PASSWORD_LENGTH, address: activeWallet() || walletState.address, plan, plans: Object.values(PLANS), usedBytes, remainingBytes: Math.max(0, plan.quotaBytes - usedBytes), sync: lastSyncStatus }; }
 function assertWalletUploadAllowed(nextBytes = 0) { assertVerifiedWallet(); const plan = PLANS[walletState.planId] || PLANS.free; if (totalStoredBytesForWallet() + nextBytes > plan.quotaBytes) throw new Error(`Storage quota exceeded. Current plan: ${plan.name}.`); }
-function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
+function findManifest(payload = {}) { const hash = String(payload.hash || ''); const rootHash = String(payload.rootHash || ''); return walletFileManifests().find((m) => m.hash === hash || m.rootHash === rootHash); }
 
 async function syncPull() {
   const identity = activeWallet();
@@ -425,11 +436,15 @@ function stopAutoRepairLoop() {
   lastAutoRepairStatus = { ...lastAutoRepairStatus, active: false, skippedReason: 'stopped' };
 }
 
+function safePeerList(node) {
+  return Array.from(node.peerInfo?.values?.() || []).slice(0, 50).map((peer) => ({ peerId: String(peer.peerId || ''), url: peer.url || null, status: peer.status || null, direction: peer.direction || null, lastSeen: peer.lastSeen || null }));
+}
+
 function networkSummary() {
   const node = ensureTransport({});
   const own = walletManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: Array.from(node.peerInfo?.values?.() || []), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
+  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: safePeerList(node), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
 }
 
 function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
@@ -531,23 +546,187 @@ ipcMain.handle('wallet:disconnect', async () => {
 });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
 ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
-ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => {
-  loadWallet();
-  loadManifests();
-
+ipcMain.handle('p2p:listFolders', async () => {
   if (!walletState.connected || !walletState.verified) return [];
-
   await syncPull();
+  return walletFolderManifests().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+});
 
+ipcMain.handle('p2p:createFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const ownerWallet = folderOwnerIdentity();
+  const name = sanitizeFolderName(payload.name);
+  const parentFolderId = String(payload.parentFolderId || '');
+  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');
+  if (walletFolderManifests().some((folder) => String(folder.parentFolderId || '') === parentFolderId && String(folder.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
+  const folderId = folderIdFromName(name);
+  const folder = { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, id: ownerWallet + ':folder:' + folderId, hash: 'folder:' + folderId, rootHash: 'folder:' + folderId, folderId, name, parentFolderId, ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
+  manifests.push(folder);
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:renameFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folderId = String(payload.folderId || '');
+  const name = sanitizeFolderName(payload.name);
+  const folder = findFolderById(folderId) || findFolderByName(payload.oldName || '');
+  if (!folder) throw new Error('Folder not found');
+  if (walletFolderManifests().some((candidate) => candidate.folderId !== folder.folderId && String(candidate.parentFolderId || '') === String(folder.parentFolderId || '') && String(candidate.name || '').toLowerCase() === name.toLowerCase())) throw new Error('Folder already exists here');
+  Object.assign(folder, { name, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:moveFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folderId = String(payload.folderId || '');
+  const parentFolderId = String(payload.parentFolderId || '');
+  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');
+  if (!folder) throw new Error('Folder not found');
+  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Target folder not found');
+  assertFolderNotDescendant(folder.folderId, parentFolderId);
+  Object.assign(folder, { parentFolderId, updatedAt: new Date().toISOString(), visibility: 'private', isPublic: false });
+  persistManifests();
+  await syncPush(folder);
+  await syncPull();
+  return { ok: true, folder, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const folder = findFolderById(String(payload.folderId || '')) || findFolderByName(payload.name || '');
+  if (!folder) throw new Error('Folder not found');
+  const removed = new Set([folder.folderId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const child of walletFolderManifests()) if (!removed.has(child.folderId) && removed.has(String(child.parentFolderId || ''))) { removed.add(child.folderId); changed = true; }
+  }
+  const changedFiles = [];
+  for (const file of walletFileManifests()) {
+    if (removed.has(String(file.folderId || ''))) {
+      file.folderId = '';
+      file.folderName = '';
+      file.folder = '';
+      file.updatedAt = new Date().toISOString();
+      changedFiles.push(file);
+    }
+  }
+  const removedFolders = walletFolderManifests().filter((candidate) => removed.has(candidate.folderId));
+  manifests = manifests.filter((m) => !(m.kind === FOLDER_MANIFEST_KIND && removed.has(m.folderId)));
+  persistManifests();
+  for (const file of changedFiles) await syncPush(file);
+  for (const removedFolder of removedFolders) await syncDelete(folderOwnerIdentity(), removedFolder.hash);
+  await syncPull();
+  return { ok: true, removed: removed.size, folders: walletFolderManifests() };
+});
+
+ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const manifest = findManifest(payload);
+  if (!manifest) throw new Error('File not found for this identity');
+  const folderId = String(payload.folderId || '');
+  const folder = folderId ? findFolderById(folderId) : (payload.folderName ? findFolderByName(payload.folderName) : null);
+  if (folderId && !folder) throw new Error('Target folder not found');
+  manifest.folderId = folder?.folderId || '';
+  manifest.folderName = folder?.name || String(payload.folderName || '');
+  manifest.folder = manifest.folderName;
+  manifest.updatedAt = new Date().toISOString();
+  persistManifests();
+  await syncPush(manifest);
+  await syncPull();
+  return { ok: true, file: manifest };
+});
+
+
+ipcMain.handle('p2p:updateFile', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const hash = String(payload.hash || payload.rootHash || '');
+  const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : {};
+  const manifest = walletFileManifests().find((file) => file.hash === hash || file.rootHash === hash);
+  if (!manifest) throw new Error('File not found for this identity');
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'name')) {
+    const nextName = String(patch.name || '').trim();
+    if (!nextName) throw new Error('File name is required');
+    manifest.name = nextName;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'folder')) {
+    const folderName = String(patch.folder || '').trim();
+    if (!folderName) {
+      manifest.folderId = '';
+      manifest.folderName = '';
+      manifest.folder = '';
+    } else {
+      let folder = findFolderByName(folderName);
+      if (!folder) {
+        const ownerWallet = folderOwnerIdentity();
+        const folderId = folderIdFromName(folderName);
+        folder = { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, id: ownerWallet + ':folder:' + folderId, hash: 'folder:' + folderId, rootHash: 'folder:' + folderId, folderId, name: folderName, parentFolderId: '', ownerWallet, ownerNodeId: ensureTransport({}).peerId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), size: 0, storedSize: 0, totalChunks: 0, chunks: [], replicas: [], isEncrypted: false, visibility: 'private', isPublic: false, isFolder: true };
+        manifests.push(folder);
+        await syncPush(folder);
+      }
+      manifest.folderId = folder.folderId;
+      manifest.folderName = folder.name;
+      manifest.folder = folder.name;
+    }
+  }
+
+  manifest.updatedAt = new Date().toISOString();
+  persistManifests();
+  await syncPush(manifest);
+  await syncPull();
+  return { ok: true, file: manifest };
+});
+
+ipcMain.handle('p2p:listFiles', async (_event, payload = {}) => {
+  if (!walletState.connected || !walletState.verified) return [];
+  await syncPull();
   const query = String(payload.query || '').trim().toLowerCase();
-  const own = walletManifests();
-
-  if (!query) return own;
-
-  return own.filter((f) =>
-    [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || '', f.folder || '']
-      .some((v) => String(v || '').toLowerCase().includes(query))
-  );
+  const folders = typeof walletFolderManifests === 'function' ? walletFolderManifests() : walletManifests().filter((m) => m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:'));
+  const files = typeof walletFileManifests === 'function' ? walletFileManifests() : walletManifests().filter((m) => !(m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:')));
+  const folderById = new Map();
+  const folderByName = new Map();
+  for (const folder of folders) {
+    const name = String(folder.name || '').trim();
+    if (name) folderByName.set(name.toLowerCase(), folder);
+    for (const id of [folder.folderId, folder.id, folder.hash, folder.rootHash].filter(Boolean)) folderById.set(String(id), folder);
+  }
+  const changed = [];
+  for (const file of files) {
+    const rawId = String(file.parentFolderId || file.folderId || '').trim();
+    const rawName = String(file.folderName || file.folder || '').trim();
+    const folder = (rawId && folderById.get(rawId)) || (rawName && folderByName.get(rawName.toLowerCase())) || null;
+    const nextFolderId = folder ? String(folder.folderId || '') : '';
+    const nextFolderName = folder ? String(folder.name || '') : '';
+    if (String(file.folderId || '') !== nextFolderId || String(file.parentFolderId || '') !== nextFolderId || String(file.folderName || '') !== nextFolderName || String(file.folder || '') !== nextFolderName) {
+      file.folderId = nextFolderId;
+      file.parentFolderId = nextFolderId;
+      file.folderName = nextFolderName;
+      file.folder = nextFolderName;
+      file.updatedAt = new Date().toISOString();
+      changed.push(file);
+    }
+  }
+  if (changed.length) {
+    persistManifests();
+    for (const file of changed) await syncPush(file);
+    console.log('[p2p:listFiles] normalized stale folder labels', changed.length);
+  }
+  if (!query) return files;
+  return files.filter((f) => [f.name, f.hash, f.rootHash, f.ownerWallet || '', f.folderName || '', f.folder || ''].some((v) => String(v || '').toLowerCase().includes(query)));
 });
 
 ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
@@ -586,7 +765,10 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
     throw error;
   }
 
-  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };
+  const targetFolderId = String(payload.folderId || '');
+  const targetFolder = targetFolderId ? findFolderById(targetFolderId) : (payload.folderName ? findFolderByName(payload.folderName) : null);
+  if (targetFolderId && !targetFolder) throw new Error('Target folder not found');
+  const manifest = { id: `${ownerWallet}:${storedHash}`, name: String(payload.name || 'file'), size: originalBuffer.length, storedSize: storedBuffer.length, hash: storedHash, rootHash: tree.root, uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile, visibility: privateFile ? 'private' : 'public', isPublic: !privateFile, encryption: secured.encryption, mimeType: payload.mimeType ? String(payload.mimeType) : 'application/octet-stream', folderId: targetFolder?.folderId || '', folderName: targetFolder?.name || String(payload.folderName || ''), folder: targetFolder?.name || String(payload.folderName || ''), chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: node.peerId, ownerWallet, planId: walletState.planId, replicas: [node.peerId], chunks: chunkResults };
 
   for (const chunkMeta of manifest.chunks) {
     for (const peerId of chunkMeta.replicas || []) fileReplicas.add(peerId);
@@ -862,221 +1044,395 @@ function descendantFolderIds(rootFolderId) {
   return removed;
 }
 
-ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
-  loadWallet();
-  loadManifests();
-  assertVerifiedWallet();
-  await syncPull();
+function findOrFallbackManifestItem(payload = {}) {
+  const lookupId = String(
+    payload.itemId ||
+    payload.id ||
+    payload.hash ||
+    payload.rootHash ||
+    payload.folderId ||
+    payload.folderPath ||
+    payload.name ||
+    ''
+  ).trim();
 
-  let item = findAnyItem(payload);
+  let item = findOwnedManifestItemById(lookupId);
 
-  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
-    item = folderFromPayload(payload);
+  if (item) return item;
+
+  const cleanId = lookupId.replace(/^folder:/, '').trim();
+
+  if (!cleanId) return null;
+
+  return {
+    kind: typeof FOLDER_MANIFEST_KIND !== 'undefined' ? FOLDER_MANIFEST_KIND : 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId: cleanId,
+    id: cleanId,
+    hash: `folder:${cleanId}`,
+    rootHash: `folder:${cleanId}`,
+    ownerWallet: typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(),
+    name: String(payload.name || payload.folderPath || cleanId),
+    visibility: 'private',
+    isPublic: false,
+    isEncrypted: false,
+    chunks: [],
+    chunkSize: 0,
+    totalChunks: 0,
+    size: 0,
+    storedSize: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+
+function manifestItemIsFolder(item = {}) {
+  if (typeof isFolderManifest === 'function') return isFolderManifest(item);
+
+  return (
+    item.kind === 'folder' ||
+    item.type === 'folder' ||
+    item.isFolder === true ||
+    item.name === '.p2p-folder' ||
+    Boolean(item.folderId && !item.chunks?.length) ||
+    String(item.hash || '').startsWith('folder:')
+  );
+}
+
+function manifestItemIds(item = {}) {
+  const hash = String(item.hash || '').trim();
+  const rootHash = String(item.rootHash || '').trim();
+
+  return Array.from(new Set([
+    item.itemId,
+    item.id,
+    item.fileId,
+    item.folderId,
+    hash,
+    rootHash,
+    hash.replace(/^folder:/, ''),
+    rootHash.replace(/^folder:/, ''),
+    item.name,
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
+function manifestItemMatchesAnyId(item = {}, ids = new Set()) {
+  const normalized = new Set(
+    Array.from(ids || [])
+      .map((value) => String(value || '').replace(/^folder:/, '').trim())
+      .filter(Boolean)
+  );
+
+  return manifestItemIds(item).some((id) => {
+    const clean = String(id || '').replace(/^folder:/, '').trim();
+    return normalized.has(id) || normalized.has(clean);
+  });
+}
+
+function manifestOwnNameLower(item = {}) {
+  return String(item.name || '').trim().toLowerCase();
+}
+
+function normalizeParentFolderId(value = '') {
+  return String(value || '').replace(/^folder:/, '').trim();
+}
+
+function manifestFolderNameLower(item = {}) {
+  return String(item.folderName || item.folder || '').trim().toLowerCase();
+}
+
+function manifestDeleteOwnerIdentity() {
+  return typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet();
+}
+
+
+function assertValidMoveTarget(item = {}, targetFolderId = null) {
+  const targetId = String(targetFolderId || '').replace(/^folder:/, '').trim();
+
+  // empty target = root / uncategorized
+  if (!targetId) return null;
+
+  const folders =
+    typeof walletFolderManifests === 'function'
+      ? walletFolderManifests()
+      : walletManifests().filter((m) =>
+          typeof manifestItemIsFolder === 'function'
+            ? manifestItemIsFolder(m)
+            : (m.kind === 'folder' || m.isFolder === true || String(m.hash || '').startsWith('folder:'))
+        );
+
+  const targetFolder = folders.find((folder) => {
+    const ids =
+      typeof manifestItemIds === 'function'
+        ? manifestItemIds(folder)
+        : [folder.folderId, folder.id, folder.hash, folder.rootHash];
+
+    return ids
+      .map((id) => String(id || '').replace(/^folder:/, '').trim())
+      .includes(targetId);
+  });
+
+  if (!targetFolder) {
+    throw new Error(`Target folder not found: ${targetId}`);
   }
 
-  if (!item) {
-    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  const sourceIsFolder =
+    typeof manifestItemIsFolder === 'function'
+      ? manifestItemIsFolder(item)
+      : (item.kind === 'folder' || item.isFolder === true || String(item.hash || '').startsWith('folder:'));
+
+  if (!sourceIsFolder) {
+    return targetFolder;
   }
 
-  const targetFolderId = String(payload.targetFolderId || '').trim();
-  const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
+  const sourceIds =
+    typeof manifestItemIds === 'function'
+      ? manifestItemIds(item)
+      : [item.folderId, item.id, item.hash, item.rootHash];
 
-  if (targetFolderId && !targetFolder) {
-    throw new Error(`Target folder not found: ${targetFolderId}`);
+  const sourceSet = new Set(
+    sourceIds
+      .map((id) => String(id || '').replace(/^folder:/, '').trim())
+      .filter(Boolean)
+  );
+
+  if (sourceSet.has(targetId)) {
+    throw new Error('Cannot move folder into itself');
   }
 
-  if (isFolderManifest(item)) {
-    item = ensureManifestTracked(item);
+  let cursor = String(targetFolder.parentFolderId || '')
+    .replace(/^folder:/, '')
+    .trim();
 
-    const sourceFolderId = String(item.folderId || manifestItemId(item) || '')
+  const seen = new Set();
+
+  while (cursor) {
+    if (sourceSet.has(cursor)) {
+      throw new Error('Cannot move folder inside its child');
+    }
+
+    if (seen.has(cursor)) {
+      throw new Error('Folder tree cycle detected');
+    }
+
+    seen.add(cursor);
+
+    const parent = folders.find((folder) => {
+      const ids =
+        typeof manifestItemIds === 'function'
+          ? manifestItemIds(folder)
+          : [folder.folderId, folder.id, folder.hash, folder.rootHash];
+
+      return ids
+        .map((id) => String(id || '').replace(/^folder:/, '').trim())
+        .includes(cursor);
+    });
+
+    cursor = String(parent?.parentFolderId || '')
       .replace(/^folder:/, '')
       .trim();
-
-    assertFolderMoveSafe(sourceFolderId, targetFolderId);
-
-    item.parentFolderId = targetFolder?.folderId || '';
-    item.updatedAt = new Date().toISOString();
-
-    persistManifests();
-    await syncPush(item);
-    await syncPull();
-
-    return { ok: true, item };
   }
 
-  item.folderId = targetFolder?.folderId || '';
-  item.parentFolderId = targetFolder?.folderId || '';
-  item.folderName = folderDisplayName(targetFolder);
-  item.folder = folderDisplayName(targetFolder);
-  item.updatedAt = new Date().toISOString();
+  return targetFolder;
+}
 
+ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  const targetFolder = assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? payload.folderId ?? null);
+  const nextParentId = targetFolder ? String(targetFolder.folderId || targetFolder.id) : '';
+  item.parentFolderId = nextParentId;
+  if (!manifestItemIsFolder(item)) {
+    item.folderId = nextParentId;
+    item.folderName = targetFolder?.name || '';
+    item.folder = item.folderName;
+  }
+  item.updatedAt = new Date().toISOString();
   persistManifests();
   await syncPush(item);
   await syncPull();
-
   return { ok: true, item };
 });
 
 ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
-  loadWallet();
-  loadManifests();
-  assertVerifiedWallet();
+  assertFolderIdentity();
   await syncPull();
-
-  let item = findAnyItem(payload);
-
-  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
-    item = folderFromPayload(payload);
-  }
-
-  if (!item) {
-    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
-  }
-
-  const name = String(payload.name || '').trim();
-
-  if (!name) {
-    throw new Error('Name is required');
-  }
-
-  item = ensureManifestTracked(item);
-
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  const name = sanitizeFolderName(payload.name);
+  const oldName = String(item.name || '').trim();
+  const oldNameLower = oldName.toLowerCase();
   item.name = name;
   item.updatedAt = new Date().toISOString();
-
+  const changedFiles = [];
+  if (manifestItemIsFolder(item)) {
+    Object.assign(item, { kind: FOLDER_MANIFEST_KIND, isFolder: true, visibility: 'private', isPublic: false, isEncrypted: false, chunks: [], chunkSize: 0, totalChunks: 0, size: 0, storedSize: 0 });
+    const folderId = String(item.folderId || item.id || '');
+    for (const candidate of walletManifests()) {
+      if (manifestItemIsFolder(candidate)) continue;
+      const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+      const candidateParentIdLower = candidateParentId.toLowerCase();
+      const candidateFolderName = manifestFolderNameLower(candidate);
+      if ((folderId && candidateParentId === folderId) || (oldNameLower && (candidateFolderName === oldNameLower || candidateParentIdLower === oldNameLower))) {
+        candidate.folderId = folderId;
+        candidate.parentFolderId = folderId;
+        candidate.folderName = name;
+        candidate.folder = name;
+        candidate.updatedAt = new Date().toISOString();
+        changedFiles.push(candidate);
+      }
+    }
+  }
   persistManifests();
   await syncPush(item);
+  for (const file of changedFiles) await syncPush(file);
   await syncPull();
-
-  return { ok: true, item };
+  return { ok: true, item, renamedFiles: changedFiles.length };
 });
 
-ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
-  loadWallet();
-  loadManifests();
-  assertVerifiedWallet();
-  await syncPull();
+function findOwnedManifestItemById(itemId = '') {
+  const id = String(itemId || '').trim();
 
-  let item = findAnyItem(payload);
+  if (!id) return null;
 
-  if (!item && String(payload.itemId || payload.folderId || '').trim()) {
-    item = folderFromPayload(payload);
-  }
+  const cleanId = id.replace(/^folder:/, '').trim();
 
-  if (!item) {
-    throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
-  }
+  const list = Array.isArray(manifests) ? manifests : [];
 
-  if (isFolderManifest(item)) {
-    const itemFolderId = String(item.folderId || manifestItemId(item) || '')
-      .replace(/^folder:/, '')
-      .trim();
-
-    const removedFolderIds = descendantFolderIds(itemFolderId);
-
-    if (itemFolderId) {
-      removedFolderIds.add(itemFolderId);
-    }
-
-    const fileDisposition = String(payload.fileDisposition || 'move');
-    const targetFolderId = String(payload.targetFolderId || '').trim();
-    const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
-
-    if (targetFolderId && !targetFolder) {
-      throw new Error(`Target folder not found: ${targetFolderId}`);
-    }
-
-    const changedFiles = [];
-    const deletedFiles = [];
-    const ownedManifests = ownedManifestCandidates();
-
-    const removedFolders = ownedManifests.filter((manifest) => {
-      if (!isFolderManifest(manifest)) return false;
-
-      const folderId = String(manifest.folderId || manifestItemId(manifest) || '')
-        .replace(/^folder:/, '')
-        .trim();
-
-      return removedFolderIds.has(folderId);
+  const candidates = list
+    .filter(isUsableManifest)
+    .filter((manifest) => {
+      if (typeof canTouchManifest === 'function') return canTouchManifest(manifest);
+      return walletOwnsManifest(manifest);
     });
 
-    for (const manifest of ownedManifests) {
-      if (isFolderManifest(manifest)) continue;
+  const found = candidates.find((manifest) => {
+    const hash = String(manifest.hash || '').trim();
+    const rootHash = String(manifest.rootHash || '').trim();
 
-      const currentFolderId = String(manifest.folderId || manifest.parentFolderId || '')
-        .replace(/^folder:/, '')
-        .trim();
+    const values = [
+      manifest.id,
+      manifest.fileId,
+      manifest.folderId,
+      manifest.itemId,
+      hash,
+      rootHash,
+      hash.replace(/^folder:/, ''),
+      rootHash.replace(/^folder:/, ''),
+      manifest.name,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
 
-      if (removedFolderIds.has(currentFolderId)) {
-        if (fileDisposition === 'delete') {
-          deletedFiles.push(manifest);
-        } else {
-          manifest.folderId = targetFolder?.folderId || '';
-          manifest.parentFolderId = targetFolder?.folderId || '';
-          manifest.folderName = targetFolder?.name || '';
-          manifest.folder = targetFolder?.name || '';
-          manifest.updatedAt = new Date().toISOString();
-          changedFiles.push(manifest);
-        }
-      }
-    }
-
-    manifests = manifests.filter((manifest) => {
-      if (!canTouchManifest(manifest)) return true;
-
-      if (isFolderManifest(manifest)) {
-        const folderId = String(manifest.folderId || manifestItemId(manifest) || '')
-          .replace(/^folder:/, '')
-          .trim();
-
-        return !removedFolderIds.has(folderId);
-      }
-
-      return !deletedFiles.some((file) => file.hash === manifest.hash);
-    });
-
-    persistManifests();
-
-    for (const file of changedFiles) {
-      await syncPush(file);
-    }
-
-    for (const file of deletedFiles) {
-      await syncDelete(activeWallet(), file.hash);
-    }
-
-    for (const folder of removedFolders) {
-      await syncDelete(activeWallet(), folder.hash || folder.rootHash || `folder:${folder.folderId}`);
-    }
-
-    if (!removedFolders.length && item.hash) {
-      await syncDelete(activeWallet(), item.hash);
-    }
-
-    await syncPull();
-
-    return {
-      ok: true,
-      removedFolders: removedFolders.length || 1,
-      changedFiles: changedFiles.length,
-      deletedFiles: deletedFiles.length,
-    };
-  }
-
-  const removeValues = manifestValues(item);
-
-  manifests = manifests.filter((manifest) => {
-    if (!canTouchManifest(manifest)) return true;
-
-    const values = manifestValues(manifest);
-    return !values.some((value) => removeValues.includes(value));
+    return values.includes(id) || values.includes(cleanId);
   });
 
-  persistManifests();
-  await syncDelete(activeWallet(), item.hash || item.rootHash || item.id);
-  await syncPull();
+  if (found) return found;
 
-  return { ok: true };
+  // Folder fallback: بعض الفولدرات القديمة بتطلع في الواجهة بس مش محفوظة كـ manifest كامل.
+  return {
+    kind: 'folder',
+    type: 'folder',
+    isFolder: true,
+    folderId: cleanId,
+    id: cleanId,
+    hash: `folder:${cleanId}`,
+    rootHash: `folder:${cleanId}`,
+    ownerWallet: activeWallet(),
+    name: '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
+  assertFolderIdentity();
+  await syncPull();
+  const item = findOrFallbackManifestItem(payload);
+  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+
+  if (!manifestItemIsFolder(item)) {
+    const removedIds = new Set(manifestItemIds(item));
+    const beforeCount = manifests.length;
+    manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+    persistManifests();
+    await syncDelete(manifestDeleteOwnerIdentity(), item.hash || item.rootHash || item.folderId);
+    return { ok: true, deleted: beforeCount - manifests.length, movedFiles: 0, deletedFiles: 1, removedIds: Array.from(removedIds) };
+  }
+
+  const rootIds = manifestItemIds(item);
+  const removedFolderIds = new Set(rootIds);
+  const removedFolderNames = new Set([manifestOwnNameLower(item)].filter(Boolean));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of walletFolderManifests()) {
+      const folderIds = manifestItemIds(folder);
+      const parentId = normalizeParentFolderId(folder.parentFolderId);
+      const parentIdLower = parentId.toLowerCase();
+      if ((parentId && removedFolderIds.has(parentId)) || (parentIdLower && removedFolderNames.has(parentIdLower))) {
+        for (const id of folderIds) {
+          if (!removedFolderIds.has(id)) { removedFolderIds.add(id); changed = true; }
+        }
+        const folderName = manifestOwnNameLower(folder);
+        if (folderName && !removedFolderNames.has(folderName)) { removedFolderNames.add(folderName); changed = true; }
+      }
+    }
+  }
+
+  const foldersToRemove = [];
+  const filesInside = [];
+  for (const candidate of walletManifests()) {
+    if (manifestItemIsFolder(candidate)) {
+      if (manifestItemIds(candidate).some((id) => removedFolderIds.has(id)) || removedFolderNames.has(manifestOwnNameLower(candidate))) foldersToRemove.push(candidate);
+      continue;
+    }
+    const candidateParentId = normalizeParentFolderId(candidate.parentFolderId || candidate.folderId);
+    const candidateParentIdLower = candidateParentId.toLowerCase();
+    const candidateFolderName = manifestFolderNameLower(candidate);
+    if ((candidateParentId && removedFolderIds.has(candidateParentId)) || (candidateFolderName && removedFolderNames.has(candidateFolderName)) || (candidateParentIdLower && removedFolderNames.has(candidateParentIdLower))) {
+      filesInside.push(candidate);
+    }
+  }
+
+  const disposition = String(payload.fileDisposition || 'move').trim().toLowerCase();
+  const deleteFiles = disposition === 'delete';
+  const targetFolder = deleteFiles ? null : assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? null);
+  if (targetFolder && manifestItemIds(targetFolder).some((id) => removedFolderIds.has(id))) throw new Error('Cannot move files into a folder that is being deleted');
+
+  const removedItems = deleteFiles ? [...foldersToRemove, ...filesInside] : foldersToRemove;
+  const removedIds = new Set(removedItems.flatMap((removed) => manifestItemIds(removed)));
+  const beforeCount = manifests.length;
+  manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
+
+  let movedFiles = 0;
+  if (!deleteFiles) {
+    const targetFolderId = targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '';
+    const targetFolderName = targetFolder?.name || '';
+    for (const file of filesInside) {
+      file.parentFolderId = targetFolderId;
+      file.folderId = targetFolderId;
+      file.folderName = targetFolderName;
+      file.folder = targetFolderName;
+      file.updatedAt = new Date().toISOString();
+      movedFiles += 1;
+    }
+  }
+
+  persistManifests();
+  for (const removed of removedItems) await syncDelete(manifestDeleteOwnerIdentity(), removed.hash || removed.rootHash || removed.folderId);
+  if (!deleteFiles) for (const file of filesInside) await syncPush(file);
+
+  return {
+    ok: true,
+    deleted: beforeCount - manifests.length,
+    movedFiles,
+    deletedFiles: deleteFiles ? filesInside.length : 0,
+    removedIds: Array.from(removedIds),
+    targetFolderId: targetFolder ? String(targetFolder.folderId || targetFolder.id || '') : '',
+  };
 });
 
 ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
@@ -1310,9 +1666,14 @@ ipcMain.handle('p2p:networkSummary', async () => {
 
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
-ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
+ipcMain.handle('p2p:repair', async () => { assertFolderIdentity(); const node = ensureTransport({}); const own = walletFileManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const chunk = manifest.chunks?.[0]; if (!chunk) throw new Error('No chunks available for proof'); return { ok: true, proof: { ownerWallet: activeWallet(), rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, encrypted: Boolean(manifest.isEncrypted), keySource: manifest.encryption?.keySource || null, preparedAt: new Date().toISOString() } }; });
 
 app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
 app.on('before-quit', () => { stopAutoRepairLoop(); persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
 app.on('window-all-closed', () => {});
+
+
+
+
+
