@@ -645,9 +645,6 @@ const visibleFiles = useMemo(() => {
     }
   };
 
-  const refresh = async () => {
-    if (!api) return;
-
     const refresh = async () => {
   if (!api) return;
 
