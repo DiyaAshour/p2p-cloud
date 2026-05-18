@@ -303,7 +303,7 @@ export default function NativeP2PAppLive() {
   );
 
   // Bulk select state
-  const [selectedHashes, setSelectedHashes] = useState<Set<string>>(new Set());
+  const [selectedItemIds, setSelectedHashes] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
 
   const walletConnected = Boolean(wallet?.connected && (wallet.accountId || wallet.address));
