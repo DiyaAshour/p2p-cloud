@@ -120,6 +120,11 @@ function patchRuntimeFolderParentContract(src) {
     normalizeMoveParentExpression()
   );
 
+  next = next.replaceAll('await syncDelete(activeWallet(), item.hash);\n    await syncPull();\n    return { ok: true, deleted: 1 };', 'await syncDelete(folderOwnerIdentity(), item.hash || item.rootHash);\n    return { ok: true, deleted: 1 };');
+  next = next.replaceAll('for (const removed of removedItems) await syncDelete(activeWallet(), removed.hash);\n  await syncPull();\n  return { ok: true, deleted: removedItems.length };', 'for (const removed of removedItems) await syncDelete(folderOwnerIdentity(), removed.hash || removed.rootHash);\n  return { ok: true, deleted: removedItems.length };');
+  next = next.replaceAll('await syncDelete(activeIdentity(), item.hash);\n    await syncPull();\n    return { ok: true, deleted: 1 };', 'await syncDelete(folderOwnerIdentity(), item.hash || item.rootHash);\n    return { ok: true, deleted: 1 };');
+  next = next.replaceAll('for (const removed of removedItems) await syncDelete(activeIdentity(), removed.hash);\n  await syncPull();\n  return { ok: true, deleted: removedItems.length };', 'for (const removed of removedItems) await syncDelete(folderOwnerIdentity(), removed.hash || removed.rootHash);\n  return { ok: true, deleted: removedItems.length };');
+
   return next;
 }
 
@@ -130,6 +135,6 @@ for (const file of [path.join(process.cwd(), 'electron', 'main.js'), path.join(p
   src = patchRuntimeFolderParentContract(src);
   if (src !== before) {
     fs.writeFileSync(file, src, 'utf8');
-    console.log(`[manifest-folder-panel-contract] resolved folder parent references in ${file}`);
+    console.log(`[manifest-folder-panel-contract] resolved folder parent/delete references in ${file}`);
   }
 }
