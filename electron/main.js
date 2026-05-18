@@ -350,10 +350,38 @@ ipcMain.handle('system:open-external', async (_event, payload = {}) => { const u
 ipcMain.handle('wallet:status', async () => walletSummary());
 ipcMain.handle('wallet:connect', async (_event, payload = {}) => {
   const address = normalizeWallet(payload.address);
-  if (!isValidWallet(address)) throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.');
+
+  if (!isValidWallet(address)) {
+    throw new Error('Invalid wallet address. Expected 0x + 40 hex characters.');
+  }
+
   const login = await verifyWalletLoginPayload(payload, address);
   const sameWallet = address === activeWallet();
-  walletState = { ...walletState, connected: true, verified: true, address, planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free', connectedAt: new Date().toISOString(), verifiedAt: login.signedAt, loginMessage: login.message, loginSignature: undefined, encryptionSecret: undefined, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
+
+  walletState = {
+    ...walletState,
+    connected: true,
+    verified: true,
+    authMode: 'wallet',
+    address,
+    accountId: address,
+    username: null,
+    seedFingerprint: null,
+    planId: sameWallet && PLANS[walletState.planId] ? walletState.planId : 'free',
+    connectedAt: new Date().toISOString(),
+    verifiedAt: login.signedAt,
+    loginMessage: login.message,
+    loginSignature: undefined,
+    encryptionSecret: undefined,
+    encryptionKeySource: ENCRYPTION_KEY_SOURCE,
+  };
+
+  persistWallet();
+  await syncPull();
+  startAutoRepairLoop();
+
+  return walletSummary();
+});
   persistWallet();
   await syncPull();
   startAutoRepairLoop();
