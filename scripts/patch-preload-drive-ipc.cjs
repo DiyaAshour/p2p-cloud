@@ -15,6 +15,9 @@ const folderChannels = [
   'p2p:deleteFolder',
   'p2p:moveFolder',
   'p2p:moveFile',
+  'p2p:renameItem',
+  'p2p:moveItem',
+  'p2p:deleteItem',
   'p2p:updateFile',
 ];
 
