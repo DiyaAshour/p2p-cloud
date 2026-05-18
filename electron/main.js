@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, dialog } from 'electron';
 import { verifyMessage } from 'viem';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -645,6 +645,474 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   return { ok: true, file: manifest, bytes: Array.from(outputBuffer), progress: transferProgress.download };
 });
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => { assertVerifiedWallet(); await syncPull(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); manifests = manifests.filter((m) => !(walletOwnsManifest(m) && m.hash === manifest.hash)); persistManifests(); await syncDelete(activeWallet(), manifest.hash); return { ok: true, summary: networkSummary() }; });
+for (const channel of [
+  'p2p:uploadFiles',
+  'p2p:downloadToPath',
+  'p2p:moveItem',
+  'p2p:renameItem',
+  'p2p:deleteItem',
+]) {
+  try { ipcMain.removeHandler(channel); } catch {}
+}
+
+function safeOutputName(name = 'download') {
+  return String(name || 'download').replace(/[\\/:*?"<>|]/g, '_');
+}
+
+function isFolderManifest(manifest = {}) {
+  return (
+    manifest.kind === 'folder' ||
+    manifest.isFolder === true ||
+    Boolean(manifest.folderId && String(manifest.hash || '').startsWith('folder:'))
+  );
+}
+
+function manifestItemId(manifest = {}) {
+  return String(manifest.folderId || manifest.id || manifest.rootHash || manifest.hash || '');
+}
+
+function findAnyItem(payload = {}) {
+  const ids = [
+    payload.itemId,
+    payload.folderId,
+    payload.fileId,
+    payload.id,
+    payload.rootHash,
+    payload.hash,
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
+
+  return walletManifests().find((manifest) => {
+    const values = [
+      manifest.id,
+      manifest.folderId,
+      manifest.hash,
+      manifest.rootHash,
+    ]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+
+    return ids.some((id) => values.includes(id));
+  });
+}
+
+function findFolderByAny(value = '') {
+  const id = String(value || '').trim();
+  if (!id) return null;
+
+  return walletManifests().find((manifest) => {
+    if (!isFolderManifest(manifest)) return false;
+
+    return [
+      manifest.folderId,
+      manifest.id,
+      manifest.hash,
+      manifest.rootHash,
+      manifest.name,
+    ]
+      .map((v) => String(v || '').trim())
+      .includes(id);
+  }) || null;
+}
+
+function folderDisplayName(folder) {
+  return folder?.name || '';
+}
+
+function assertFolderMoveSafe(folderId, targetFolderId) {
+  if (!folderId || !targetFolderId) return;
+  if (folderId === targetFolderId) throw new Error('Cannot move folder into itself');
+
+  const folders = walletManifests().filter(isFolderManifest);
+  let cursor = targetFolderId;
+  const seen = new Set();
+
+  while (cursor) {
+    if (cursor === folderId) throw new Error('Cannot move folder inside its child');
+    if (seen.has(cursor)) throw new Error('Folder tree cycle detected');
+
+    seen.add(cursor);
+    const parent = folders.find((folder) => String(folder.folderId || '') === cursor);
+    cursor = String(parent?.parentFolderId || '');
+  }
+}
+
+function descendantFolderIds(rootFolderId) {
+  const removed = new Set([String(rootFolderId || '')]);
+  const folders = walletManifests().filter(isFolderManifest);
+
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const folder of folders) {
+      const id = String(folder.folderId || '');
+      const parent = String(folder.parentFolderId || '');
+
+      if (id && parent && removed.has(parent) && !removed.has(id)) {
+        removed.add(id);
+        changed = true;
+      }
+    }
+  }
+
+  return removed;
+}
+
+ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+  await syncPull();
+
+  const item = findAnyItem(payload);
+  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+
+  const targetFolderId = String(payload.targetFolderId || payload.folderId || '');
+  const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
+
+  if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+
+  if (isFolderManifest(item)) {
+    assertFolderMoveSafe(String(item.folderId || ''), targetFolderId);
+
+    item.parentFolderId = targetFolder?.folderId || '';
+    item.updatedAt = new Date().toISOString();
+
+    persistManifests();
+    await syncPush(item);
+    await syncPull();
+
+    return { ok: true, item };
+  }
+
+  item.folderId = targetFolder?.folderId || '';
+  item.parentFolderId = targetFolder?.folderId || '';
+  item.folderName = folderDisplayName(targetFolder);
+  item.folder = folderDisplayName(targetFolder);
+  item.updatedAt = new Date().toISOString();
+
+  persistManifests();
+  await syncPush(item);
+  await syncPull();
+
+  return { ok: true, item };
+});
+
+ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+  await syncPull();
+
+  const item = findAnyItem(payload);
+  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+
+  const name = String(payload.name || '').trim();
+  if (!name) throw new Error('Name is required');
+
+  item.name = name;
+  item.updatedAt = new Date().toISOString();
+
+  persistManifests();
+  await syncPush(item);
+  await syncPull();
+
+  return { ok: true, item };
+});
+
+ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+  await syncPull();
+
+  const item = findAnyItem(payload);
+  if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
+
+  if (isFolderManifest(item)) {
+    const removedFolderIds = descendantFolderIds(item.folderId);
+    const fileDisposition = String(payload.fileDisposition || 'move');
+    const targetFolderId = String(payload.targetFolderId || '');
+    const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
+
+    if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+
+    const changedFiles = [];
+    const deletedFiles = [];
+    const removedFolders = walletManifests().filter(
+      (manifest) => isFolderManifest(manifest) && removedFolderIds.has(String(manifest.folderId || ''))
+    );
+
+    for (const manifest of walletManifests()) {
+      if (isFolderManifest(manifest)) continue;
+
+      const currentFolderId = String(manifest.folderId || manifest.parentFolderId || '');
+
+      if (removedFolderIds.has(currentFolderId)) {
+        if (fileDisposition === 'delete') {
+          deletedFiles.push(manifest);
+        } else {
+          manifest.folderId = targetFolder?.folderId || '';
+          manifest.parentFolderId = targetFolder?.folderId || '';
+          manifest.folderName = targetFolder?.name || '';
+          manifest.folder = targetFolder?.name || '';
+          manifest.updatedAt = new Date().toISOString();
+          changedFiles.push(manifest);
+        }
+      }
+    }
+
+    manifests = manifests.filter((manifest) => {
+      if (!walletOwnsManifest(manifest)) return true;
+
+      if (isFolderManifest(manifest)) {
+        return !removedFolderIds.has(String(manifest.folderId || ''));
+      }
+
+      return !deletedFiles.some((file) => file.hash === manifest.hash);
+    });
+
+    persistManifests();
+
+    for (const file of changedFiles) await syncPush(file);
+    for (const file of deletedFiles) await syncDelete(activeWallet(), file.hash);
+    for (const folder of removedFolders) await syncDelete(activeWallet(), folder.hash || folder.rootHash);
+
+    await syncPull();
+
+    return { ok: true, removedFolders: removedFolders.length, changedFiles: changedFiles.length, deletedFiles: deletedFiles.length };
+  }
+
+  manifests = manifests.filter(
+    (manifest) => !(walletOwnsManifest(manifest) && manifest.hash === item.hash)
+  );
+
+  persistManifests();
+  await syncDelete(activeWallet(), item.hash);
+  await syncPull();
+
+  return { ok: true };
+});
+
+ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+
+  const picked = await dialog.showOpenDialog({
+    title: 'Upload files',
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (picked.canceled || !picked.filePaths?.length) {
+    return { ok: true, cancelled: true, files: [] };
+  }
+
+  const uploaded = [];
+
+  for (const filePath of picked.filePaths) {
+    const buffer = fs.readFileSync(filePath);
+    const node = ensureTransport({});
+    const originalBuffer = Buffer.from(buffer);
+
+    assertWalletUploadAllowed(originalBuffer.length);
+
+    const ownerWallet = activeWallet();
+    const privateFile = Boolean(payload.isEncrypted);
+    const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
+    const secured = privateFile
+      ? encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword)
+      : { ciphertext: originalBuffer, encryption: null };
+
+    const storedBuffer = secured.ciphertext;
+    const chunks = splitIntoChunks(storedBuffer);
+    const tree = buildMerkleTree(chunks.map((c) => c.hash));
+    const storedHash = hashBufferHex(storedBuffer);
+    const fileReplicas = new Set([node.peerId]);
+    const chunkResults = new Array(chunks.length);
+    const uploadConcurrency = clampConcurrency(payload.uploadConcurrency, UPLOAD_CONCURRENCY, 12);
+
+    createProgress('upload', {
+      fileName: path.basename(filePath),
+      totalBytes: storedBuffer.length,
+      totalChunks: chunks.length,
+      concurrency: uploadConcurrency,
+    });
+
+    try {
+      await mapWithConcurrency(chunks, uploadConcurrency, async (chunk) => {
+        const chunkPayload = {
+          hash: chunk.hash,
+          data: chunk.data.toString('base64'),
+          index: chunk.index,
+          size: chunk.size,
+          ownerWallet,
+          encrypted: privateFile,
+        };
+
+        const replicas = replicateChunk(node, chunkPayload, [node.peerId], TARGET_REPLICAS);
+
+        try {
+          await putChunkToSafetyPeer(chunkPayload, node.peerId);
+          replicas.push('aws-safety-peer');
+        } catch (error) {
+          throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+        }
+
+        chunkResults[chunk.index] = {
+          index: chunk.index,
+          hash: chunk.hash,
+          size: chunk.size,
+          replicas: unique(replicas),
+          proof: getMerkleProof(tree, chunk.index),
+        };
+
+        updateProgress('upload', { bytesDelta: chunk.size, chunkDelta: 1 });
+      });
+    } catch (error) {
+      finishProgress('upload', 'error', error?.message || String(error));
+      throw error;
+    }
+
+    const targetFolderId = String(payload.folderId || '');
+    const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
+
+    if (targetFolderId && !targetFolder) throw new Error(`Target folder not found: ${targetFolderId}`);
+
+    const manifest = {
+      id: `${ownerWallet}:${storedHash}`,
+      name: path.basename(filePath),
+      size: originalBuffer.length,
+      storedSize: storedBuffer.length,
+      hash: storedHash,
+      rootHash: tree.root,
+      uploadedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      isEncrypted: privateFile,
+      visibility: privateFile ? 'private' : 'public',
+      isPublic: !privateFile,
+      encryption: secured.encryption,
+      mimeType: 'application/octet-stream',
+      folderId: targetFolder?.folderId || '',
+      parentFolderId: targetFolder?.folderId || '',
+      folderName: targetFolder?.name || String(payload.folderPath || ''),
+      folder: targetFolder?.name || String(payload.folderPath || ''),
+      chunkSize: CHUNK_SIZE_BYTES,
+      totalChunks: chunks.length,
+      ownerNodeId: node.peerId,
+      ownerWallet,
+      planId: walletState.planId,
+      replicas: [node.peerId],
+      chunks: chunkResults,
+    };
+
+    for (const chunkMeta of manifest.chunks) {
+      for (const peerId of chunkMeta.replicas || []) fileReplicas.add(peerId);
+    }
+
+    manifest.replicas = unique(Array.from(fileReplicas));
+
+    manifests = manifests.filter(
+      (m) => !(normalizeWallet(m.ownerWallet) === ownerWallet && m.hash === manifest.hash)
+    );
+
+    manifests.push(manifest);
+    persistManifests();
+    persistWallet();
+
+    await syncPush(manifest);
+    uploaded.push(manifest);
+
+    finishProgress('upload');
+  }
+
+  await syncPull();
+
+  return { ok: true, cancelled: false, files: uploaded, summary: networkSummary(), sync: lastSyncStatus };
+});
+
+ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+  await syncPull();
+
+  const node = ensureTransport({});
+  const manifest = findManifest(payload);
+
+  if (!manifest) throw new Error('File not found for this wallet');
+
+  const save = await dialog.showSaveDialog({
+    title: 'Download file',
+    defaultPath: path.join(app.getPath('downloads'), safeOutputName(manifest.name || 'download')),
+  });
+
+  if (save.canceled || !save.filePath) {
+    return { ok: true, cancelled: true };
+  }
+
+  const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
+  const buffers = new Array(orderedChunks.length);
+  const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
+
+  createProgress('download', {
+    fileName: manifest.name,
+    totalBytes: Number(manifest.storedSize || manifest.size || 0),
+    totalChunks: orderedChunks.length,
+    concurrency: downloadConcurrency,
+  });
+
+  try {
+    await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+      const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+      let chunk = local;
+
+      if (!chunk) {
+        try {
+          chunk = await node.fetchChunkFromNetwork(meta.hash);
+        } catch (error) {
+          console.warn('[p2p:downloadToPath] network fetch failed, trying safety peer:', error?.message || error);
+          chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
+        }
+      }
+
+      node.storeLocalChunk?.(chunk);
+
+      const buffer = Buffer.from(chunk.data, 'base64');
+
+      if (hashBufferHex(buffer) !== meta.hash) {
+        throw new Error(`Chunk integrity failed: ${meta.hash}`);
+      }
+
+      buffers[meta.index] = buffer;
+      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+    });
+  } catch (error) {
+    finishProgress('download', 'error', error?.message || String(error));
+    throw error;
+  }
+
+  const storedBuffer = Buffer.concat(buffers);
+
+  if (hashBufferHex(storedBuffer) !== manifest.hash) {
+    throw new Error('File integrity failed');
+  }
+
+  const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
+  const outputBuffer = manifest.isEncrypted
+    ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword)
+    : storedBuffer;
+
+  fs.writeFileSync(save.filePath, outputBuffer);
+
+  finishProgress('download');
+
+  return { ok: true, cancelled: false, path: save.filePath, file: manifest, progress: transferProgress.download };
+});
+
 ipcMain.handle('p2p:networkSummary', async () => {
   loadWallet();
   loadManifests();
@@ -656,6 +1124,8 @@ ipcMain.handle('p2p:networkSummary', async () => {
 
   return networkSummary();
 });
+
+
 ipcMain.handle('p2p:bootstrapNow', async () => ({ ok: true, summary: networkSummary() }));
 ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId = String(payload.peerId || '').trim(); const url = String(payload.url || '').trim(); if (!peerId || !/^wss?:\/\//i.test(url)) throw new Error('peerId and ws:// URL are required'); const result = ensureTransport({}).connectPeer({ peerId, url }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:repair', async () => { assertVerifiedWallet(); const node = ensureTransport({}); const own = walletManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
