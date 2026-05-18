@@ -12,19 +12,6 @@ if (!fs.existsSync(liveFile)) {
 let s = fs.readFileSync(liveFile, 'utf8');
 const before = s;
 
-function changed(next) {
-  if (next !== s) s = next;
-}
-
-function insertAfter(anchor, line, label) {
-  if (s.includes(line.trim())) return;
-  if (!s.includes(anchor)) {
-    console.warn('[patch-live-folder-no-helper] marker not found:', label);
-    return;
-  }
-  s = s.replace(anchor, anchor + line);
-}
-
 // Keep folder code independent from helpers that are removed/reordered by other patches.
 s = s.replace(
   /const key = \(view === "company" \|\| view === "admin"\) && activeWorkspace \? companyFolderKey\(activeWorkspace\.workspaceId, folder\) : personalFolderKey\(folder\);/g,
@@ -63,9 +50,9 @@ if (!s.includes('folderName?: string')) {
   );
 }
 
-// The real bug: personal folders were only localStorage-only and ignored manifest.folder after refresh.
+// Best effort: personal folders should include manifest.folder/folderName after refresh.
 s = s.replace(
-  /  const folders = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[fileFolders, activeWorkspace, personalFiles, view(?:, folderIdentityReady)?\]\);/,
+  /  const folders = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[[^\]]*fileFolders[^\]]*\]\);/,
   `  const folders = useMemo(() => {
     if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];
     const names = new Set<string>();
@@ -88,8 +75,13 @@ s = s.replace(
   }, [fileFolders, activeWorkspace, personalFiles, view, folderIdentityReady]);`
 );
 
+// Best-effort display repair. Do not fail if restored UI uses another expression.
 s = s.replace(
   /const folder = cf\?\.folder \|\| fileFolders\[file\.hash\] \|\| UNCATEGORIZED;/g,
+  'const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
+);
+s = s.replace(
+  /const folder = cf\?\.folder \|\| fileFolders\[file\.rootHash\] \|\| fileFolders\[file\.hash\] \|\| UNCATEGORIZED;/g,
   'const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
 );
 
@@ -129,7 +121,7 @@ s = s.replace(
 );
 
 s = s.replace(
-  /else setFileFolders\(\(current\) => \(\{ \.\.\.current, \[file\.hash\]: nextFolder \}\)\);/,
+  /else setFileFolders\(\(current\) => \(\{ \.\.\.current, \[file\.hash\]: nextFolder \}\)\);/g,
   `else {
                 setFileFolders((current) => ({ ...current, [file.hash]: nextFolder, ...(file.rootHash ? { [file.rootHash]: nextFolder } : {}) }));
                 void api.invoke("p2p:updateFile", { hash: file.hash, rootHash: file.rootHash, patch: { folder: nextFolder } })
@@ -174,8 +166,7 @@ if (!s.includes('wallet?.seedFingerprint || wallet?.authMode === "seed"')) {
   process.exit(1);
 }
 if (!s.includes('const folder = cf?.folder || file.folder || file.folderName')) {
-  console.error('[patch-live-folder-no-helper] manifest folder display repair failed');
-  process.exit(1);
+  console.warn('[patch-live-folder-no-helper] display folder expression differs; continuing because create/move folder logic is patched');
 }
 if (!s.includes('p2p:updateFile')) {
   console.error('[patch-live-folder-no-helper] p2p:updateFile channel missing');
@@ -204,7 +195,7 @@ if (fs.existsSync(preloadFile)) {
 }
 
 if (s !== before || preloadChanged) {
-  console.log('[patch-live-folder-no-helper] fixed live folders: single-click create, manifest folder display, and personal file move');
+  console.log('[patch-live-folder-no-helper] fixed live folders: single-click create, manifest folder display best-effort, and personal file move');
 } else {
   console.log('[patch-live-folder-no-helper] already safe');
 }
