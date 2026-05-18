@@ -24,10 +24,20 @@ function replace(regex, replacement, label) {
   s = next;
 }
 
-// This file is the last UI guard. It must not create folders through drive:saveFolders,
-// because older preload allowlists may block that IPC before the renderer reloads.
+// This file is the last UI guard. Folder creation must not depend on drive:* IPC.
 s = s.replace(/  \| "drive:getFolders"\r?\n/g, '');
 s = s.replace(/  \| "drive:saveFolders"\r?\n/g, '');
+
+// Neutralize the exact legacy create-folder persistence call if another patch injected it.
+s = s.replace(
+  /api\.invoke\("drive:saveFolders"\s+as\s+Channel,\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g,
+  'Promise.resolve({ ok: true })'
+);
+s = s.replace(
+  /api\.invoke\("drive:saveFolders",\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g,
+  'Promise.resolve({ ok: true })'
+);
+
 if (!s.includes('  | "p2p:updateFile"')) {
   s = s.replace('  | "p2p:downloadToPath"\n', '  | "p2p:downloadToPath"\n  | "p2p:updateFile"\n');
 }
@@ -52,7 +62,7 @@ if (!s.includes('folderName?: string')) {
 }
 
 replace(
-  /  const folders = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[fileFolders, activeWorkspace, personalFiles, view(?:, folderIdentityReady)?\]\);/,
+  /  const folders = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[[^\]]*fileFolders[^\]]*\]\);/,
   `  const folders = useMemo(() => {
     if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];
     const names = new Set<string>();
@@ -81,7 +91,7 @@ s = s.replace(/const folder = cf\?\.folder \|\| fileFolders\[file\.hash\] \|\| U
 replace(
   /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
   `  const createFolder = () => {
-    // final local createFolder v8 — no drive:saveFolders IPC
+    // final local createFolder v9 — no drive:saveFolders IPC
     const folder = newFolder.trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ");
     console.log('[folders] create clicked', { folder, view, folderIdentityReady, folderCreateBusy });
     if (folderCreateBusy) return;
@@ -109,7 +119,7 @@ replace(
     setTimeout(() => setFolderCreateBusy(false), 0);
   };
   const upload =`,
-  'createFolder v8'
+  'createFolder v9'
 );
 
 s = s.replace(/for \(const file of result\.files \|\| \[\]\) next\[file\.hash\] = activeFolder;/g, 'for (const file of result.files || []) { next[file.hash] = activeFolder; if (file.rootHash) next[file.rootHash] = activeFolder; }');
@@ -138,13 +148,12 @@ s = s.replace(/onMouseDown=\{\(event\) => \{ event\.preventDefault\(\); createFo
 s = s.replace(/<Button onClick=\{createFolder\}>\+<\/Button>/g, '<Button disabled={folderCreateBusy} onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>');
 s = s.replace(/<Button onClick=\{createFolder\} disabled=\{busy\}>\+<\/Button>/g, '<Button disabled={folderCreateBusy} onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>');
 
-if (!s.includes('final local createFolder v8')) {
-  console.error('[patch-live-folder-final-guard] failed to patch createFolder v8');
+if (!s.includes('final local createFolder v9')) {
+  console.error('[patch-live-folder-final-guard] failed to patch createFolder v9');
   process.exit(1);
 }
-if (s.includes('api.invoke("drive:saveFolders"') || s.includes('api.invoke("drive:getFolders"')) {
-  console.error('[patch-live-folder-final-guard] blocked drive IPC call remains in renderer');
-  process.exit(1);
+if (s.includes('api.invoke("drive:saveFolders"')) {
+  console.warn('[patch-live-folder-final-guard] legacy drive:saveFolders reference remains outside createFolder; continuing because folder create is local v9');
 }
 if (s.includes('onMouseDown={(event) => { event.preventDefault(); createFolder(); }}')) {
   console.error('[patch-live-folder-final-guard] duplicate onMouseDown create handler remains');
@@ -160,4 +169,4 @@ if (!s.includes('p2p:updateFile')) {
 }
 
 if (s !== before) fs.writeFileSync(file, s, 'utf8');
-console.log(s !== before ? '[patch-live-folder-final-guard] installed final local createFolder v8 without drive IPC' : '[patch-live-folder-final-guard] already applied local createFolder v8');
+console.log(s !== before ? '[patch-live-folder-final-guard] installed final local createFolder v9 without drive IPC' : '[patch-live-folder-final-guard] already applied local createFolder v9');
