@@ -40,23 +40,57 @@ if (!fs.existsSync(p)) {
   }
 }
 
+function normalizeParentExpression() {
+  return "  const requestedParentFolderIdRaw = String(payload.parentFolderId ?? '').trim();\n  const requestedParentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(requestedParentFolderIdRaw.toLowerCase()) ? '' : requestedParentFolderIdRaw;\n  const parentFolder = requestedParentFolderId ? findFolderById(requestedParentFolderId) : null;\n  if (requestedParentFolderId && !parentFolder) throw new Error('Parent folder not found');\n  const parentFolderId = parentFolder ? String(parentFolder.folderId || '') : '';";
+}
+
+function normalizeMoveParentExpression() {
+  return "  const requestedParentFolderIdRaw = String(payload.parentFolderId ?? '').trim();\n  const requestedParentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(requestedParentFolderIdRaw.toLowerCase()) ? '' : requestedParentFolderIdRaw;\n  const parentFolder = requestedParentFolderId ? findFolderById(requestedParentFolderId) : null;\n  const parentFolderId = parentFolder ? String(parentFolder.folderId || '') : '';\n  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');";
+}
+
+function patchRuntimeFolderParentContract(src) {
+  let next = src;
+
+  next = next.replace(
+    "function findFolderById(folderId = '') { return walletFolderManifests().find((folder) => folder.folderId === String(folderId || '')); }",
+    "function findFolderById(folderId = '') { const id = String(folderId || '').trim(); if (!id) return null; return walletFolderManifests().find((folder) => String(folder.folderId || '') === id || String(folder.id || '') === id || String(folder.hash || '') === id || String(folder.rootHash || '') === id); }"
+  );
+
+  next = next.replace(
+    "  const parentFolderId = String(payload.parentFolderId || '');\n  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');",
+    normalizeParentExpression()
+  );
+
+  next = next.replace(
+    "  const parentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(String(payload.parentFolderId ?? '').trim().toLowerCase()) ? '' : String(payload.parentFolderId || '').trim();\n  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');",
+    normalizeParentExpression()
+  );
+
+  next = next.replace(
+    "  const requestedParentFolderIdRaw = String(payload.parentFolderId ?? '').trim();\n  const requestedParentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(requestedParentFolderIdRaw.toLowerCase()) ? '' : requestedParentFolderIdRaw;\n  const parentFolder = requestedParentFolderId ? findFolderById(requestedParentFolderId) : null;\n  if (requestedParentFolderId && !parentFolder) throw new Error('Parent folder not found');\n  const parentFolderId = parentFolder ? String(parentFolder.folderId || '') : '';",
+    normalizeParentExpression()
+  );
+
+  next = next.replace(
+    "  const parentFolderId = String(payload.parentFolderId || '');\n  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');",
+    normalizeMoveParentExpression()
+  );
+
+  next = next.replace(
+    "  const parentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(String(payload.parentFolderId ?? '').trim().toLowerCase()) ? '' : String(payload.parentFolderId || '').trim();\n  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');",
+    normalizeMoveParentExpression()
+  );
+
+  return next;
+}
+
 for (const file of [path.join(process.cwd(), 'electron', 'main.js'), path.join(process.cwd(), 'electron', 'main-stable.js')]) {
   if (!fs.existsSync(file)) continue;
   let src = fs.readFileSync(file, 'utf8');
   const before = src;
-
-  src = src.replace(
-    "  const parentFolderId = String(payload.parentFolderId || '');\n  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');",
-    "  const parentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(String(payload.parentFolderId ?? '').trim().toLowerCase()) ? '' : String(payload.parentFolderId || '').trim();\n  if (parentFolderId && !findFolderById(parentFolderId)) throw new Error('Parent folder not found');"
-  );
-
-  src = src.replace(
-    "  const parentFolderId = String(payload.parentFolderId || '');\n  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');",
-    "  const parentFolderId = ['', 'root', '/', 'null', 'undefined'].includes(String(payload.parentFolderId ?? '').trim().toLowerCase()) ? '' : String(payload.parentFolderId || '').trim();\n  const folder = findFolderById(folderId) || findFolderByName(payload.name || '');"
-  );
-
+  src = patchRuntimeFolderParentContract(src);
   if (src !== before) {
     fs.writeFileSync(file, src, 'utf8');
-    console.log(`[manifest-folder-panel-contract] normalized root parent in ${file}`);
+    console.log(`[manifest-folder-panel-contract] resolved folder parent references in ${file}`);
   }
 }
