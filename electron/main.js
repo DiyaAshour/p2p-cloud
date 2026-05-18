@@ -662,7 +662,10 @@ function safeOutputName(name = 'download') {
 function isFolderManifest(manifest = {}) {
   return (
     manifest.kind === 'folder' ||
+    manifest.type === 'folder' ||
     manifest.isFolder === true ||
+    manifest.name === '.p2p-folder' ||
+    Boolean(manifest.folderId && !manifest.chunks?.length) ||
     Boolean(manifest.folderId && String(manifest.hash || '').startsWith('folder:'))
   );
 }
@@ -739,7 +742,11 @@ function assertFolderMoveSafe(folderId, targetFolderId) {
   if (!folderId || !targetFolderId) return;
   if (folderId === targetFolderId) throw new Error('Cannot move folder into itself');
 
-  const folders = walletManifests().filter(isFolderManifest);
+  const folders = manifests
+  .filter(isUsableManifest)
+  .filter(canTouchManifest)
+  .filter(isFolderManifest);
+  
   let cursor = targetFolderId;
   const seen = new Set();
 
