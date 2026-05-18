@@ -996,9 +996,9 @@ const visibleFiles = useMemo(() => {
 
   const upload = () =>
     run(async () => {
-      if (!walletConnected) {
-        throw new Error("Connect wallet or sign in with Seed Account before uploading");
-      }
+      if (!identityConnected) {
+  throw new Error("Connect wallet or sign in with Seed Account before uploading");
+}
 
       if ((view === "company" || view === "admin") && !activeWorkspace) {
         throw new Error("Create or select a company first");
@@ -1454,7 +1454,7 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
               {identityLabel}
             </Badge>
 
-            {walletConnected ? (
+            {identityConnected ? (
               <Button variant="outline" size="sm" onClick={disconnectWallet} disabled={busy}>
                 Disconnect
               </Button>
