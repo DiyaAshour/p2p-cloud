@@ -53,6 +53,30 @@ function ensureDriveFoldersState(src) {
   return src;
 }
 
+function patchFolderListUi(src) {
+  if (src.includes('renameFolder(folder)') && src.includes('moveFolder(folder)') && src.includes('deleteFolder(folder)')) return src;
+  const newFolderList = `              {folders.map((folder) => (
+                <div key={folder} className={\`rounded-xl \${activeFolder === folder ? "bg-zinc-800" : "hover:bg-zinc-800/60"}\`}>
+                  <button onClick={() => setActiveFolder(folder)} className={\`block w-full px-4 py-3 text-left text-sm \${activeFolder === folder ? "text-zinc-50" : "text-zinc-400"}\`}>
+                    <FolderOpen className="mr-2 inline size-4" />{folder}
+                  </button>
+                  {view === "personal" && folder !== ALL_FILES && folder !== UNCATEGORIZED && (
+                    <div className="flex flex-wrap gap-1 px-3 pb-3">
+                      <Button variant="outline" size="sm" onClick={() => renameFolder(folder)} disabled={busy}>Rename</Button>
+                      <Button variant="outline" size="sm" onClick={() => moveFolder(folder)} disabled={busy}>Move</Button>
+                      <Button variant="destructive" size="sm" onClick={() => deleteFolder(folder)} disabled={busy}>Delete</Button>
+                    </div>
+                  )}
+                </div>
+              ))}`;
+  const oldExact = `              {folders.map((folder) => (\n                <button key={folder} onClick={() => setActiveFolder(folder)} className={\`block w-full rounded-xl px-4 py-3 text-left text-sm \${activeFolder === folder ? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800/60"}\`}>\n                  <FolderOpen className="mr-2 inline size-4" />{folder}\n                </button>\n              ))}`;
+  if (src.includes(oldExact)) return src.replace(oldExact, newFolderList);
+  const broad = /              \{folders\.map\(\(folder\) => \([\s\S]*?              \)\)\}/;
+  if (broad.test(src)) return src.replace(broad, newFolderList);
+  console.warn('[live-network-folders] could not patch folder list UI; actions may not be visible');
+  return src;
+}
+
 function patch() {
   let src = fs.readFileSync(livePath, 'utf8');
   const before = src;
@@ -142,9 +166,7 @@ function patch() {
     src = src.replace('  const upload = () => run(async () => {', '  const renameFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    const name = window.prompt("New folder name", folder.name)?.trim();\n    if (!name || name === folder.name) return;\n    await api.invoke("p2p:renameItem", { itemId: folder.id || folder.folderId || folder.hash, name });\n    if (activeFolder === folderName) setActiveFolder(name);\n    await refresh();\n    toast.success("Folder renamed");\n  });\n  const moveFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    const targetName = window.prompt("Move to folder name. Leave empty for root", "")?.trim() || "";\n    const target = targetName ? folderByName(targetName) : null;\n    if (targetName && !target) throw new Error("Target folder not found");\n    await api.invoke("p2p:moveItem", { itemId: folder.id || folder.folderId || folder.hash, targetFolderId: target?.folderId || null });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder moved");\n  });\n  const deleteFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    if (!window.confirm(`Delete folder ${folder.name} and its contents from manifests? Chunks/encryption are not modified.`)) return;\n    await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder deleted");\n  });\n  const upload = () => run(async () => {');
   }
 
-  const oldFolderList = `              {folders.map((folder) => (\n                <button key={folder} onClick={() => setActiveFolder(folder)} className={\`block w-full rounded-xl px-4 py-3 text-left text-sm \${activeFolder === folder ? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800/60"}\`}>\n                  <FolderOpen className="mr-2 inline size-4" />{folder}\n                </button>\n              ))}`;
-  const newFolderList = `              {folders.map((folder) => (\n                <div key={folder} className={\`rounded-xl \${activeFolder === folder ? "bg-zinc-800" : "hover:bg-zinc-800/60"}\`}>\n                  <button onClick={() => setActiveFolder(folder)} className={\`block w-full px-4 py-3 text-left text-sm \${activeFolder === folder ? "text-zinc-50" : "text-zinc-400"}\`}>\n                    <FolderOpen className="mr-2 inline size-4" />{folder}\n                  </button>\n                  {view === "personal" && folder !== ALL_FILES && folder !== UNCATEGORIZED && (\n                    <div className="flex flex-wrap gap-1 px-3 pb-3">\n                      <Button variant="outline" size="sm" onClick={() => renameFolder(folder)} disabled={busy}>Rename</Button>\n                      <Button variant="outline" size="sm" onClick={() => moveFolder(folder)} disabled={busy}>Move</Button>\n                      <Button variant="destructive" size="sm" onClick={() => deleteFolder(folder)} disabled={busy}>Delete</Button>\n                    </div>\n                  )}\n                </div>\n              ))}`;
-  src = src.replace(oldFolderList, newFolderList);
+  src = patchFolderListUi(src);
 
   if (src !== before) {
     fs.writeFileSync(livePath, src, 'utf8');
