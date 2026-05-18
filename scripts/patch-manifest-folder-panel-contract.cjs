@@ -13,6 +13,15 @@ if (!fs.existsSync(p)) {
     'function idOf(folder?: DriveFolder | null) {\n  return String(folder?.folderId || "");\n}\n\nfunction itemIdOf(folder?: DriveFolder | null) {\n  return String(folder?.id || folder?.folderId || folder?.hash || folder?.rootHash || "");\n}'
   );
 
+  if (s.includes('itemIdOf(') && !s.includes('function itemIdOf(')) {
+    const idOfBlock = /function idOf\(folder\?: DriveFolder \| null\) \{\r?\n  return String\([^\n]+\);\r?\n\}/;
+    if (idOfBlock.test(s)) {
+      s = s.replace(idOfBlock, (match) => `${match}\n\nfunction itemIdOf(folder?: DriveFolder | null) {\n  return String(folder?.id || folder?.folderId || folder?.hash || folder?.rootHash || "");\n}`);
+    } else {
+      console.warn('[manifest-folder-panel-contract] warning: itemIdOf is used but idOf block was not found');
+    }
+  }
+
   s = s.replace(
     '      const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", {\n        name,\n        parentFolderId: activeFolderId || "",\n      });',
     '      const parentFolderId = activeFolderId && byId.has(activeFolderId) ? activeFolderId : "";\n      const payload = parentFolderId ? { name, parentFolderId } : { name };\n      const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", payload);'
@@ -34,9 +43,9 @@ if (!fs.existsSync(p)) {
 
   if (s !== before) {
     fs.writeFileSync(p, s, 'utf8');
-    console.log('[manifest-folder-panel-contract] enforced folderId-only parent contract');
+    console.log('[manifest-folder-panel-contract] enforced folderId/itemId contract');
   } else {
-    console.log('[manifest-folder-panel-contract] folderId-only parent contract already valid');
+    console.log('[manifest-folder-panel-contract] folderId/itemId contract already valid');
   }
 }
 
