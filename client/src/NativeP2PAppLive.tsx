@@ -983,48 +983,62 @@ const visibleFiles = useMemo(() => {
     });
 
   const renameFolder = (folder: DriveFolder) =>
-    run(async () => {
-      const name = window.prompt("New folder name", folder.name)?.trim();
-      if (!name || name === folder.name) return;
+  run(async () => {
+    const name = (
+      await askText({
+        title: "Rename Folder",
+        message: `Rename "${folder.name}"`,
+        defaultValue: folder.name,
+        placeholder: "New folder name",
+        confirmText: "Rename",
+      })
+    )?.trim();
 
-      await api.invoke("p2p:renameItem", { itemId: folder.folderId, name });
-      await refresh();
+    if (!name || name === folder.name) return;
 
-      if (activeFolderId === folder.folderId) {
-        setActiveFolder(name);
-      }
+    await api.invoke("p2p:renameItem", { itemId: folder.folderId, name });
+    await refresh();
 
-      toast.success("Folder renamed");
-    });
+    if (activeFolderId === folder.folderId) {
+      setActiveFolder(name);
+    }
+
+    toast.success("Folder renamed");
+  });
 
   const moveFolder = (folder: DriveFolder) =>
-    run(async () => {
-      const target = window.prompt(
-        `Move "${folderPath(folder)}" inside folder.\n\nLeave empty = Root\nType folder name or full path = move inside it`,
-        ""
-      );
+  run(async () => {
+    const target = await askText({
+      title: "Move Folder",
+      message: `Move "${folderPath(folder)}" inside folder.
 
-      if (target === null) return;
-
-      const targetFolder = folderByNameOrPath(target);
-      const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
-
-      if (target.trim() && !targetFolder) {
-        throw new Error("Target folder not found");
-      }
-
-      if (targetFolderId === folder.folderId) {
-        throw new Error("Cannot move folder into itself");
-      }
-
-      await api.invoke("p2p:moveItem", {
-        itemId: folder.folderId,
-        targetFolderId,
-      });
-
-      await refresh();
-      toast.success("Folder moved");
+Leave empty = Root
+Type folder name or full path = move inside it`,
+      placeholder: "Target folder name/path",
+      confirmText: "Move",
     });
+
+    if (target === null) return;
+
+    const targetFolder = folderByNameOrPath(target);
+    const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
+
+    if (target.trim() && !targetFolder) {
+      throw new Error("Target folder not found");
+    }
+
+    if (targetFolderId === folder.folderId) {
+      throw new Error("Cannot move folder into itself");
+    }
+
+    await api.invoke("p2p:moveItem", {
+      itemId: folder.folderId,
+      targetFolderId,
+    });
+
+    await refresh();
+    toast.success("Folder moved");
+  });
 
   const deleteFolder = (folder: DriveFolder) =>
   run(async () => {
