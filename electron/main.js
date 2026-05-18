@@ -53,7 +53,7 @@ let walletState = { connected: false, verified: false, address: '', planId: 'fre
 let lastSyncStatus = { ok: false, lastPulledAt: null, lastPushedAt: null, error: null, remoteFiles: 0 };
 
 function normalizeWallet(address = '') { return String(address || '').trim().toLowerCase(); }
-function activeWallet() { return normalizeWallet(walletState.address); }
+function activeWallet() { return normalizeWallet(walletState.accountId || walletState.address); }
 function isValidWallet(address = '') { return /^0x[a-fA-F0-9]{40}$/.test(String(address).trim()); }
 function isVerifiedSeedIdentity() {
   const accountId = String(walletState.accountId || walletState.address || '');
