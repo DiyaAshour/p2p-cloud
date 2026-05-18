@@ -23,6 +23,29 @@ if (!looksComplete) {
   process.exit(0);
 }
 
+function ensureIdentityContract(source) {
+  const identityBlock = [
+    '  const walletConnected = Boolean(wallet?.connected && wallet?.authMode !== "seed" && (wallet.accountId || wallet.address));',
+    '  const seedConnected = Boolean(wallet?.connected && wallet?.authMode === "seed" && (wallet.accountId || wallet.username || wallet.seedFingerprint));',
+    '  const identityConnected = Boolean(walletConnected || seedConnected);',
+    '  const identityLabel = seedConnected ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}` : walletConnected ? short(wallet?.address || wallet?.accountId || "") : "Guest";',
+  ].join('\n');
+
+  const blockPattern = /  const walletConnected = Boolean\([^\n]+\);\r?\n(?:  const seedConnected = Boolean\([^\n]+\);\r?\n)?(?:  const identityConnected = Boolean\([^\n]+\);\r?\n)?  const identityLabel = [^\n]+;\r?\n/;
+  if (blockPattern.test(source)) {
+    return source.replace(blockPattern, identityBlock + '\n');
+  }
+
+  if (source.includes('identityConnected') && !source.includes('const identityConnected = Boolean(walletConnected || seedConnected);')) {
+    const walletLine = /  const walletConnected = Boolean\([^\n]+\);\r?\n/;
+    if (walletLine.test(source)) return source.replace(walletLine, identityBlock + '\n');
+  }
+
+  return source;
+}
+
+src = ensureIdentityContract(src);
+
 if (!src.includes('import ManifestFolderPanel from "./ManifestFolderPanel";')) {
   src = src.replace('import { toast } from "sonner";', 'import { toast } from "sonner";\nimport ManifestFolderPanel from "./ManifestFolderPanel";');
 }
@@ -40,9 +63,13 @@ if (!src.includes('<ManifestFolderPanel api={api}')) {
   }
 }
 
+if (src.includes('identityConnected') && !src.includes('const identityConnected = Boolean(walletConnected || seedConnected);')) {
+  console.warn('[folder-panel-shell] warning: identityConnected is referenced without definition');
+}
+
 if (src !== before) {
   fs.writeFileSync(livePath, src, 'utf8');
-  console.log('[folder-panel-shell] mounted isolated ManifestFolderPanel');
+  console.log('[folder-panel-shell] mounted isolated ManifestFolderPanel and enforced identity contract');
 } else {
-  console.log('[folder-panel-shell] already mounted or no complete UI to patch');
+  console.log('[folder-panel-shell] already mounted and identity contract is valid');
 }
