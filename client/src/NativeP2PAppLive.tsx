@@ -399,13 +399,23 @@ export default function NativeP2PAppLive() {
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
 
-  const walletConnected = Boolean(wallet?.connected && (wallet.accountId || wallet.address));
-  const identityLabel =
-    wallet?.authMode === "seed"
-      ? `Seed: ${wallet.username || short(wallet.accountId || wallet.address)}`
-      : walletConnected
-        ? short(wallet?.address || wallet?.accountId || "")
-        : "Guest";
+  const walletConnected = Boolean(
+  wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
+);
+
+const seedConnected = Boolean(
+  wallet?.connected &&
+    wallet.authMode === "seed" &&
+    (wallet.accountId || wallet.username || wallet.seedFingerprint)
+);
+
+const identityConnected = walletConnected || seedConnected;
+
+const identityLabel = seedConnected
+  ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}`
+  : walletConnected
+    ? short(wallet?.address || wallet?.accountId || "")
+    : "Guest";
 
   const workspaces = company?.workspaces || [];
   const activeWorkspace =
