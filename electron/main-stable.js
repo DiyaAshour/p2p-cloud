@@ -48,7 +48,7 @@ let lastAutoRepairStatus = { ok: true, active: false, intervalMs: 10_800_000, la
 let walletState = { connected: false, verified: false, address: '', planId: 'free', connectedAt: null, verifiedAt: null, paidUntil: null, subscriptionTx: null, encryptionKeySource: ENCRYPTION_KEY_SOURCE };
 
 function normalizeWallet(address = '') { return String(address || '').trim().toLowerCase(); }
-function activeWallet() { return normalizeWallet(walletState.address); }
+function activeWallet() { return normalizeWallet(walletState.accountId || walletState.address); }
 function isValidWallet(address = '') { return /^0x[a-fA-F0-9]{40}$/.test(String(address).trim()); }
 function nowSeconds() { return Math.floor(Date.now() / 1000); }
 function hashBufferHex(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
