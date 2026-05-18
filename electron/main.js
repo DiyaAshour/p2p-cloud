@@ -55,7 +55,23 @@ let lastSyncStatus = { ok: false, lastPulledAt: null, lastPushedAt: null, error:
 function normalizeWallet(address = '') { return String(address || '').trim().toLowerCase(); }
 function activeWallet() { return normalizeWallet(walletState.address); }
 function isValidWallet(address = '') { return /^0x[a-fA-F0-9]{40}$/.test(String(address).trim()); }
-function assertVerifiedWallet() { if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) throw new Error('Verified wallet required. Connect wallet first.'); }
+function isVerifiedSeedIdentity() {
+  const accountId = String(walletState.accountId || walletState.address || '');
+  return Boolean(
+    walletState.connected &&
+    walletState.verified &&
+    walletState.authMode === 'seed' &&
+    accountId.startsWith('seed:')
+  );
+}
+
+function assertVerifiedWallet() {
+  if (isVerifiedSeedIdentity()) return;
+
+  if (!walletState.connected || !walletState.verified || !isValidWallet(walletState.address)) {
+    throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
+  }
+}
 function nowSeconds() { return Math.floor(Date.now() / 1000); }
 function hashBufferHex(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function firstLanAddress() { const nets = os.networkInterfaces(); for (const list of Object.values(nets)) for (const net of list || []) if (net && !net.internal && net.family === 'IPv4' && !net.address.startsWith('169.254.')) return net.address; return '127.0.0.1'; }
