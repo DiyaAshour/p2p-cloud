@@ -32,6 +32,23 @@ if (!s.includes('const folderIdentityReady =')) {
   );
 }
 
+// Some restore patches leave useEffects that depend on folderStorageKey while removing its const.
+// Always re-inject it before any useEffect can read it.
+if (!s.includes('const folderStorageKey =')) {
+  const withFolderIdentity = s.replace(
+    /(  const folderIdentityReady = Boolean\([^\n]*\);\r?\n)/,
+    '$1  const folderStorageKey = `${FILE_FOLDERS_KEY}.${identityStorageId(wallet)}`;\n'
+  );
+  if (withFolderIdentity !== s) {
+    s = withFolderIdentity;
+  } else {
+    s = s.replace(
+      /(  const identityLabel = [^\n]*;\r?\n)/,
+      '$1  const folderStorageKey = `${FILE_FOLDERS_KEY}.${identityStorageId(wallet)}`;\n'
+    );
+  }
+}
+
 if (!s.includes('const [folderCreateBusy, setFolderCreateBusy]')) {
   s = s.replace(
     /(  const \[newFolder, setNewFolder\] = useState\(""\);\r?\n)/,
@@ -165,6 +182,10 @@ if (!s.includes('wallet?.seedFingerprint || wallet?.authMode === "seed"')) {
   console.error('[patch-live-folder-no-helper] folderIdentityReady repair failed');
   process.exit(1);
 }
+if (!s.includes('const folderStorageKey =')) {
+  console.error('[patch-live-folder-no-helper] folderStorageKey injection failed');
+  process.exit(1);
+}
 if (!s.includes('const folder = cf?.folder || file.folder || file.folderName')) {
   console.warn('[patch-live-folder-no-helper] display folder expression differs; continuing because create/move folder logic is patched');
 }
@@ -195,7 +216,7 @@ if (fs.existsSync(preloadFile)) {
 }
 
 if (s !== before || preloadChanged) {
-  console.log('[patch-live-folder-no-helper] fixed live folders: single-click create, manifest folder display best-effort, and personal file move');
+  console.log('[patch-live-folder-no-helper] fixed live folders: folderStorageKey, single-click create, manifest display best-effort, and personal file move');
 } else {
   console.log('[patch-live-folder-no-helper] already safe');
 }
