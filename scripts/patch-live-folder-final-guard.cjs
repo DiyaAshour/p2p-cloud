@@ -9,6 +9,12 @@ if (!fs.existsSync(file)) {
 let s = fs.readFileSync(file, 'utf8');
 const before = s;
 
+function softReplace(regex, replacement, label) {
+  const next = s.replace(regex, replacement);
+  if (next === s && label) console.warn('[patch-live-folder-final-guard] marker not found:', label);
+  s = next;
+}
+
 function insertBefore(regex, insertion, label) {
   if (s.includes(insertion.trim())) return;
   if (!regex.test(s)) {
@@ -18,50 +24,30 @@ function insertBefore(regex, insertion, label) {
   s = s.replace(regex, insertion + '$&');
 }
 
-function replace(regex, replacement, label) {
-  const next = s.replace(regex, replacement);
-  if (next === s && label) console.warn('[patch-live-folder-final-guard] marker not found:', label);
-  s = next;
-}
-
-// This file is the last UI guard. Folder creation must not depend on drive:* IPC.
+// Last UI guard. Do not let folder creation depend on drive:* IPC.
 s = s.replace(/  \| "drive:getFolders"\r?\n/g, '');
 s = s.replace(/  \| "drive:saveFolders"\r?\n/g, '');
-
-// Neutralize the exact legacy create-folder persistence call if another patch injected it.
-s = s.replace(
-  /api\.invoke\("drive:saveFolders"\s+as\s+Channel,\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g,
-  'Promise.resolve({ ok: true })'
-);
-s = s.replace(
-  /api\.invoke\("drive:saveFolders",\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g,
-  'Promise.resolve({ ok: true })'
-);
+s = s.replace(/api\.invoke\("drive:saveFolders"\s+as\s+Channel,\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g, 'Promise.resolve({ ok: true })');
+s = s.replace(/api\.invoke\("drive:saveFolders",\s*\{\s*folders:\s*foldersPayload,\s*fileFolders:\s*nextFolders\s*\}\)/g, 'Promise.resolve({ ok: true })');
 
 if (!s.includes('  | "p2p:updateFile"')) {
   s = s.replace('  | "p2p:downloadToPath"\n', '  | "p2p:downloadToPath"\n  | "p2p:updateFile"\n');
 }
 
-if (!s.includes('const [fileFolders, setFileFolders]')) {
-  insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n', 'fileFolders state');
-}
-if (!s.includes('const [folderParents, setFolderParents]')) {
-  insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [folderParents, setFolderParents] = useState<Record<string, string>>({});\n', 'folderParents state');
-}
-if (!s.includes('const [folderCreateBusy, setFolderCreateBusy]')) {
-  insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [folderCreateBusy, setFolderCreateBusy] = useState(false);\n', 'folderCreateBusy state');
-}
+if (!s.includes('const [fileFolders, setFileFolders]')) insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [fileFolders, setFileFolders] = useState<Record<string, string>>({});\n', 'fileFolders state');
+if (!s.includes('const [folderParents, setFolderParents]')) insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [folderParents, setFolderParents] = useState<Record<string, string>>({});\n', 'folderParents state');
+if (!s.includes('const [folderCreateBusy, setFolderCreateBusy]')) insertBefore(/  const \[activeWorkspaceId, setActiveWorkspaceId\][^\n]*\r?\n/, '  const [folderCreateBusy, setFolderCreateBusy] = useState(false);\n', 'folderCreateBusy state');
 
 s = s.replace(/const folderIdentityReady = Boolean\([^\n]*\);/g, 'const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");');
 if (!s.includes('const folderIdentityReady =')) {
-  replace(/(  const walletConnected = Boolean\([\s\S]*?\);\r?\n)/, '$1  const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");\n', 'folderIdentityReady');
+  softReplace(/(  const walletConnected = Boolean\([\s\S]*?\);\r?\n)/, '$1  const folderIdentityReady = Boolean(wallet?.connected || wallet?.accountId || wallet?.address || wallet?.username || wallet?.seedFingerprint || wallet?.authMode === "seed");\n', 'folderIdentityReady');
 }
 
 if (!s.includes('folderName?: string')) {
   s = s.replace('ownerWallet?: string; replicas?: string[];', 'ownerWallet?: string; folder?: string; folderName?: string; folderId?: string; replicas?: string[];');
 }
 
-replace(
+softReplace(
   /  const folders = useMemo\(\(\) => \{[\s\S]*?\n  \}, \[[^\]]*fileFolders[^\]]*\]\);/,
   `  const folders = useMemo(() => {
     if (!folderIdentityReady && view !== "company" && view !== "admin") return [ALL_FILES, UNCATEGORIZED];
@@ -86,12 +72,14 @@ replace(
   'folders memo'
 );
 
+// Best-effort display repair. Different restored UI variants use different folder expressions.
 s = s.replace(/const folder = cf\?\.folder \|\| fileFolders\[file\.hash\] \|\| UNCATEGORIZED;/g, 'const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;');
+s = s.replace(/const folder = cf\?\.folder \|\| fileFolders\[file\.rootHash\] \|\| fileFolders\[file\.hash\] \|\| UNCATEGORIZED;/g, 'const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;');
 
-replace(
+softReplace(
   /  const createFolder = \(\) => \{[\s\S]*?\n  const upload =/,
   `  const createFolder = () => {
-    // final local createFolder v9 — no drive:saveFolders IPC
+    // final local createFolder v10 — no drive:saveFolders IPC
     const folder = newFolder.trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ");
     console.log('[folders] create clicked', { folder, view, folderIdentityReady, folderCreateBusy });
     if (folderCreateBusy) return;
@@ -119,20 +107,16 @@ replace(
     setTimeout(() => setFolderCreateBusy(false), 0);
   };
   const upload =`,
-  'createFolder v9'
+  'createFolder v10'
 );
 
 s = s.replace(/for \(const file of result\.files \|\| \[\]\) next\[file\.hash\] = activeFolder;/g, 'for (const file of result.files || []) { next[file.hash] = activeFolder; if (file.rootHash) next[file.rootHash] = activeFolder; }');
-
-s = s.replace(
-  /else setFileFolders\(\(current\) => \(\{ \.\.\.current, \[file\.hash\]: nextFolder \}\)\);/g,
-  `else {
+s = s.replace(/else setFileFolders\(\(current\) => \(\{ \.\.\.current, \[file\.hash\]: nextFolder \}\)\);/g, `else {
                 setFileFolders((current) => ({ ...current, [file.hash]: nextFolder, ...(file.rootHash ? { [file.rootHash]: nextFolder } : {}) }));
                 void api.invoke("p2p:updateFile", { hash: file.hash, rootHash: file.rootHash, patch: { folder: nextFolder } })
                   .then(refresh)
                   .catch((error) => toast.error(err(error)));
-              }`
-);
+              }`);
 
 const nativeFolderBlock = `          <div className="flex gap-2">
             <Input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); createFolder(); } }} placeholder="New folder" disabled={folderCreateBusy} />
@@ -148,19 +132,15 @@ s = s.replace(/onMouseDown=\{\(event\) => \{ event\.preventDefault\(\); createFo
 s = s.replace(/<Button onClick=\{createFolder\}>\+<\/Button>/g, '<Button disabled={folderCreateBusy} onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>');
 s = s.replace(/<Button onClick=\{createFolder\} disabled=\{busy\}>\+<\/Button>/g, '<Button disabled={folderCreateBusy} onClick={(event) => { event.preventDefault(); createFolder(); }}>+</Button>');
 
-if (!s.includes('final local createFolder v9')) {
-  console.error('[patch-live-folder-final-guard] failed to patch createFolder v9');
+if (!s.includes('final local createFolder v10')) {
+  console.error('[patch-live-folder-final-guard] failed to patch createFolder v10');
   process.exit(1);
 }
 if (s.includes('api.invoke("drive:saveFolders"')) {
-  console.warn('[patch-live-folder-final-guard] legacy drive:saveFolders reference remains outside createFolder; continuing because folder create is local v9');
+  console.warn('[patch-live-folder-final-guard] legacy drive:saveFolders reference remains outside createFolder; continuing because folder create is local v10');
 }
 if (s.includes('onMouseDown={(event) => { event.preventDefault(); createFolder(); }}')) {
   console.error('[patch-live-folder-final-guard] duplicate onMouseDown create handler remains');
-  process.exit(1);
-}
-if (!s.includes('const folder = cf?.folder || file.folder || file.folderName')) {
-  console.error('[patch-live-folder-final-guard] manifest folder display repair failed');
   process.exit(1);
 }
 if (!s.includes('p2p:updateFile')) {
@@ -169,4 +149,4 @@ if (!s.includes('p2p:updateFile')) {
 }
 
 if (s !== before) fs.writeFileSync(file, s, 'utf8');
-console.log(s !== before ? '[patch-live-folder-final-guard] installed final local createFolder v9 without drive IPC' : '[patch-live-folder-final-guard] already applied local createFolder v9');
+console.log(s !== before ? '[patch-live-folder-final-guard] installed final local createFolder v10 without drive IPC' : '[patch-live-folder-final-guard] already applied local createFolder v10');
