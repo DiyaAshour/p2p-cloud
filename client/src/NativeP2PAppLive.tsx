@@ -191,6 +191,10 @@ declare global {
 const ALL_FILES = "All files";
 const UNCATEGORIZED = "Uncategorized";
 const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";
+const WALLETCONNECT_PROJECT_ID =
+  (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID || "";
+
+const WALLETCONNECT_CHAIN_ID = "eip155:1"; // Ethereum Mainnet
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function getBridge(): Bridge | null {
@@ -695,21 +699,79 @@ const visibleFiles = useMemo(() => {
   };
 
     const connectWallet = () =>
-    run(async () => {
-      const address = (
-        await askText({
-          title: "Connect Wallet",
-          message: "Enter wallet address",
-          placeholder: "0x...",
-          confirmText: "Connect",
-        })
-      )?.trim();
+  run(async () => {
+    if (!WALLETCONNECT_PROJECT_ID) {
+      throw new Error("Missing VITE_WALLETCONNECT_PROJECT_ID in .env");
+    }
 
-      if (!address) return;
-
-      setWallet(await api.invoke<WalletState>("wallet:connect", { address }));
-      await refresh();
+    const signClient = await SignClient.init({
+      projectId: WALLETCONNECT_PROJECT_ID,
+      metadata: {
+        name: "Chunknet",
+        description: "Chunknet P2P Cloud Wallet Login",
+        url: "https://chunknet.local",
+        icons: [],
+      },
     });
+
+    const modal = new WalletConnectModal({
+      projectId: WALLETCONNECT_PROJECT_ID,
+      chains: [WALLETCONNECT_CHAIN_ID],
+    });
+
+    const { uri, approval } = await signClient.connect({
+      requiredNamespaces: {
+        eip155: {
+          methods: ["personal_sign"],
+          chains: [WALLETCONNECT_CHAIN_ID],
+          events: ["accountsChanged", "chainChanged"],
+        },
+      },
+    });
+
+    if (uri) {
+      await modal.openModal({ uri });
+    }
+
+    const session = await approval();
+    modal.closeModal();
+
+    const account = session.namespaces.eip155?.accounts?.[0];
+    if (!account) {
+      throw new Error("No wallet account returned from WalletConnect");
+    }
+
+    const address = account.split(":").pop()?.toLowerCase();
+    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new Error("Invalid wallet address returned from WalletConnect");
+    }
+
+    const loginMessage = [
+      "p2p.cloud login",
+      `Wallet: ${address}`,
+      `Time: ${new Date().toISOString()}`,
+      "Purpose: unlock encrypted P2P cloud storage",
+    ].join("\n");
+
+    const signature = await signClient.request<string>({
+      topic: session.topic,
+      chainId: WALLETCONNECT_CHAIN_ID,
+      request: {
+        method: "personal_sign",
+        params: [loginMessage, address],
+      },
+    });
+
+    setWallet(
+      await api.invoke<WalletState>("wallet:connect", {
+        address,
+        loginMessage,
+        signature,
+      })
+    );
+
+    await refresh();
+  });
 
   const seedLogin = () =>
     run(async () => {
