@@ -53,6 +53,33 @@ function ensureDriveFoldersState(src) {
   return src;
 }
 
+const networkFoldersMemo = `  const folders = useMemo(() => {
+    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];
+    const personalManifestFolders = personalFiles.map((file) => file.folder || file.folderName).filter(Boolean) as string[];
+    const networkFolders = driveFolders.map((folder) => folder.name).filter(Boolean);
+    const localFolders = Object.values(fileFolders).filter(Boolean);
+    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : [...networkFolders, ...personalManifestFolders, ...localFolders];
+    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];
+  }, [fileFolders, activeWorkspace, personalFiles, driveFolders, view]);`;
+
+function patchFoldersMemo(src) {
+  const marker = '  const folders = useMemo(() => {';
+  const start = src.indexOf(marker);
+  if (start === -1) {
+    console.warn('[live-network-folders] folders memo not found');
+    return src;
+  }
+  const nextMarker = '  const baseFiles =';
+  const end = src.indexOf(nextMarker, start);
+  if (end === -1) {
+    console.warn('[live-network-folders] folders memo end not found');
+    return src;
+  }
+  const current = src.slice(start, end);
+  if (current.includes('driveFolders') && current.includes('networkFolders')) return src;
+  return src.slice(0, start) + networkFoldersMemo + '\n' + src.slice(end);
+}
+
 function patchFolderListUi(src) {
   if (src.includes('renameFolder(folder)') && src.includes('moveFolder(folder)') && src.includes('deleteFolder(folder)')) return src;
   const newFolderList = `              {folders.map((folder) => (
@@ -110,19 +137,11 @@ function patch() {
   src = src.replace('if (!walletConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");', 'if (!identityConnected) throw new Error("Connect wallet or sign in with Seed Account before uploading");');
 
   src = ensureDriveFoldersState(src);
+  src = patchFoldersMemo(src);
 
   src = src.replace(
     '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
     '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setDriveFolders([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
-  );
-
-  src = src.replace(
-    '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set([...localFolders, ...workspaceFolders])).sort()];\n  }, [fileFolders, activeWorkspace]);',
-    '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalManifestFolders = personalFiles.map((file) => file.folder).filter(Boolean) as string[];\n    const networkFolders = driveFolders.map((folder) => folder.name).filter(Boolean);\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : [...networkFolders, ...personalManifestFolders, ...localFolders];\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, driveFolders, view]);'
-  );
-  src = src.replace(
-    '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalManifestFolders = personalFiles.map((file) => file.folder).filter(Boolean) as string[];\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : [...personalManifestFolders, ...localFolders];\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, view]);',
-    '    const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];\n    const personalManifestFolders = personalFiles.map((file) => file.folder).filter(Boolean) as string[];\n    const networkFolders = driveFolders.map((folder) => folder.name).filter(Boolean);\n    const localFolders = Object.values(fileFolders).filter(Boolean);\n    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : [...networkFolders, ...personalManifestFolders, ...localFolders];\n    return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];\n  }, [fileFolders, activeWorkspace, personalFiles, driveFolders, view]);'
   );
 
   if (!src.includes('const folderByName = (folderName: string)')) {
@@ -136,21 +155,21 @@ function patch() {
 
   src = src.replace(
     '      const folder = cf?.folder || fileFolders[file.hash] || UNCATEGORIZED;',
-    '      const folder = cf?.folder || file.folder || fileFolders[file.hash] || UNCATEGORIZED;'
+    '      const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
   );
   src = src.replace(
     '    const folder = cf?.folder || fileFolders[file.hash] || UNCATEGORIZED;',
-    '    const folder = cf?.folder || file.folder || fileFolders[file.hash] || UNCATEGORIZED;'
+    '    const folder = cf?.folder || file.folder || file.folderName || fileFolders[file.hash] || fileFolders[file.rootHash] || UNCATEGORIZED;'
   );
 
   src = src.replace(
     '    if (activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && result?.files?.length) {\n      setFileFolders((current) => {\n        const next = { ...current };\n        for (const file of result.files || []) next[file.hash] = activeFolder;\n        return next;\n      });\n    }',
-    '    if (activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && result?.files?.length) {\n      setFileFolders((current) => {\n        const next = { ...current };\n        for (const file of result.files || []) next[file.hash] = file.folder || activeFolder;\n        return next;\n      });\n    }'
+    '    if (activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED && result?.files?.length) {\n      setFileFolders((current) => {\n        const next = { ...current };\n        for (const file of result.files || []) { next[file.hash] = file.folder || activeFolder; if (file.rootHash) next[file.rootHash] = file.folder || activeFolder; }\n        return next;\n      });\n    }'
   );
 
   src = src.replace(
     '              if (match) void api.invoke("company:updateFile", { workspaceId: match.workspace.workspaceId, rootHash: match.companyFile.rootHash, patch: { folder: nextFolder } }).then(refresh);\n              else setFileFolders((current) => ({ ...current, [file.hash]: nextFolder }));',
-    '              if (match) void api.invoke("company:updateFile", { workspaceId: match.workspace.workspaceId, rootHash: match.companyFile.rootHash, patch: { folder: nextFolder } }).then(refresh);\n              else void api.invoke("p2p:updateFile", { hash: file.hash, patch: { folder: nextFolder } }).then(refresh);'
+    '              if (match) void api.invoke("company:updateFile", { workspaceId: match.workspace.workspaceId, rootHash: match.companyFile.rootHash, patch: { folder: nextFolder } }).then(refresh);\n              else void api.invoke("p2p:updateFile", { hash: file.hash, rootHash: file.rootHash, patch: { folder: nextFolder } }).then(refresh);'
   );
 
   src = src.replace(
