@@ -1,4 +1,5 @@
 const DEFAULT_MANIFEST_SYNC_URL = 'http://54.166.171.208:8790';
+const MANIFEST_SYNC_TIMEOUT_MS = Math.max(500, Number(process.env.P2P_MANIFEST_SYNC_TIMEOUT_MS || 2500));
 
 function normalizeBaseUrl(value = '') {
   return String(value || '').trim().replace(/\/$/, '');
@@ -28,6 +29,26 @@ function manifestSyncBaseUrl() {
     process.env.VITE_MANIFEST_SYNC_URL ||
     DEFAULT_MANIFEST_SYNC_URL
   );
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const timeoutMs = Math.max(500, Number(options.timeoutMs || MANIFEST_SYNC_TIMEOUT_MS));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`Manifest sync timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function isManifestSyncEnabled() {
@@ -90,7 +111,7 @@ async function parseJsonResponse(response) {
 export async function pullWalletManifests(walletAddress) {
   const identity = normalizeIdentity(walletAddress);
   if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync pull');
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`);
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`);
   const data = await parseJsonResponse(response);
   const incoming = Array.isArray(data.manifests) ? data.manifests : [];
   const clean = [];
@@ -133,7 +154,7 @@ export async function pushWalletManifest(manifest = {}) {
       isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
     },
   };
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`, {
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
@@ -145,7 +166,7 @@ export async function deleteWalletManifest(walletAddress, hash) {
   const identity = normalizeIdentity(walletAddress);
   if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync delete');
   if (!hash) throw new Error('Manifest hash required for delete');
-  const response = await fetch(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests/${encodeURIComponent(hash)}`, {
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests/${encodeURIComponent(hash)}`, {
     method: 'DELETE',
   });
   return parseJsonResponse(response);
@@ -153,7 +174,7 @@ export async function deleteWalletManifest(walletAddress, hash) {
 
 export async function searchPublicManifests(query = '') {
   const q = String(query || '').trim();
-  const response = await fetch(`${manifestSyncBaseUrl()}/public/manifests?q=${encodeURIComponent(q)}`);
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/public/manifests?q=${encodeURIComponent(q)}`);
   const data = await parseJsonResponse(response);
   return Array.isArray(data.manifests) ? data.manifests : [];
 }
