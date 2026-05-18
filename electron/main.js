@@ -880,7 +880,8 @@ ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
   if (!item) throw new Error(`Item not found: ${payload.itemId || payload.hash || payload.rootHash || ''}`);
 
   if (isFolderManifest(item)) {
-    const removedFolderIds = descendantFolderIds(item.folderId);
+    const itemFolderId = String(item.folderId || manifestItemId(item) || '').trim();
+    const removedFolderIds = descendantFolderIds(itemFolderId);
     const fileDisposition = String(payload.fileDisposition || 'move');
     const targetFolderId = String(payload.targetFolderId || '');
     const targetFolder = targetFolderId ? findFolderByAny(targetFolderId) : null;
