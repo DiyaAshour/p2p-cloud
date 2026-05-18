@@ -823,6 +823,26 @@ ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
   return { ok: true, item };
 });
 
+function findOwnedManifestItemById(itemId = '') {
+  const id = String(itemId || '').trim();
+
+  if (!id) return null;
+
+  return walletManifests().find((manifest) => {
+    const values = [
+      manifest.id,
+      manifest.fileId,
+      manifest.folderId,
+      manifest.hash,
+      manifest.rootHash,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean);
+
+    return values.includes(id);
+  }) || null;
+}
+
 ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
   loadWallet();
   loadManifests();
