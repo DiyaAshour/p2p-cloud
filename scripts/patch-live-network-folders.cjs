@@ -250,38 +250,6 @@ function patchFileCard(src) {
     '<p className="text-xs text-zinc-500"><FolderOpen className="mr-1 inline size-3" />{folder}</p>',
     '<p className="text-xs text-zinc-500"><FolderOpen className="mr-1 inline size-3" />{folderLabel}</p>'
   );
-  const selectStart = src.indexOf('          <select\n            value={folder}');
-  if (selectStart !== -1) {
-    const selectEnd = src.indexOf('          </select>', selectStart);
-    if (selectEnd !== -1) {
-      const replacement = `          {!match ? (
-            <select
-              value={file.folderId || ""}
-              onChange={(event) => {
-                const targetFolderId = event.target.value;
-                void api.invoke("p2p:moveItem", { itemId: file.id || file.rootHash || file.hash, targetFolderId: targetFolderId || null }).then(refresh);
-              }}
-              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm"
-            >
-              <option value="">{UNCATEGORIZED}</option>
-              {orderedDriveFolders.map((folder) => <option key={folder.folderId || folder.id || folder.name} value={folder.folderId || folder.id || ""}>{folderPath(folder)}</option>)}
-            </select>
-          ) : (
-            <select
-              value={folder === UNCATEGORIZED ? "" : folder}
-              onChange={(event) => {
-                const nextFolder = event.target.value;
-                void api.invoke("company:updateFile", { workspaceId: match.workspace.workspaceId, rootHash: match.companyFile.rootHash, patch: { folder: nextFolder } }).then(refresh);
-              }}
-              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm"
-            >
-              <option value="">{UNCATEGORIZED}</option>
-              {folders.filter((folderName) => folderName !== ALL_FILES && folderName !== UNCATEGORIZED).map((folderName) => <option key={folderName} value={folderName}>{folderName}</option>)}
-            </select>
-          )}`;
-      src = src.slice(0, selectStart) + replacement + src.slice(selectEnd + '          </select>'.length);
-    }
-  }
   return src;
 }
 
