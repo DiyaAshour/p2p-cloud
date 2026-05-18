@@ -235,14 +235,34 @@ export default function ManifestFolderPanel({ api, busy = false, enabled = true,
   };
 
   const deleteFolder = async (folder: DriveFolder) => {
-    if (!window.confirm(`Delete folder ${folderPath(folder, byId)} from network manifests?`)) return;
+    if (!window.confirm(`Delete folder ${folderPath(folder, byId)}?`)) return;
+    const removed = collectRemovedIds(folder, folders);
+    const targetAnswer = window.prompt(
+      "Where should files inside this folder go?\n\nLeave empty = Uncategorized\nType another folder name = move files there\nType DELETE = delete files too",
+      ""
+    );
+    if (targetAnswer === null) return;
+    const trimmedTarget = targetAnswer.trim();
+    const deleteFilesToo = trimmedTarget.toUpperCase() === "DELETE";
+    const target = !trimmedTarget || deleteFilesToo ? null : folders.find((candidate) => candidate.name === trimmedTarget);
+    if (trimmedTarget && !deleteFilesToo && !target) {
+      toast.error("Target folder not found");
+      return;
+    }
+    if (target && removed.has(idOf(target))) {
+      toast.error("Cannot move files into a folder that is being deleted");
+      return;
+    }
     setLoading(true);
     try {
-      await api.invoke("p2p:deleteItem", { itemId: itemIdOf(folder) });
-      const removed = collectRemovedIds(folder, folders);
+      await api.invoke("p2p:deleteItem", {
+        itemId: itemIdOf(folder),
+        fileDisposition: deleteFilesToo ? "delete" : "move",
+        targetFolderId: target ? idOf(target) : "",
+      });
       setFolders((current) => current.filter((candidate) => !removed.has(idOf(candidate)) && itemIdOf(candidate) !== itemIdOf(folder)));
       if (activeFolderId && removed.has(activeFolderId)) selectFolder(null);
-      toast.success("Folder deleted");
+      toast.success(deleteFilesToo ? "Folder and files deleted" : target ? `Folder deleted, files moved to ${target.name}` : "Folder deleted, files moved to Uncategorized");
       await refreshFolders();
       await onRefresh?.();
     } catch (error) {
