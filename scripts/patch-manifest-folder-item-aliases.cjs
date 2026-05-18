@@ -10,7 +10,45 @@ const runtimeFiles = [
 function read(file) { return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''; }
 function write(file, value) { fs.writeFileSync(file, value, 'utf8'); }
 
-const aliasHandlers = String.raw`
+function findHandlerEnd(source, start) {
+  let quote = null;
+  let escape = false;
+  let lineComment = false;
+  let blockComment = false;
+  let parens = 0;
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (lineComment) { if (ch === '\n') lineComment = false; continue; }
+    if (blockComment) { if (ch === '*' && next === '/') { blockComment = false; i += 1; } continue; }
+    if (quote) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') { lineComment = true; i += 1; continue; }
+    if (ch === '/' && next === '*') { blockComment = true; i += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(') parens += 1;
+    if (ch === ')') {
+      parens -= 1;
+      if (parens === 0 && source[i + 1] === ';') return i + 2;
+    }
+  }
+  return -1;
+}
+
+function replaceIpcHandler(source, channel, handler) {
+  const marker = `ipcMain.handle('${channel}'`;
+  const start = source.indexOf(marker);
+  if (start === -1) return source;
+  const end = findHandlerEnd(source, start);
+  if (end === -1) return source;
+  return `${source.slice(0, start)}${handler}${source.slice(end)}`;
+}
+
+const helperBlock = String.raw`
 function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }
 function manifestItemIds(item = {}) { return [item.id, item.rootHash, item.hash, item.folderId].filter(Boolean).map((value) => String(value)); }
 function manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }
@@ -21,12 +59,13 @@ function findOwnedManifestItemById(itemId = '') {
 function normalizeParentFolderId(value) { return value === null || value === undefined || value === '' ? '' : String(value); }
 function manifestItemIsFolder(item = {}) { return item.kind === FOLDER_MANIFEST_KIND || item.isFolder === true || String(item.hash || '').startsWith('folder:'); }
 function itemChildrenOf(parentFolderId = '') { const parent = normalizeParentFolderId(parentFolderId); return walletManifests().filter((item) => normalizeParentFolderId(item.parentFolderId || item.folderId) === parent); }
+function manifestDeleteOwnerIdentity() { return typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : (typeof activeIdentity === 'function' ? activeIdentity() : activeWallet()); }
 function assertValidMoveTarget(item, targetFolderId) {
   const target = normalizeParentFolderId(targetFolderId);
   if (!target) return null;
   const targetFolder = findFolderById(target) || findOwnedManifestItemById(target);
   if (!targetFolder || !manifestItemIsFolder(targetFolder)) throw new Error('Target folder not found');
-  const expectedOwner = typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet();
+  const expectedOwner = manifestDeleteOwnerIdentity();
   const owner = String(targetFolder.ownerWallet || '').trim().toLowerCase();
   if (owner && owner !== String(expectedOwner || '').trim().toLowerCase()) throw new Error('Target folder owner mismatch');
   if (manifestItemIsFolder(item)) {
@@ -36,8 +75,9 @@ function assertValidMoveTarget(item, targetFolderId) {
   }
   return targetFolder;
 }
+`;
 
-ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
+const renameHandler = String.raw`ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
   assertFolderIdentity();
   await syncPull();
   const item = findOwnedManifestItemById(payload.itemId || payload.id || payload.hash || payload.rootHash || payload.folderId);
@@ -50,9 +90,9 @@ ipcMain.handle('p2p:renameItem', async (_event, payload = {}) => {
   await syncPush(item);
   await syncPull();
   return { ok: true, item };
-});
+});`;
 
-ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
+const moveHandler = String.raw`ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
   assertFolderIdentity();
   await syncPull();
   const item = findOwnedManifestItemById(payload.itemId || payload.id || payload.hash || payload.rootHash || payload.folderId);
@@ -70,64 +110,64 @@ ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => {
   await syncPush(item);
   await syncPull();
   return { ok: true, item };
-});
+});`;
 
-ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
+const deleteHandler = String.raw`ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => {
   assertFolderIdentity();
   await syncPull();
   const item = findOwnedManifestItemById(payload.itemId || payload.id || payload.hash || payload.rootHash || payload.folderId);
   if (!item) throw new Error('Item not found');
+  const removedItems = [];
   if (!manifestItemIsFolder(item)) {
-    const removedIds = new Set(manifestItemIds(item));
-    manifests = manifests.filter((m) => !manifestItemMatchesAnyId(m, removedIds));
-    persistManifests();
-    await syncDelete(typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(), item.hash || item.rootHash);
-    return { ok: true, deleted: 1 };
-  }
-  const rootId = String(item.folderId || item.id || '');
-  const removedFolderIds = new Set([rootId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const folder of walletFolderManifests()) {
-      const folderId = String(folder.folderId || folder.id || '');
-      if (!removedFolderIds.has(folderId) && removedFolderIds.has(normalizeParentFolderId(folder.parentFolderId))) {
-        removedFolderIds.add(folderId);
-        changed = true;
+    removedItems.push(item);
+  } else {
+    const rootIds = manifestItemIds(item);
+    const removedFolderIds = new Set(rootIds);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const folder of walletFolderManifests()) {
+        const folderIds = manifestItemIds(folder);
+        const parentId = normalizeParentFolderId(folder.parentFolderId);
+        if (parentId && removedFolderIds.has(parentId)) {
+          for (const id of folderIds) {
+            if (!removedFolderIds.has(id)) { removedFolderIds.add(id); changed = true; }
+          }
+        }
+      }
+    }
+    for (const candidate of walletManifests()) {
+      if (manifestItemIsFolder(candidate)) {
+        if (manifestItemIds(candidate).some((id) => removedFolderIds.has(id))) removedItems.push(candidate);
+      } else if (removedFolderIds.has(normalizeParentFolderId(candidate.parentFolderId || candidate.folderId))) {
+        removedItems.push(candidate);
       }
     }
   }
-  const removedItems = walletManifests().filter((candidate) => {
-    if (manifestItemIsFolder(candidate)) return removedFolderIds.has(String(candidate.folderId || candidate.id || ''));
-    return removedFolderIds.has(normalizeParentFolderId(candidate.parentFolderId || candidate.folderId));
-  });
   const removedIds = new Set(removedItems.flatMap((removed) => manifestItemIds(removed)));
+  const beforeCount = manifests.length;
   manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));
   persistManifests();
-  for (const removed of removedItems) await syncDelete(typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(), removed.hash || removed.rootHash);
-  return { ok: true, deleted: removedItems.length };
-});
-`;
+  for (const removed of removedItems) await syncDelete(manifestDeleteOwnerIdentity(), removed.hash || removed.rootHash || removed.folderId);
+  return { ok: true, deleted: beforeCount - manifests.length, removedIds: Array.from(removedIds) };
+});`;
 
-function patchExistingDeleteHandler(src) {
-  let next = src;
+const aliasHandlers = `${helperBlock}\n${renameHandler}\n\n${moveHandler}\n\n${deleteHandler}\n`;
+
+function ensureHelpers(source) {
+  let next = source;
   if (!next.includes('function manifestItemIds(item = {})')) {
     next = next.replace(
       "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }",
-      "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }\nfunction manifestItemIds(item = {}) { return [item.id, item.rootHash, item.hash, item.folderId].filter(Boolean).map((value) => String(value)); }\nfunction manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }"
+      "function manifestItemId(item = {}) { return String(item.id || item.rootHash || item.hash || item.folderId || ''); }\nfunction manifestItemIds(item = {}) { return [item.id, item.rootHash, item.folderId, item.hash].filter(Boolean).map((value) => String(value)); }\nfunction manifestItemMatchesAnyId(item = {}, ids = new Set()) { return manifestItemIds(item).some((id) => ids.has(id)); }"
     );
   }
-
-  next = next.replace(
-    "    manifests = manifests.filter((m) => !(walletOwnsManifest(m) && manifestItemId(m) === manifestItemId(item)));\n    persistManifests();\n    await syncDelete(activeWallet(), item.hash);\n    await syncPull();\n    return { ok: true, deleted: 1 };",
-    "    const removedIds = new Set(manifestItemIds(item));\n    manifests = manifests.filter((m) => !manifestItemMatchesAnyId(m, removedIds));\n    persistManifests();\n    await syncDelete(typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(), item.hash || item.rootHash);\n    return { ok: true, deleted: 1 };"
-  );
-
-  next = next.replace(
-    "  manifests = manifests.filter((candidate) => !removedItems.some((removed) => walletOwnsManifest(candidate) && manifestItemId(candidate) === manifestItemId(removed)));\n  persistManifests();\n  for (const removed of removedItems) await syncDelete(activeWallet(), removed.hash);\n  await syncPull();\n  return { ok: true, deleted: removedItems.length };",
-    "  const removedIds = new Set(removedItems.flatMap((removed) => manifestItemIds(removed)));\n  manifests = manifests.filter((candidate) => !manifestItemMatchesAnyId(candidate, removedIds));\n  persistManifests();\n  for (const removed of removedItems) await syncDelete(typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : activeWallet(), removed.hash || removed.rootHash);\n  return { ok: true, deleted: removedItems.length };"
-  );
-
+  if (!next.includes('function manifestDeleteOwnerIdentity()')) {
+    next = next.replace(
+      "function manifestItemIsFolder(item = {}) { return item.kind === FOLDER_MANIFEST_KIND || item.isFolder === true || String(item.hash || '').startsWith('folder:'); }",
+      "function manifestItemIsFolder(item = {}) { return item.kind === FOLDER_MANIFEST_KIND || item.isFolder === true || String(item.hash || '').startsWith('folder:'); }\nfunction manifestDeleteOwnerIdentity() { return typeof folderOwnerIdentity === 'function' ? folderOwnerIdentity() : (typeof activeIdentity === 'function' ? activeIdentity() : activeWallet()); }"
+    );
+  }
   return next;
 }
 
@@ -141,9 +181,11 @@ for (const file of runtimeFiles) {
     } else if (src.includes("app.whenReady()")) {
       src = src.replace("app.whenReady()", `${aliasHandlers}\napp.whenReady()`);
     }
+  } else {
+    src = ensureHelpers(src);
+    src = replaceIpcHandler(src, 'p2p:deleteItem', deleteHandler);
   }
-  src = patchExistingDeleteHandler(src);
   if (src !== before) write(file, src);
 }
 
-console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed without touching chunks or encryption.');
+console.log('[patch-manifest-folder-item-aliases] safe p2p item aliases installed and deleteItem handler force-replaced.');
