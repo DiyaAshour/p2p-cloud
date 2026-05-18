@@ -31,6 +31,12 @@ if (!fs.existsSync(p)) {
     }
   }
 
+  if (!s.includes('function extractItem(response: unknown): DriveFolder | null')) {
+    const insertAfter = /function collectRemovedIds\(root: DriveFolder, folders: DriveFolder\[\]\) \{[\s\S]*?\n\}/;
+    const helper = `function extractItem(response: unknown): DriveFolder | null {\n  if (!response || typeof response !== "object") return null;\n  if ("item" in response && response.item && typeof response.item === "object") return response.item as DriveFolder;\n  if ("folder" in response && response.folder && typeof response.folder === "object") return response.folder as DriveFolder;\n  return response as DriveFolder;\n}`;
+    if (insertAfter.test(s)) s = s.replace(insertAfter, (match) => `${match}\n\n${helper}`);
+  }
+
   if (!s.includes('const externalActiveFolderName = String(activeFolderName || "");')) {
     s = s.replace(
       '  const activeFolder = activeFolderId ? byId.get(activeFolderId) || null : null;\n',
@@ -44,6 +50,11 @@ if (!fs.existsSync(p)) {
   );
 
   s = s.replaceAll('folder.id || folder.folderId || folder.hash', 'itemIdOf(folder)');
+
+  s = s.replace(
+    '      const item = await api.invoke<DriveFolder>("p2p:renameItem", { itemId: itemIdOf(folder), name });\n      setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, ...item, name: item?.name || name } : candidate));',
+    '      const response = await api.invoke<DriveFolder | { item?: DriveFolder; folder?: DriveFolder }>("p2p:renameItem", { itemId: itemIdOf(folder), name });\n      const item = extractItem(response) || { ...folder, name };\n      setFolders((current) => current.map((candidate) => idOf(candidate) === idOf(folder) ? { ...candidate, ...item, name: item.name || name } : candidate));\n      if (activeFolderId === idOf(folder)) onSelectFolder?.({ ...folder, ...item, name: item.name || name });'
+  );
 
   if (!s.includes('const safeFolders = Array.isArray(next) ? next.filter((folder) => idOf(folder)) : [];')) {
     s = s.replace(
@@ -59,7 +70,7 @@ if (!fs.existsSync(p)) {
 
   if (s !== before) {
     fs.writeFileSync(p, s, 'utf8');
-    console.log('[manifest-folder-panel-contract] enforced folderId/itemId/active-folder contract');
+    console.log('[manifest-folder-panel-contract] enforced folderId/itemId/active-folder/rename contract');
   } else {
     console.log('[manifest-folder-panel-contract] folder panel contract already valid');
   }
