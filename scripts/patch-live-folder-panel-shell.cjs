@@ -52,7 +52,7 @@ if (!src.includes('import ManifestFolderPanel from "./ManifestFolderPanel";')) {
 
 const oldFoldersCard = /          <Card className="rounded-2xl border-zinc-800 bg-zinc-900">\r?\n            <CardHeader><CardTitle className="text-base">Folders<\/CardTitle><\/CardHeader>\r?\n            <CardContent className="space-y-3">\r?\n              <div className="flex gap-2"><Input value=\{newFolder\} onChange=\{\(event\) => setNewFolder\(event\.target\.value\)\} placeholder="New folder" \/><Button onClick=\{createFolder\}>\+<\/Button><\/div>\r?\n              \{folders\.map\(\(folder\) => \(\r?\n                <button key=\{folder\} onClick=\{\(\) => setActiveFolder\(folder\)\} className=\{`block w-full rounded-xl px-4 py-3 text-left text-sm \$\{activeFolder === folder \? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800\/60"\}`\}>\r?\n                  <FolderOpen className="mr-2 inline size-4" \/>\{folder\}\r?\n                <\/button>\r?\n              \)\)\}\r?\n            <\/CardContent>\r?\n          <\/Card>/;
 
-const replacement = '          <ManifestFolderPanel api={api} busy={busy} enabled={view === "personal"} onRefresh={refresh} onSelectFolder={(folder) => setActiveFolder(folder?.name || ALL_FILES)} />';
+const replacement = '          <ManifestFolderPanel api={api} busy={busy} enabled={view === "personal"} activeFolderName={activeFolder} onRefresh={refresh} onSelectFolder={(folder) => setActiveFolder(folder?.name || ALL_FILES)} />';
 
 if (!src.includes('<ManifestFolderPanel api={api}')) {
   const next = src.replace(oldFoldersCard, replacement);
@@ -61,6 +61,11 @@ if (!src.includes('<ManifestFolderPanel api={api}')) {
   } else {
     src = next;
   }
+} else if (!src.includes('activeFolderName={activeFolder}')) {
+  src = src.replace(
+    /<ManifestFolderPanel api=\{api\} busy=\{busy\} enabled=\{view === "personal"\}([^>]*)\/>/,
+    '<ManifestFolderPanel api={api} busy={busy} enabled={view === "personal"} activeFolderName={activeFolder}$1/>'
+  );
 }
 
 if (src.includes('identityConnected') && !src.includes('const identityConnected = Boolean(walletConnected || seedConnected);')) {
@@ -69,7 +74,7 @@ if (src.includes('identityConnected') && !src.includes('const identityConnected 
 
 if (src !== before) {
   fs.writeFileSync(livePath, src, 'utf8');
-  console.log('[folder-panel-shell] mounted isolated ManifestFolderPanel and enforced identity contract');
+  console.log('[folder-panel-shell] mounted isolated ManifestFolderPanel, active folder bridge, and identity contract');
 } else {
   console.log('[folder-panel-shell] already mounted and identity contract is valid');
 }
