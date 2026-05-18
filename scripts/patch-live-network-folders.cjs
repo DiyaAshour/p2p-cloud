@@ -55,12 +55,10 @@ function ensureDriveFoldersState(src) {
 
 const networkFoldersMemo = `  const folders = useMemo(() => {
     const workspaceFolders = (activeWorkspace?.files || []).map((file) => file.folder).filter(Boolean) as string[];
-    const personalManifestFolders = personalFiles.map((file) => file.folder || file.folderName).filter(Boolean) as string[];
     const networkFolders = driveFolders.map((folder) => folder.name).filter(Boolean);
-    const localFolders = Object.values(fileFolders).filter(Boolean);
-    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : [...networkFolders, ...personalManifestFolders, ...localFolders];
+    const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : networkFolders;
     return [ALL_FILES, UNCATEGORIZED, ...Array.from(new Set(sourceFolders)).sort()];
-  }, [fileFolders, activeWorkspace, personalFiles, driveFolders, view]);`;
+  }, [activeWorkspace, driveFolders, view]);`;
 
 function patchFoldersMemo(src) {
   const marker = '  const folders = useMemo(() => {';
@@ -76,29 +74,35 @@ function patchFoldersMemo(src) {
     return src;
   }
   const current = src.slice(start, end);
-  if (current.includes('driveFolders') && current.includes('networkFolders')) return src;
+  if (current.includes('const sourceFolders = view === "company" || view === "admin" ? workspaceFolders : networkFolders;')) return src;
   return src.slice(0, start) + networkFoldersMemo + '\n' + src.slice(end);
 }
 
 function patchFolderListUi(src) {
-  if (src.includes('renameFolder(folder)') && src.includes('moveFolder(folder)') && src.includes('deleteFolder(folder)')) return src;
-  const newFolderList = `              {folders.map((folder) => (
-                <div key={folder} className={\`rounded-xl \${activeFolder === folder ? "bg-zinc-800" : "hover:bg-zinc-800/60"}\`}>
-                  <button onClick={() => setActiveFolder(folder)} className={\`block w-full px-4 py-3 text-left text-sm \${activeFolder === folder ? "text-zinc-50" : "text-zinc-400"}\`}>
-                    <FolderOpen className="mr-2 inline size-4" />{folder}
-                  </button>
-                  {view === "personal" && folder !== ALL_FILES && folder !== UNCATEGORIZED && (
-                    <div className="flex flex-wrap gap-1 px-3 pb-3">
-                      <Button variant="outline" size="sm" onClick={() => renameFolder(folder)} disabled={busy}>Rename</Button>
-                      <Button variant="outline" size="sm" onClick={() => moveFolder(folder)} disabled={busy}>Move</Button>
-                      <Button variant="destructive" size="sm" onClick={() => deleteFolder(folder)} disabled={busy}>Delete</Button>
-                    </div>
-                  )}
-                </div>
-              ))}`;
-  const oldExact = `              {folders.map((folder) => (\n                <button key={folder} onClick={() => setActiveFolder(folder)} className={\`block w-full rounded-xl px-4 py-3 text-left text-sm \${activeFolder === folder ? "bg-zinc-800" : "text-zinc-400 hover:bg-zinc-800/60"}\`}>\n                  <FolderOpen className="mr-2 inline size-4" />{folder}\n                </button>\n              ))}`;
-  if (src.includes(oldExact)) return src.replace(oldExact, newFolderList);
-  const broad = /              \{folders\.map\(\(folder\) => \([\s\S]*?              \)\)\}/;
+  const newFolderList = `              {folders.map((folder) => {
+                const manifestFolder = folderByName(folder);
+                const isManagedFolder = view === "personal" && Boolean(manifestFolder) && folder !== ALL_FILES && folder !== UNCATEGORIZED;
+                return (
+                  <div key={folder} className={\`rounded-2xl border \${activeFolder === folder ? "border-blue-500/40 bg-blue-950/20" : "border-zinc-800 bg-zinc-900/50 hover:bg-zinc-800/60"}\`}>
+                    <button onClick={() => setActiveFolder(folder)} className={\`block w-full px-4 py-3 text-left text-sm \${activeFolder === folder ? "text-blue-100" : "text-zinc-300"}\`}>
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate"><FolderOpen className="mr-2 inline size-4" />{folder}</span>
+                        {isManagedFolder && <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300">manifest</span>}
+                      </span>
+                    </button>
+                    {isManagedFolder && (
+                      <div className="grid grid-cols-3 gap-1 px-3 pb-3">
+                        <Button variant="outline" size="sm" onClick={() => renameFolder(folder)} disabled={busy}>Rename</Button>
+                        <Button variant="outline" size="sm" onClick={() => moveFolder(folder)} disabled={busy}>Move</Button>
+                        <Button variant="destructive" size="sm" onClick={() => deleteFolder(folder)} disabled={busy}>Delete</Button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}`;
+  const broad = /              \{folders\.map\(\(folder\) =>[\s\S]*?              \)\)\}/;
+  const broadBlock = /              \{folders\.map\(\(folder\) => \{[\s\S]*?              \}\)\}/;
+  if (broadBlock.test(src)) return src.replace(broadBlock, newFolderList);
   if (broad.test(src)) return src.replace(broad, newFolderList);
   console.warn('[live-network-folders] could not patch folder list UI; actions may not be visible');
   return src;
@@ -115,7 +119,7 @@ function patch() {
   }
   src = src.replace('type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };', 'type Bridge = { invoke: <T>(channel: string, payload?: unknown) => Promise<T> };');
   if (!src.includes('folder?: string; ownerWallet?: string')) {
-    src = src.replace('totalChunks: number; ownerWallet?: string;', 'totalChunks: number; folder?: string; ownerWallet?: string;');
+    src = src.replace('totalChunks: number; ownerWallet?: string;', 'totalChunks: number; folder?: string; folderName?: string; folderId?: string; ownerWallet?: string;');
   }
   if (!src.includes('type DriveFolder =')) {
     src = src.replace('type View = "personal" | "company" | "shared" | "admin";', 'type DriveFolder = { id?: string; name: string; folderId?: string; parentFolderId?: string | null; hash?: string; rootHash?: string; kind?: string; isFolder?: boolean; ownerWallet?: string };\ntype View = "personal" | "company" | "shared" | "admin";');
@@ -141,7 +145,7 @@ function patch() {
 
   src = src.replace(
     '  const disconnectWallet = () => run(async () => {\n    setWallet(await api.invoke<WalletState>("wallet:disconnect"));\n    await refresh();\n  });',
-    '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setDriveFolders([]);\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
+    '  const disconnectWallet = () => run(async () => {\n    const nextWallet = await api.invoke<WalletState>("wallet:disconnect");\n    setWallet(nextWallet);\n    setDrivePassword("");\n    setFiles([]);\n    setDriveFolders([]);\n    setFileFolders({});\n    try { Object.keys(localStorage).filter((key) => key.toLowerCase().includes("folder")).forEach((key) => localStorage.removeItem(key)); } catch {}\n    setActiveFolder(ALL_FILES);\n    await refresh();\n  });'
   );
 
   if (!src.includes('const folderByName = (folderName: string)')) {
@@ -174,22 +178,25 @@ function patch() {
 
   src = src.replace(
     '  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    setFileFolders((current) => ({ ...current, [`folder:${folder}`]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };',
-    '  const createFolder = () => run(async () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    if (view === "company" || view === "admin") {\n      const key = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `company:none:folder:${folder}`;\n      setFileFolders((current) => ({ ...current, [key]: folder }));\n      setActiveFolder(folder);\n      setNewFolder("");\n      return;\n    }\n    await api.invoke("p2p:createFolder", { name: folder, parentFolderId: activeFolderRecord?.folderId || null });\n    setNewFolder("");\n    setActiveFolder(folder);\n    await refresh();\n  });'
+    '  const createFolder = () => run(async () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    if (view === "company" || view === "admin") {\n      const key = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `company:none:folder:${folder}`;\n      setFileFolders((current) => ({ ...current, [key]: folder }));\n      setActiveFolder(folder);\n      setNewFolder("");\n      return;\n    }\n    const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", { name: folder, parentFolderId: activeFolderRecord?.folderId || null });\n    setNewFolder("");\n    if (Array.isArray(result?.folders)) setDriveFolders(result.folders);\n    setActiveFolder(result?.folder?.name || folder);\n    setFileFolders({});\n    await refresh();\n  });'
   );
   src = src.replace(
     '  const createFolder = () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    const key = (view === "company" || view === "admin") && activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `personal:folder:${folder}`;\n    setFileFolders((current) => ({ ...current, [key]: folder }));\n    setActiveFolder(folder);\n    setNewFolder("");\n  };',
-    '  const createFolder = () => run(async () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    if (view === "company" || view === "admin") {\n      const key = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `company:none:folder:${folder}`;\n      setFileFolders((current) => ({ ...current, [key]: folder }));\n      setActiveFolder(folder);\n      setNewFolder("");\n      return;\n    }\n    await api.invoke("p2p:createFolder", { name: folder, parentFolderId: activeFolderRecord?.folderId || null });\n    setNewFolder("");\n    setActiveFolder(folder);\n    await refresh();\n  });'
+    '  const createFolder = () => run(async () => {\n    const folder = newFolder.trim();\n    if (!folder) return;\n    if (view === "company" || view === "admin") {\n      const key = activeWorkspace ? `company:${activeWorkspace.workspaceId}:folder:${folder}` : `company:none:folder:${folder}`;\n      setFileFolders((current) => ({ ...current, [key]: folder }));\n      setActiveFolder(folder);\n      setNewFolder("");\n      return;\n    }\n    const result = await api.invoke<{ folder?: DriveFolder; folders?: DriveFolder[] }>("p2p:createFolder", { name: folder, parentFolderId: activeFolderRecord?.folderId || null });\n    setNewFolder("");\n    if (Array.isArray(result?.folders)) setDriveFolders(result.folders);\n    setActiveFolder(result?.folder?.name || folder);\n    setFileFolders({});\n    await refresh();\n  });'
   );
 
   if (!src.includes('const renameFolder = (folderName: string) =>')) {
-    src = src.replace('  const upload = () => run(async () => {', '  const renameFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    const name = window.prompt("New folder name", folder.name)?.trim();\n    if (!name || name === folder.name) return;\n    await api.invoke("p2p:renameItem", { itemId: folder.id || folder.folderId || folder.hash, name });\n    if (activeFolder === folderName) setActiveFolder(name);\n    await refresh();\n    toast.success("Folder renamed");\n  });\n  const moveFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    const targetName = window.prompt("Move to folder name. Leave empty for root", "")?.trim() || "";\n    const target = targetName ? folderByName(targetName) : null;\n    if (targetName && !target) throw new Error("Target folder not found");\n    await api.invoke("p2p:moveItem", { itemId: folder.id || folder.folderId || folder.hash, targetFolderId: target?.folderId || null });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder moved");\n  });\n  const deleteFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("Folder is not synced yet. Refresh and try again.");\n    if (!window.confirm(`Delete folder ${folder.name} and its contents from manifests? Chunks/encryption are not modified.`)) return;\n    await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder deleted");\n  });\n  const upload = () => run(async () => {');
+    src = src.replace('  const upload = () => run(async () => {', '  const renameFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    const name = window.prompt("Rename folder", folder.name)?.trim();\n    if (!name || name === folder.name) return;\n    const result = await api.invoke<{ item?: DriveFolder }>("p2p:renameItem", { itemId: folder.id || folder.folderId || folder.hash, name });\n    setDriveFolders((current) => current.map((candidate) => (candidate.folderId === folder.folderId || candidate.id === folder.id) ? { ...candidate, name: result?.item?.name || name } : candidate));\n    setFileFolders({});\n    if (activeFolder === folderName) setActiveFolder(result?.item?.name || name);\n    await refresh();\n    toast.success("Folder renamed");\n  });\n  const moveFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    const targetName = window.prompt("Move to folder name. Leave empty for root", "")?.trim() || "";\n    const target = targetName ? folderByName(targetName) : null;\n    if (targetName && !target) throw new Error("Target folder not found");\n    await api.invoke("p2p:moveItem", { itemId: folder.id || folder.folderId || folder.hash, targetFolderId: target?.folderId || null });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    setFileFolders({});\n    await refresh();\n    toast.success("Folder moved");\n  });\n  const deleteFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    if (!window.confirm(`Delete folder ${folder.name} from network manifests?`)) return;\n    await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });\n    setDriveFolders((current) => current.filter((candidate) => candidate.folderId !== folder.folderId && candidate.id !== folder.id && candidate.hash !== folder.hash));\n    setFileFolders({});\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder deleted");\n  });\n  const upload = () => run(async () => {');
+  } else {
+    src = src.replace(/const renameFolder = \(folderName: string\) => run\(async \(\) => \{[\s\S]*?  const upload = \(\) => run\(async \(\) => \{/,
+      'const renameFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    const name = window.prompt("Rename folder", folder.name)?.trim();\n    if (!name || name === folder.name) return;\n    const result = await api.invoke<{ item?: DriveFolder }>("p2p:renameItem", { itemId: folder.id || folder.folderId || folder.hash, name });\n    setDriveFolders((current) => current.map((candidate) => (candidate.folderId === folder.folderId || candidate.id === folder.id) ? { ...candidate, name: result?.item?.name || name } : candidate));\n    setFileFolders({});\n    if (activeFolder === folderName) setActiveFolder(result?.item?.name || name);\n    await refresh();\n    toast.success("Folder renamed");\n  });\n  const moveFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    const targetName = window.prompt("Move to folder name. Leave empty for root", "")?.trim() || "";\n    const target = targetName ? folderByName(targetName) : null;\n    if (targetName && !target) throw new Error("Target folder not found");\n    await api.invoke("p2p:moveItem", { itemId: folder.id || folder.folderId || folder.hash, targetFolderId: target?.folderId || null });\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    setFileFolders({});\n    await refresh();\n    toast.success("Folder moved");\n  });\n  const deleteFolder = (folderName: string) => run(async () => {\n    const folder = folderByName(folderName);\n    if (!folder) throw new Error("This folder is not a network manifest folder. Refresh and try again.");\n    if (!window.confirm(`Delete folder ${folder.name} from network manifests?`)) return;\n    await api.invoke("p2p:deleteItem", { itemId: folder.id || folder.folderId || folder.hash });\n    setDriveFolders((current) => current.filter((candidate) => candidate.folderId !== folder.folderId && candidate.id !== folder.id && candidate.hash !== folder.hash));\n    setFileFolders({});\n    if (activeFolder === folderName) setActiveFolder(ALL_FILES);\n    await refresh();\n    toast.success("Folder deleted");\n  });\n  const upload = () => run(async () => {');
   }
 
   src = patchFolderListUi(src);
 
   if (src !== before) {
     fs.writeFileSync(livePath, src, 'utf8');
-    console.log('[live-network-folders] patched seed identity upload/disconnect, My Drive folders, folder actions UI, and Identity card');
+    console.log('[live-network-folders] patched manifest-only My Drive folder UI and actions');
   } else {
     console.log('[live-network-folders] already patched');
   }
