@@ -1639,6 +1639,256 @@ ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
   return { ok: true, cancelled: false, files: uploaded, summary: networkSummary(), sync: lastSyncStatus };
 });
 
+ipcMain.handle('p2p:uploadFolder', async (_event, payload = {}) => {
+  loadWallet();
+  loadManifests();
+  assertVerifiedWallet();
+
+  const picked = await dialog.showOpenDialog({
+    title: 'Upload folder',
+    properties: ['openDirectory'],
+  });
+
+  if (picked.canceled || !picked.filePaths?.length) {
+    return { ok: true, cancelled: true, files: [] };
+  }
+
+  const rootDir = picked.filePaths[0];
+  const ownerWallet = activeWallet();
+  const pathToFolderId = new Map();
+
+  async function ensureFolderForPath(dirPath) {
+    if (pathToFolderId.has(dirPath)) {
+      return pathToFolderId.get(dirPath);
+    }
+
+    const relativeParts = path
+      .relative(path.dirname(rootDir), dirPath)
+      .split(path.sep)
+      .filter(Boolean);
+
+    let parentFolderId = String(payload.folderId || '');
+
+    for (let i = 0; i < relativeParts.length; i++) {
+      const partialAbsPath = path.join(
+        path.dirname(rootDir),
+        ...relativeParts.slice(0, i + 1)
+      );
+
+      if (pathToFolderId.has(partialAbsPath)) {
+        parentFolderId = pathToFolderId.get(partialAbsPath);
+        continue;
+      }
+
+      const name = sanitizeFolderName(relativeParts[i]);
+
+      let existing = walletFolderManifests().find(
+        (f) =>
+          String(f.parentFolderId || '') === parentFolderId &&
+          String(f.name || '').toLowerCase() === name.toLowerCase()
+      );
+
+      if (!existing) {
+        const folderId = folderIdFromName(name);
+        const folderOwner = folderOwnerIdentity();
+
+        existing = {
+          kind: FOLDER_MANIFEST_KIND,
+          isFolder: true,
+          visibility: 'private',
+          isPublic: false,
+          id: folderOwner + ':folder:' + folderId,
+          hash: 'folder:' + folderId,
+          rootHash: 'folder:' + folderId,
+          folderId,
+          name,
+          parentFolderId,
+          ownerWallet: folderOwner,
+          ownerNodeId: ensureTransport({}).peerId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          size: 0,
+          storedSize: 0,
+          totalChunks: 0,
+          chunks: [],
+          replicas: [],
+          isEncrypted: false,
+        };
+
+        manifests.push(existing);
+        persistManifests();
+
+        try {
+          await syncPush(existing);
+        } catch {}
+      }
+
+      pathToFolderId.set(partialAbsPath, existing.folderId);
+      parentFolderId = existing.folderId;
+    }
+
+    return parentFolderId;
+  }
+
+  function walkDir(dir) {
+    const result = [];
+
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        result.push(...walkDir(fullPath));
+      } else if (entry.isFile()) {
+        result.push(fullPath);
+      }
+    }
+
+    return result;
+  }
+
+  const allFiles = walkDir(rootDir);
+  const uploaded = [];
+  const node = ensureTransport({});
+  const privateFile = Boolean(payload.isEncrypted);
+  const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
+
+  for (const filePath of allFiles) {
+    const targetFolderId = await ensureFolderForPath(path.dirname(filePath));
+    const targetFolder = findFolderById(targetFolderId) || null;
+
+    const originalBuffer = Buffer.from(fs.readFileSync(filePath));
+    assertWalletUploadAllowed(originalBuffer.length);
+
+    const secured = privateFile
+      ? await encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword)
+      : { ciphertext: originalBuffer, encryption: null };
+
+    const storedBuffer = secured.ciphertext;
+    const chunks = splitIntoChunks(storedBuffer);
+    const tree = buildMerkleTree(chunks.map((c) => c.hash));
+    const storedHash = hashBufferHex(storedBuffer);
+    const fileReplicas = new Set([node.peerId]);
+    const chunkResults = new Array(chunks.length);
+    const uploadConcurrency = clampConcurrency(
+      payload.uploadConcurrency,
+      UPLOAD_CONCURRENCY,
+      12
+    );
+
+    createProgress('upload', {
+      fileName: path.basename(filePath),
+      totalBytes: storedBuffer.length,
+      totalChunks: chunks.length,
+      concurrency: uploadConcurrency,
+    });
+
+    try {
+      await mapWithConcurrency(chunks, uploadConcurrency, async (chunk) => {
+        const chunkPayload = {
+          hash: chunk.hash,
+          data: chunk.data.toString('base64'),
+          index: chunk.index,
+          size: chunk.size,
+          ownerWallet,
+          encrypted: privateFile,
+        };
+
+        const replicas = replicateChunk(
+          node,
+          chunkPayload,
+          [node.peerId],
+          TARGET_REPLICAS
+        );
+
+        try {
+          await putChunkToSafetyPeer(chunkPayload, node.peerId);
+          replicas.push('aws-safety-peer');
+        } catch {}
+
+        chunkResults[chunk.index] = {
+          index: chunk.index,
+          hash: chunk.hash,
+          size: chunk.size,
+          replicas: unique(replicas),
+          proof: getMerkleProof(tree, chunk.index),
+        };
+
+        updateProgress('upload', {
+          bytesDelta: chunk.size,
+          chunkDelta: 1,
+        });
+      });
+    } catch (error) {
+      finishProgress('upload', 'error', error?.message || String(error));
+      throw error;
+    }
+
+    const manifest = {
+      id: `${ownerWallet}:${storedHash}`,
+      name: path.basename(filePath),
+      size: originalBuffer.length,
+      storedSize: storedBuffer.length,
+      hash: storedHash,
+      rootHash: tree.root,
+      uploadedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      isEncrypted: privateFile,
+      visibility: privateFile ? 'private' : 'public',
+      isPublic: !privateFile,
+      encryption: secured.encryption,
+      mimeType: 'application/octet-stream',
+      folderId: targetFolder?.folderId || '',
+      parentFolderId: targetFolder?.folderId || '',
+      folderName: targetFolder?.name || '',
+      folder: targetFolder?.name || '',
+      chunkSize: CHUNK_SIZE_BYTES,
+      totalChunks: chunks.length,
+      ownerNodeId: node.peerId,
+      ownerWallet,
+      planId: walletState.planId,
+      replicas: [node.peerId],
+      chunks: chunkResults,
+    };
+
+    for (const cm of manifest.chunks) {
+      for (const peerId of cm.replicas || []) {
+        fileReplicas.add(peerId);
+      }
+    }
+
+    manifest.replicas = unique(Array.from(fileReplicas));
+
+    manifests = manifests.filter(
+      (m) =>
+        !(
+          normalizeWallet(m.ownerWallet) === normalizeWallet(ownerWallet) &&
+          m.hash === manifest.hash
+        )
+    );
+
+    manifests.push(manifest);
+    persistManifests();
+    persistWallet();
+
+    try {
+      await syncPush(manifest);
+    } catch {}
+
+    uploaded.push(manifest);
+    finishProgress('upload');
+  }
+
+  await syncPull();
+
+  return {
+    ok: true,
+    cancelled: false,
+    files: uploaded,
+    summary: networkSummary(),
+    sync: lastSyncStatus,
+  };
+});
+
 ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
   loadWallet();
   loadManifests();
