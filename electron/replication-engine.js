@@ -16,6 +16,19 @@ function removeSafetyReplica(replicas = []) {
   return unique(replicas).filter((peerId) => peerId !== SAFETY_PEER_REPLICA_ID);
 }
 
+function hasSafetyReplica(replicas = []) {
+  return unique(replicas).includes(SAFETY_PEER_REPLICA_ID);
+}
+
+function isChunkProtectedBySafety(chunk = {}) {
+  return Boolean(
+    hasSafetyReplica(chunk.replicas || []) ||
+    chunk.safetyPeer?.enabled === true ||
+    ['uploaded', 'protected-temporary', 'emergency-protected'].includes(chunk.safetyStatus) ||
+    ['protected-temporary', 'emergency-protected'].includes(chunk.safetyPeer?.status)
+  );
+}
+
 function makeSafetyChunk(chunk = {}) {
   return {
     ...chunk,
@@ -175,13 +188,15 @@ async function replicateChunkConfirmed(node, chunkPayload, existingReplicas = []
 }
 
 export function countUnderReplicatedChunks(node, manifests = [], configuredTargetReplicas = DEFAULT_TARGET_REPLICAS) {
-  const targetReplicaCount = getTargetReplicaCount(node, configuredTargetReplicas);
+  // Protection decisions must compare against the full target, not only currently connected peers.
+  // With 0 peers, local replica count is 1/4, so repair must upload to AWS safety and mark protected.
+  const targetReplicaCount = configuredReplicaCount(configuredTargetReplicas);
   let count = 0;
 
   for (const manifest of manifests || []) {
     for (const chunk of manifest.chunks || []) {
       const healthyReplicas = getHealthyReplicas(node, chunk.hash, chunk.replicas);
-      if (healthyReplicas.length < targetReplicaCount) count += 1;
+      if (healthyReplicas.length < targetReplicaCount && !isChunkProtectedBySafety(chunk)) count += 1;
     }
   }
 
@@ -197,13 +212,14 @@ async function ensureSafetyForUnderReplicatedChunk({ node, chunkMeta, chunk, ful
       const before = unique(chunkMeta.replicas || []);
       const after = unique([...before, SAFETY_PEER_REPLICA_ID]);
       chunkMeta.replicas = after;
+      chunkMeta.safetyStatus = 'uploaded';
       chunkMeta.safetyPeer = {
         enabled: true,
-        status: 'protected-temporary',
+        status: 'emergency-protected',
         replicaId: SAFETY_PEER_REPLICA_ID,
         updatedAt: new Date().toISOString(),
       };
-      return { changed: before.length !== after.length || chunkMeta.safetyPeer?.status !== 'protected-temporary', safetyStatus: 'uploaded' };
+      return { changed: true, safetyStatus: 'uploaded' };
     }
     return { changed: false, safetyStatus: result?.skipped ? `skipped:${result.reason || 'unknown'}` : 'not-uploaded' };
   } catch (error) {
@@ -237,6 +253,7 @@ async function deleteSafetyForProtectedChunk({ node, chunkMeta }) {
   const before = unique(chunkMeta.replicas || []);
   const after = removeSafetyReplica(before);
   chunkMeta.replicas = after;
+  chunkMeta.safetyStatus = 'deleted';
   chunkMeta.safetyPeer = {
     enabled: false,
     status: 'deleted-after-peer-protection',
@@ -302,6 +319,8 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
           changed = changed || safety.changed;
         }
 
+        const safetyProtected = safetyStatus === 'uploaded' || isChunkProtectedBySafety(chunkMeta);
+        const peerProtected = healthyAfter.length >= fullTargetReplicaCount;
         const nextReplicas = unique([...healthyAfter, ...unique(chunkMeta.replicas || []).filter((peerId) => peerId === SAFETY_PEER_REPLICA_ID)]);
         const oldKey = unique(chunkMeta.replicas || []).sort().join('|');
         const newKey = nextReplicas.sort().join('|');
@@ -310,7 +329,8 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
           changed = true;
         }
 
-        chunkMeta.replicationStatus = healthyAfter.length >= fullTargetReplicaCount ? 'protected' : 'protecting';
+        chunkMeta.replicationStatus = peerProtected || safetyProtected ? 'protected' : 'protecting';
+        chunkMeta.protectionMode = peerProtected ? 'p2p' : safetyProtected ? 'aws-safety' : 'repairing';
         chunkMeta.confirmedReplicas = healthyAfter.length;
         chunkMeta.targetReplicas = fullTargetReplicaCount;
         chunkMeta.replicationUpdatedAt = new Date().toISOString();
@@ -321,7 +341,8 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
         const replicasWithoutSafety = removeSafetyReplica(chunkMeta.replicas || []);
         if (replicasWithoutSafety.length !== unique(chunkMeta.replicas || []).filter((peerId) => peerId !== SAFETY_PEER_REPLICA_ID).length) changed = true;
         chunkMeta.replicas = unique([...replicasWithoutSafety, ...(unique(chunkMeta.replicas || []).includes(SAFETY_PEER_REPLICA_ID) ? [SAFETY_PEER_REPLICA_ID] : [])]);
-        chunkMeta.replicationStatus = 'missing-source';
+        chunkMeta.replicationStatus = isChunkProtectedBySafety(chunkMeta) ? 'protected' : 'missing-source';
+        chunkMeta.protectionMode = isChunkProtectedBySafety(chunkMeta) ? 'aws-safety' : 'missing';
         chunkMeta.confirmedReplicas = before.length;
         chunkMeta.targetReplicas = fullTargetReplicaCount;
       }
@@ -336,7 +357,9 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
         targetReplicas: fullTargetReplicaCount,
         activeTargetReplicas: targetReplicaCount,
         safetyStatus,
+        protectionMode: chunkMeta.protectionMode,
         underReplicated: unique(after).length < fullTargetReplicaCount,
+        protected: chunkMeta.replicationStatus === 'protected',
         repaired: Boolean(chunk && unique(after).length > unique(before).length),
       });
     }
@@ -351,11 +374,23 @@ export async function repairManifests({ node, manifests = [], configuredTargetRe
 
     const chunks = manifest.chunks || [];
     if (chunks.length) {
-      const protectedChunks = chunks.filter((chunk) => Number(chunk.confirmedReplicas || 0) >= fullTargetReplicaCount).length;
+      const protectedChunks = chunks.filter((chunk) => (
+        Number(chunk.confirmedReplicas || 0) >= fullTargetReplicaCount || isChunkProtectedBySafety(chunk)
+      )).length;
+      const p2pProtectedChunks = chunks.filter((chunk) => Number(chunk.confirmedReplicas || 0) >= fullTargetReplicaCount).length;
+      const safetyProtectedChunks = chunks.filter((chunk) => Number(chunk.confirmedReplicas || 0) < fullTargetReplicaCount && isChunkProtectedBySafety(chunk)).length;
       const nextStatus = protectedChunks === chunks.length ? 'protected' : 'protecting';
-      if (manifest.replicationStatus !== nextStatus || manifest.protectedChunks !== protectedChunks) {
+      if (
+        manifest.replicationStatus !== nextStatus ||
+        manifest.protectedChunks !== protectedChunks ||
+        manifest.p2pProtectedChunks !== p2pProtectedChunks ||
+        manifest.safetyProtectedChunks !== safetyProtectedChunks
+      ) {
         manifest.replicationStatus = nextStatus;
         manifest.protectedChunks = protectedChunks;
+        manifest.p2pProtectedChunks = p2pProtectedChunks;
+        manifest.safetyProtectedChunks = safetyProtectedChunks;
+        manifest.protectionMode = p2pProtectedChunks === chunks.length ? 'p2p' : safetyProtectedChunks > 0 ? 'aws-safety' : 'repairing';
         manifest.targetReplicas = fullTargetReplicaCount;
         manifest.replicationUpdatedAt = new Date().toISOString();
         changed = true;
