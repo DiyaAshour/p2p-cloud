@@ -357,6 +357,21 @@ async function runAutoRepair(reason = 'interval') {
 
   const node = ensureTransport({});
   const own = walletManifests();
+
+  // Skip repair if no peers available (P2P peers OR safety peer)
+  const connectedPeers = node.connectedPeerIds?.() || [];
+  const hasSafetyPeer = Boolean(safetyPeerUrl());
+  if (connectedPeers.length === 0 && !hasSafetyPeer) {
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: Boolean(autoRepairTimer),
+      skippedReason: 'no-peers',
+      error: null,
+    };
+    console.log('[auto-repair] skipped: no peers connected (will retry on next interval)');
+    return lastAutoRepairStatus;
+  }
+
   const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);
 
   if (underReplicatedChunks <= 0) {
@@ -426,7 +441,11 @@ function startAutoRepairLoop() {
   }, AUTO_REPAIR_INTERVAL_MS);
   autoRepairTimer.unref?.();
   lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, intervalMs: AUTO_REPAIR_INTERVAL_MS, skippedReason: 'waiting' };
-  runAutoRepair('startup').catch((error) => console.warn('[auto-repair] startup failed:', error?.message || error));
+  // Delay startup repair by 5 minutes to let peers connect first
+  setTimeout(() => {
+    runAutoRepair('startup-delayed').catch((error) => console.warn('[auto-repair] startup-delayed failed:', error?.message || error));
+  }, 300_000);
+  console.log('[auto-repair] startup repair scheduled in 5 minutes (skips automatically if no peers)');
 }
 
 function stopAutoRepairLoop() {
