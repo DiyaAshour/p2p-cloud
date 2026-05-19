@@ -78,5 +78,67 @@ function patchMainWrapperLazySeed() {
   console.log('[main-stable-startup] ensured lazy seed IPC in main-wrapper.js');
 }
 
+function patchMainWrapperRuntimeOrder() {
+  if (!fs.existsSync(mainWrapperPath)) {
+    console.warn('[main-stable-startup] electron/main-wrapper.js not found; skipping runtime import order patch');
+    return;
+  }
+
+  let source = fs.readFileSync(mainWrapperPath, 'utf8');
+  if (source.includes('function importOptionalRuntimeModule(') && source.includes('await importPrimaryRuntime();\n\n    await importOptionalRuntimeModule')) {
+    console.log('[main-stable-startup] main-wrapper runtime import order already safe');
+    return;
+  }
+
+  const safeImportMainWhenReady = String.raw`async function importOptionalRuntimeModule(modulePath, label) {
+  try {
+    await import(modulePath);
+    console.log('[main-wrapper] ' + label + ' import finished');
+    return { ok: true };
+  } catch (error) {
+    console.warn('[main-wrapper] optional ' + label + ' import failed:', error?.stack || error?.message || error);
+    return { ok: false, error: error?.message || String(error) };
+  }
+}
+
+async function importMainWhenReady() {
+  if (mainImportStarted) return;
+  mainImportStarted = true;
+  console.log('[main-wrapper] importing runtime after app ready');
+
+  try {
+    await importPrimaryRuntime();
+
+    await importOptionalRuntimeModule('./p2p-transport-global-registry.js', 'p2p global registry');
+    await importOptionalRuntimeModule('./company-workspace-ipc.js', 'company workspace IPC');
+    await importOptionalRuntimeModule('./company-offline-invite-ipc.js', 'company offline invite IPC');
+    await importOptionalRuntimeModule('./company-distributed-objects-ipc.js', 'company distributed objects IPC');
+    await importOptionalRuntimeModule('./seed-auth-cooldown-ipc.js', 'seed auth cooldown IPC');
+    await importOptionalRuntimeModule('./protected-upload-override.js', 'protected upload status override');
+    await importOptionalRuntimeModule('./stream-upload-override.js', 'streaming upload override');
+    await importOptionalRuntimeModule('./protection-retry-loop.js', 'protection retry loop');
+    await importOptionalRuntimeModule('./download-to-path-override.js', 'download override');
+
+    setTimeout(() => createFallbackWindow('runtime imported but no BrowserWindow appeared'), 3000);
+  } catch (error) {
+    console.error('[main-wrapper] primary runtime import failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'Electron startup import failed');
+  }
+}
+
+`;
+
+  const pattern = /async function importMainWhenReady\(\) \{[\s\S]*?\n\}\n\napp\.on\('ready',/;
+  if (!pattern.test(source)) {
+    console.warn('[main-stable-startup] importMainWhenReady anchor not found; skipping runtime import order patch');
+    return;
+  }
+
+  source = source.replace(pattern, safeImportMainWhenReady + "app.on('ready',");
+  fs.writeFileSync(mainWrapperPath, source, 'utf8');
+  console.log('[main-stable-startup] patched main-wrapper to import primary runtime before optional modules');
+}
+
 patchMainStable();
 patchMainWrapperLazySeed();
+patchMainWrapperRuntimeOrder();
