@@ -16,8 +16,12 @@
     "dev:electron:fast": "pnpm run electron:dev:fast",
     "start": "pnpm run electron:dev",
     "start:fast": "pnpm run electron:dev:fast",
-    "build": "pnpm run prepare:final && vite build",
+    "renderer:build": "pnpm run prepare:final && vite build",
+    "build": "pnpm run package:win",
     "build:fast": "vite build",
+    "package:dir": "pnpm run renderer:build && electron-builder --dir",
+    "package:win": "pnpm run renderer:build && electron-builder --win nsis --x64",
+    "dist": "pnpm run package:win",
     "test": "vitest run",
     "format": "prettier --write .",
     "paypal:server": "node server/paypal-checkout.js",
@@ -89,6 +93,42 @@
   },
   "main": "electron/main-wrapper.js",
   "homepage": "./",
+  "build": {
+    "appId": "com.chunknet.desktop",
+    "productName": "Chunknet",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/public/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main-wrapper.js"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Chunknet"
+    }
+  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
