@@ -104,6 +104,7 @@
       "dist/public/**/*",
       "electron/**/*",
       "server/**/*",
+      "build/installer.nsh",
       "package.json"
     ],
     "extraMetadata": {
@@ -118,15 +119,18 @@
           ]
         }
       ],
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "requestedExecutionLevel": "requireAdministrator"
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Chunknet"
+      "shortcutName": "Chunknet",
+      "include": "build/installer.nsh"
     }
   },
   "pnpm": {
