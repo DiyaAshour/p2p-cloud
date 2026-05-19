@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
 
 const files = ['electron/main-stable.js', 'electron/main.js'];
 
@@ -26,4 +27,14 @@ for (const file of files) {
   } else {
     console.log(`[no-startup-repair] already safe or anchor not found: ${file}`);
   }
+}
+
+// Keep upload-folder and synced UI preference handlers installed after all prepare patches.
+// This must run last because the streaming upload/download patch rewrites the upload/download region.
+const extraPatch = 'scripts/patch-upload-folder-ui-prefs.cjs';
+if (fs.existsSync(extraPatch)) {
+  const result = spawnSync(process.execPath, [extraPatch], { stdio: 'inherit' });
+  if (result.status) process.exit(result.status);
+} else {
+  console.warn('[no-startup-repair] missing optional patch:', extraPatch);
 }
