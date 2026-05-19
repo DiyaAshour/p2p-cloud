@@ -1,5 +1,5 @@
 const DEFAULT_MANIFEST_SYNC_URL = 'http://54.166.171.208:8790';
-const MANIFEST_SYNC_TIMEOUT_MS = Math.max(500, Number(process.env.P2P_MANIFEST_SYNC_TIMEOUT_MS || 2500));
+const MANIFEST_SYNC_TIMEOUT_MS = Math.max(500, Number(process.env.P2P_MANIFEST_SYNC_TIMEOUT_MS || 8000));
 
 function normalizeBaseUrl(value = '') {
   return String(value || '').trim().replace(/\/$/, '');
