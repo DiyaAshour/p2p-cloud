@@ -34,7 +34,9 @@ function getUiPrefsManifest() {
   if (!identity) return null;
 
   return manifests.find(
-    (m) => m.kind === UI_PREFS_KIND && normalizeWallet(m.ownerWallet) === normalizeWallet(identity)
+    (m) =>
+      m.kind === UI_PREFS_KIND &&
+      normalizeWallet(m.ownerWallet) === normalizeWallet(identity)
   ) || null;
 }
 
@@ -44,7 +46,9 @@ ipcMain.handle('p2p:getUiPrefs', async () => {
 
   if (!walletState.connected || !walletState.verified) return {};
 
-  try { await syncPull(); } catch {}
+  try {
+    await syncPull();
+  } catch {}
 
   return getUiPrefsManifest()?.prefs || {};
 });
@@ -80,7 +84,9 @@ ipcMain.handle('p2p:setUiPrefs', async (_event, prefs = {}) => {
 
   persistManifests();
 
-  try { await syncPush(getUiPrefsManifest()); } catch {}
+  try {
+    await syncPush(getUiPrefsManifest());
+  } catch {}
 
   return { ok: true };
 });
@@ -114,8 +120,24 @@ function walkUploadFolderFiles(dir) {
   return files;
 }
 
+function walkUploadFolderDirs(dir) {
+  const dirs = [dir];
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      dirs.push(...walkUploadFolderDirs(fullPath));
+    }
+  }
+
+  return dirs;
+}
+
 async function ensureUploadFolderManifest(rootDir, dirPath, baseParentFolderId, pathToFolderId) {
-  if (pathToFolderId.has(dirPath)) return pathToFolderId.get(dirPath);
+  if (pathToFolderId.has(dirPath)) {
+    return pathToFolderId.get(dirPath);
+  }
 
   const relativeParts = path
     .relative(path.dirname(rootDir), dirPath)
@@ -125,7 +147,10 @@ async function ensureUploadFolderManifest(rootDir, dirPath, baseParentFolderId, 
   let parentFolderId = String(baseParentFolderId || '');
 
   for (let i = 0; i < relativeParts.length; i += 1) {
-    const partialAbsPath = path.join(path.dirname(rootDir), ...relativeParts.slice(0, i + 1));
+    const partialAbsPath = path.join(
+      path.dirname(rootDir),
+      ...relativeParts.slice(0, i + 1)
+    );
 
     if (pathToFolderId.has(partialAbsPath)) {
       parentFolderId = pathToFolderId.get(partialAbsPath);
@@ -172,7 +197,9 @@ async function ensureUploadFolderManifest(rootDir, dirPath, baseParentFolderId, 
       manifests.push(folder);
       persistManifests();
 
-      try { await syncPush(folder); } catch {}
+      try {
+        await syncPush(folder);
+      } catch {}
     }
 
     pathToFolderId.set(partialAbsPath, folder.folderId);
@@ -201,6 +228,7 @@ ipcMain.handle('p2p:uploadFolder', async (_event, payload = {}) => {
   }
 
   const rootDir = picked.filePaths[0];
+  const dirs = walkUploadFolderDirs(rootDir);
   const files = walkUploadFolderFiles(rootDir);
   const pathToFolderId = new Map();
   const uploaded = [];
@@ -208,6 +236,16 @@ ipcMain.handle('p2p:uploadFolder', async (_event, payload = {}) => {
 
   if (baseParentFolderId && !findFolderById(baseParentFolderId)) {
     throw new Error('Target parent folder not found');
+  }
+
+  // مهم: احفظ الفولدر نفسه وكل الفولدرات الداخلية حتى لو ما فيها ملفات
+  for (const dirPath of dirs) {
+    await ensureUploadFolderManifest(
+      rootDir,
+      dirPath,
+      baseParentFolderId,
+      pathToFolderId
+    );
   }
 
   try {
@@ -274,4 +312,5 @@ console.log('[upload-folder-ui-prefs] ensured IPC handlers', {
   hasUploadFolder: source.includes("ipcMain.handle('p2p:uploadFolder'"),
   hasGetUiPrefs: source.includes("ipcMain.handle('p2p:getUiPrefs'"),
   hasSetUiPrefs: source.includes("ipcMain.handle('p2p:setUiPrefs'"),
+  hasWalkUploadFolderDirs: source.includes('function walkUploadFolderDirs('),
 });
