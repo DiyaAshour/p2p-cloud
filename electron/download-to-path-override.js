@@ -9,8 +9,8 @@ const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const KDF_ITERATIONS = 310000;
 const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
 
-function normalizeWallet(address = '') {
-  return String(address || '').trim().toLowerCase();
+function normalizeIdentity(value = '') {
+  return String(value || '').trim().toLowerCase();
 }
 
 function safeName(name = '') {
@@ -47,18 +47,26 @@ function loadJson(file, fallback) {
   }
 }
 
-function activeWallet() {
+function activeIdentity() {
   const wallet = loadJson(walletPath(), {});
-  return normalizeWallet(wallet.address);
+  return normalizeIdentity(wallet.accountId || wallet.address || '');
+}
+
+function p2pNode() {
+  return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null;
+}
+
+function dropMemoryChunk(hash) {
+  try { p2pNode()?.localChunks?.delete?.(hash); } catch {}
 }
 
 function findManifest(payload = {}) {
-  const wallet = activeWallet();
+  const identity = activeIdentity();
   const hash = String(payload.hash || '');
   const rootHash = String(payload.rootHash || '');
   const all = loadJson(manifestsPath(), []);
   return Array.isArray(all)
-    ? all.find((m) => normalizeWallet(m.ownerWallet) === wallet && (m.hash === hash || m.rootHash === rootHash))
+    ? all.find((m) => normalizeIdentity(m.ownerWallet) === identity && (m.hash === hash || m.rootHash === rootHash))
     : null;
 }
 
@@ -71,11 +79,11 @@ function validateDrivePassword(drivePassword) {
 }
 
 function deriveDriveKey({ ownerWallet, drivePassword, salt }) {
-  const wallet = normalizeWallet(ownerWallet);
+  const identity = normalizeIdentity(ownerWallet);
   const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.from(String(salt || ''), 'base64');
   const iterations = Number(process.env.P2P_KDF_ITERATIONS || KDF_ITERATIONS);
-  return crypto.pbkdf2Sync(`${wallet}:${password}`, saltBuffer, iterations, 32, 'sha256');
+  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, iterations, 32, 'sha256');
 }
 
 function readLocalChunkBuffer(hash) {
@@ -86,11 +94,29 @@ function readLocalChunkBuffer(hash) {
   return Buffer.from(chunk.data, 'base64');
 }
 
+async function readNetworkChunk(hash) {
+  const node = p2pNode();
+  if (!node?.fetchChunkFromNetwork) return null;
+  const chunk = await node.fetchChunkFromNetwork(hash);
+  try { node.storeLocalChunk?.(chunk); } catch {}
+  dropMemoryChunk(hash);
+  return chunk?.data ? Buffer.from(chunk.data, 'base64') : null;
+}
+
 async function readChunkBuffer(hash, peerId = 'desktop-client') {
   const local = readLocalChunkBuffer(hash);
   if (local) return local;
+
+  try {
+    const network = await readNetworkChunk(hash);
+    if (network) return network;
+  } catch (error) {
+    console.warn('[download-to-path] network fetch failed, trying safety peer:', error?.message || error);
+  }
+
   const remote = await getChunkFromSafetyPeer(hash, peerId);
   if (!remote?.data) throw new Error(`Missing chunk: ${hash}`);
+  dropMemoryChunk(hash);
   return Buffer.from(remote.data, 'base64');
 }
 
@@ -103,6 +129,7 @@ async function writeChunksToTemp(manifest, tempPath) {
     for (const meta of ordered) {
       const buffer = await readChunkBuffer(meta.hash, manifest.ownerNodeId || 'desktop-client');
       await new Promise((resolve, reject) => out.write(buffer, (error) => (error ? reject(error) : resolve())));
+      dropMemoryChunk(meta.hash);
     }
     await new Promise((resolve, reject) => out.end((error) => (error ? reject(error) : resolve())));
   } catch (error) {
@@ -124,7 +151,7 @@ async function decryptTempToFile(tempPath, finalPath, manifest, drivePassword) {
 
 async function downloadManifestToPath(payload = {}) {
   const manifest = findManifest(payload);
-  if (!manifest) throw new Error('File not found for this wallet');
+  if (!manifest) throw new Error('File not found for this identity');
 
   const save = await dialog.showSaveDialog({
     title: 'Save downloaded file',
@@ -153,7 +180,7 @@ function installDownloadOverride() {
     try { ipcMain.removeHandler(channel); } catch {}
     ipcMain.handle(channel, async (_event, payload = {}) => downloadManifestToPath(payload));
   }
-  console.log('[download-to-path] installed safe streaming download handlers');
+  console.log('[download-to-path] installed disk-first streaming download handlers');
 }
 
 installDownloadOverride();
