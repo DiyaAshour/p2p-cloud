@@ -6,6 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Building2,
+  ChevronDown,
+  ChevronRight,
   Cloud,
   Download,
   Eye,
@@ -44,6 +46,9 @@ type Channel =
   | "p2p:renameItem"
   | "p2p:moveItem"
   | "p2p:uploadFiles"
+  | "p2p:uploadFolder"
+  | "p2p:getUiPrefs"
+  | "p2p:setUiPrefs"
   | "p2p:downloadToPath"
   | "p2p:delete"
   | "p2p:deleteFolder"
@@ -404,8 +409,10 @@ export default function NativeP2PAppLive() {
   );
 
   // Bulk select state
+  
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(new Set());
 
   const walletConnected = Boolean(
   wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
@@ -630,8 +637,31 @@ const visibleFiles = useMemo(() => {
   const companyBytes = companyFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
 
   useEffect(() => {
-    localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(activeWorkspace?.workspaceId || ""));
-  }, [activeWorkspace?.workspaceId]);
+  if (!api || !wallet?.connected) return;
+
+  api
+    .invoke<{ expandedFolderIds?: string[] }>("p2p:getUiPrefs")
+    .then((prefs) => {
+      if (prefs?.expandedFolderIds?.length) {
+        setExpandedFolderIds(new Set(prefs.expandedFolderIds));
+      }
+    })
+    .catch(() => {});
+}, [api, wallet?.connected]);
+
+useEffect(() => {
+  if (!api || !wallet?.connected) return;
+
+  const t = setTimeout(() => {
+    api
+      .invoke("p2p:setUiPrefs", {
+        expandedFolderIds: Array.from(expandedFolderIds),
+      })
+      .catch(() => {});
+  }, 800);
+
+  return () => clearTimeout(t);
+}, [api, expandedFolderIds, wallet?.connected]);
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -1113,51 +1143,89 @@ await api.invoke("p2p:deleteItem", {
     toast.success(`Folder "${folder.name}" deleted`);
   });
 
-  const upload = () =>
-    run(async () => {
-      if (!identityConnected) {
-  throw new Error("Connect wallet or sign in with Seed Account before uploading");
-}
+const upload = () =>
+  run(async () => {
+    if (!identityConnected) {
+      throw new Error("Connect wallet or sign in with Seed Account before uploading");
+    }
 
-      if ((view === "company" || view === "admin") && !activeWorkspace) {
-        throw new Error("Create or select a company first");
+    if ((view === "company" || view === "admin") && !activeWorkspace) {
+      throw new Error("Create or select a company first");
+    }
+
+    if ((view === "company" || view === "admin") && !canUpload(localRole)) {
+      throw new Error("Your company role cannot upload files");
+    }
+
+    const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
+      "p2p:uploadFiles",
+      {
+        isEncrypted,
+        drivePassword: password(),
+        workspaceId:
+          view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
+        folderPath:
+          activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+        folderId: activeFolderId || "",
       }
+    );
 
-      if ((view === "company" || view === "admin") && !canUpload(localRole)) {
-        throw new Error("Your company role cannot upload files");
-      }
-
-      const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
-        "p2p:uploadFiles",
-        {
-          isEncrypted,
-          drivePassword: password(),
-          workspaceId:
-            view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
-          folderPath:
+    if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
+      for (const file of result.files) {
+        await api.invoke("company:addFile", {
+          workspaceId: activeWorkspace.workspaceId,
+          file,
+          folder:
             activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-          folderId: activeFolderId || "",
-        }
-      );
-
-      if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
-        for (const file of result.files) {
-          await api.invoke("company:addFile", {
-            workspaceId: activeWorkspace.workspaceId,
-            file,
-            folder:
-              activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-          });
-        }
+        });
       }
+    }
 
-      if (!result?.cancelled) {
-        toast.success(`${result?.files?.length || 1} file(s) stored safely`);
+    if (!result?.cancelled) {
+      toast.success(`${result?.files?.length || 1} file(s) stored safely`);
+    }
+
+    await refresh();
+  });
+const uploadFolder = () =>
+  run(async () => {
+    if (!identityConnected) {
+      throw new Error("Connect wallet or sign in with Seed Account before uploading");
+    }
+
+    if ((view === "company" || view === "admin") && !activeWorkspace) {
+      throw new Error("Create or select a company first");
+    }
+
+    if ((view === "company" || view === "admin") && !canUpload(localRole)) {
+      throw new Error("Your company role cannot upload files");
+    }
+
+    const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
+      "p2p:uploadFolder",
+      {
+        isEncrypted,
+        drivePassword: password(),
+        folderId: activeFolderId || "",
       }
+    );
 
-      await refresh();
-    });
+    if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
+      for (const file of result.files) {
+        await api.invoke("company:addFile", {
+          workspaceId: activeWorkspace.workspaceId,
+          file,
+          folder: activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+        });
+      }
+    }
 
+    if (!result?.cancelled) {
+      toast.success(`${result?.files?.length || 0} file(s) uploaded from folder`);
+    }
+
+    await refresh();
+  });
   const download = (file: P2PFile) =>
     run(async () => {
       const result = await api.invoke<{ cancelled?: boolean; path?: string }>(
@@ -1294,10 +1362,39 @@ const clearSelection = () => {
 const renderFolderNode = (folder: DriveFolder, depth = 0) => {
   const selected = activeFolderId === folder.folderId;
   const children = folderChildren.get(folder.folderId) || [];
+  const hasChildren = children.length > 0;
+  const expanded = expandedFolderIds.has(folder.folderId);
+
+  const toggleExpanded = () => {
+    setExpandedFolderIds((prev) => {
+      const next = new Set(prev);
+
+      if (next.has(folder.folderId)) {
+        next.delete(folder.folderId);
+      } else {
+        next.add(folder.folderId);
+      }
+
+      return next;
+    });
+  };
 
   return (
     <div key={folder.folderId} className="space-y-1">
       <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
+        {hasChildren ? (
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            title={expanded ? "Collapse" : "Expand"}
+          >
+            {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+          </button>
+        ) : (
+          <span className="w-5" />
+        )}
+
         <button
           onClick={() => {
             setActiveFolder(folderPath(folder));
@@ -1339,7 +1436,7 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
         </button>
       </div>
 
-      {children.map((child) => renderFolderNode(child, depth + 1))}
+      {expanded && children.map((child) => renderFolderNode(child, depth + 1))}
     </div>
   );
 };
@@ -1788,11 +1885,18 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
                 </div>
 
                 {(view === "personal" || view === "company" || view === "admin") && (
-                  <Button onClick={upload} disabled={busy}>
-                    <Upload className="size-4" />
-                    Upload
-                  </Button>
-                )}
+  <>
+    <Button onClick={upload} disabled={busy}>
+      <Upload className="size-4" />
+      Upload
+    </Button>
+
+    <Button onClick={uploadFolder} disabled={busy} variant="outline">
+      <FolderPlus className="size-4" />
+      Upload Folder
+    </Button>
+  </>
+)}
               </div>
 
               {view === "personal" && (
