@@ -1,0 +1,9 @@
+packages:
+  - "."
+
+onlyBuiltDependencies:
+  - argon2
+  - bufferutil
+  - electron
+  - esbuild
+  - utf-8-validate
