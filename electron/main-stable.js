@@ -32,6 +32,7 @@ const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENG
 const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
 const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
 const FOLDER_MANIFEST_KIND = 'folder';
+const UI_PREFS_KIND = 'ui:prefs';
 
 const PLANS = {
   free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
@@ -360,7 +361,7 @@ async function runAutoRepair(reason = 'interval') {
   }
 
   const node = ensureTransport({});
-  const own = walletManifests();
+  const own = walletFileManifests();
 
   // Skip repair if no peers available (P2P peers OR safety peer)
   const connectedPeers = node.connectedPeerIds?.() || [];
@@ -465,29 +466,41 @@ function safePeerList(node) {
 
 function networkSummary() {
   const node = ensureTransport({});
-  const own = walletManifests();
+  const files = walletFileManifests();
+  const folders = walletFolderManifests();
   const connectedPeers = node.connectedPeerIds?.() || [];
-  return { ok: true, peerId: node.peerId, port: node.port, host: node.host, listenUrl: `ws://127.0.0.1:${node.port}`, publicPeerUrl: publicPeerUrl(node), safetyPeerUrl: safetyPeerUrl(), connectedPeers: connectedPeers.length, peerCount: connectedPeers.length, peers: safePeerList(node), targetReplicas: TARGET_REPLICAS, totalFiles: own.length, encryptedFiles: own.filter((f) => f.isEncrypted).length, publicFiles: own.filter((f) => !f.isEncrypted).length, totalBytes: own.reduce((s, f) => s + Number(f.size || 0), 0), totalChunks: own.reduce((s, f) => s + Number(f.chunks?.length || 0), 0), underReplicatedChunks: countUnderReplicatedChunks(node, own, TARGET_REPLICAS), transferProgress, transferSettings: { uploadConcurrency: UPLOAD_CONCURRENCY, downloadConcurrency: DOWNLOAD_CONCURRENCY }, autoRepair: lastAutoRepairStatus, wallet: walletSummary(), sync: lastSyncStatus };
+
+  return {
+    ok: true,
+    peerId: node.peerId,
+    port: node.port,
+    host: node.host,
+    listenUrl: `ws://127.0.0.1:${node.port}`,
+    publicPeerUrl: publicPeerUrl(node),
+    safetyPeerUrl: safetyPeerUrl(),
+    connectedPeers: connectedPeers.length,
+    peerCount: connectedPeers.length,
+    peers: safePeerList(node),
+    targetReplicas: TARGET_REPLICAS,
+
+    totalFiles: files.length,
+    totalFolders: folders.length,
+    encryptedFiles: files.filter((f) => f.isEncrypted).length,
+    publicFiles: files.filter((f) => !f.isEncrypted).length,
+    totalBytes: files.reduce((s, f) => s + Number(f.size || 0), 0),
+    totalChunks: files.reduce((s, f) => s + Number(f.chunks?.length || 0), 0),
+    underReplicatedChunks: countUnderReplicatedChunks(node, files, TARGET_REPLICAS),
+
+    transferProgress,
+    transferSettings: {
+      uploadConcurrency: UPLOAD_CONCURRENCY,
+      downloadConcurrency: DOWNLOAD_CONCURRENCY,
+    },
+    autoRepair: lastAutoRepairStatus,
+    wallet: walletSummary(),
+    sync: lastSyncStatus,
+  };
 }
-
-function resolvePreloadPath() { const preloadPath = path.join(__dirname, 'preload.cjs'); if (!fs.existsSync(preloadPath)) throw new Error(`Missing Electron preload file: ${preloadPath}`); return preloadPath; }
-function resolveRendererIndexPath() { const candidates = [path.join(app.getAppPath(), 'dist', 'public', 'index.html'), path.join(app.getAppPath(), 'public', 'index.html'), path.join(__dirname, '..', 'dist', 'public', 'index.html'), path.join(process.resourcesPath || '', 'app', 'dist', 'public', 'index.html')]; for (const c of candidates) if (c && fs.existsSync(c)) return c; throw new Error(`Renderer index.html not found. Tried: ${candidates.join(' | ')}`); }
-function createMainWindow() { mainWindow = new BrowserWindow({ title: APP_TITLE, width: 1280, height: 820, minWidth: 980, minHeight: 680, backgroundColor: '#09090b', show: false, webPreferences: { preload: resolvePreloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: false } }); mainWindow.once('ready-to-show', () => mainWindow?.show()); mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); if (IS_DEV) mainWindow.loadURL(DEV_SERVER_URL); else mainWindow.loadFile(resolveRendererIndexPath()); mainWindow.on('closed', () => { mainWindow = null; }); }
-
-ipcMain.handle('wallet:status', async () => {
-  loadWallet();
-  loadManifests();
-
-  if (walletState.connected && walletState.verified) {
-    try {
-      await syncPull();
-    } catch (error) {
-      lastSyncStatus = {
-        ...lastSyncStatus,
-        ok: false,
-        error: error?.message || String(error),
-      };
-    }
   }
 
   return walletSummary();
@@ -654,7 +667,6 @@ ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
 });
 
 // === UI Preferences (synced across devices via manifest) ===
-const UI_PREFS_KIND = 'ui:prefs';
 
 function getUiPrefsManifest() {
   const identity = activeWallet();
@@ -1746,9 +1758,29 @@ ipcMain.handle('p2p:uploadFolder', async (_event, payload = {}) => {
     return result;
   }
 
-  const allFiles = walkDir(rootDir);
-  const uploaded = [];
-  const node = ensureTransport({});
+function walkDirs(dir) {
+  const result = [dir];
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isDirectory()) {
+      result.push(...walkDirs(fullPath));
+    }
+  }
+
+  return result;
+}
+
+const allDirs = walkDirs(rootDir);
+
+for (const dir of allDirs) {
+  await ensureFolderForPath(dir);
+}
+
+const allFiles = walkDir(rootDir);
+const uploaded = [];
+const node = ensureTransport({});
   const privateFile = Boolean(payload.isEncrypted);
   const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
 
