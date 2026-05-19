@@ -37,6 +37,7 @@
     "@adraffy/ens-normalize": "^1.11.1",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
+    "@phc/format": "^1.0.0",
     "@radix-ui/react-checkbox": "^1.3.3",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.7",
@@ -97,6 +98,9 @@
     "appId": "com.chunknet.desktop",
     "productName": "Chunknet",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/argon2/**/*"
+    ],
     "directories": {
       "output": "release"
     },
