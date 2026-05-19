@@ -20,6 +20,8 @@ const MAX_CHUNK_BYTES = Number(process.env.STORAGE_PEER_MAX_CHUNK_BYTES || 2 * 1
 const MAX_MESSAGE_BYTES = Number(process.env.STORAGE_PEER_MAX_MESSAGE_BYTES || Math.ceil(MAX_CHUNK_BYTES * 1.45) + 8192);
 const MAX_PUTS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_PUTS_PER_MINUTE || 240);
 const MAX_GETS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_GETS_PER_MINUTE || 600);
+const MAX_DELETES_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_DELETES_PER_MINUTE || 600);
+const DELETE_ADMIN_TOKEN = String(process.env.STORAGE_PEER_ADMIN_TOKEN || process.env.P2P_SAFETY_PEER_DELETE_TOKEN || '').trim();
 const PUBLIC_DISPLAY_URL = 'Network route';
 const PUBLIC_ROLE = 'safety-peer';
 
@@ -75,10 +77,14 @@ function writeIndex(index) {
   fs.writeFileSync(INDEX_PATH, JSON.stringify(index, null, 2), 'utf8');
 }
 
+function normalizeChunkHash(hash = '') {
+  const clean = String(hash || '').toLowerCase().replace(/[^a-f0-9]/g, '');
+  if (!/^[a-f0-9]{64}$/.test(clean)) throw new Error('Invalid chunk hash');
+  return clean;
+}
+
 function chunkPath(hash) {
-  const clean = String(hash || '').replace(/[^a-fA-F0-9]/g, '');
-  if (!/^[a-fA-F0-9]{64}$/.test(clean)) throw new Error('Invalid chunk hash');
-  return path.join(CHUNKS_DIR, `${clean}.json`);
+  return path.join(CHUNKS_DIR, `${normalizeChunkHash(hash)}.json`);
 }
 
 function sha256Hex(buffer) {
@@ -87,8 +93,8 @@ function sha256Hex(buffer) {
 
 function peerBucket(socket, type) {
   const now = Date.now();
-  const key = type === 'get' ? 'getRate' : 'putRate';
-  const limit = type === 'get' ? MAX_GETS_PER_MINUTE : MAX_PUTS_PER_MINUTE;
+  const key = type === 'get' ? 'getRate' : type === 'delete' ? 'deleteRate' : 'putRate';
+  const limit = type === 'get' ? MAX_GETS_PER_MINUTE : type === 'delete' ? MAX_DELETES_PER_MINUTE : MAX_PUTS_PER_MINUTE;
   const current = socket[key] || { startedAt: now, count: 0 };
   if (now - current.startedAt > 60_000) {
     current.startedAt = now;
@@ -146,6 +152,18 @@ function loadChunk(hash) {
   } catch {
     return null;
   }
+}
+
+function deleteChunk(hash) {
+  const clean = normalizeChunkHash(hash);
+  const file = chunkPath(clean);
+  const existed = fs.existsSync(file);
+  if (existed) fs.unlinkSync(file);
+  const index = readIndex();
+  const wasIndexed = Boolean(index[clean]);
+  delete index[clean];
+  writeIndex(index);
+  return { hash: clean, deleted: existed || wasIndexed, fileDeleted: existed, indexDeleted: wasIndexed };
 }
 
 function send(socket, message) {
@@ -216,8 +234,7 @@ function handlePeerMessage(socket, raw) {
   if (message.type === 'chunk:get') {
     try {
       peerBucket(socket, 'get');
-      const chunkHash = String(message.payload?.chunkHash || '').toLowerCase();
-      if (!/^[a-f0-9]{64}$/.test(chunkHash)) throw new Error('Invalid chunk hash');
+      const chunkHash = normalizeChunkHash(message.payload?.chunkHash || '');
       const chunk = loadChunk(chunkHash);
       if (chunk) {
         send(socket, {
@@ -250,6 +267,37 @@ function handlePeerMessage(socket, raw) {
         error: error?.message || 'Failed to read chunk',
       });
     }
+    return;
+  }
+
+  if (message.type === 'chunk:delete') {
+    try {
+      peerBucket(socket, 'delete');
+      if (DELETE_ADMIN_TOKEN && message.payload?.adminToken !== DELETE_ADMIN_TOKEN) {
+        throw new Error('Invalid storage peer delete token');
+      }
+      const chunkHash = normalizeChunkHash(message.payload?.chunkHash || '');
+      const result = deleteChunk(chunkHash);
+      send(socket, {
+        id: crypto.randomUUID(),
+        type: result.deleted ? 'chunk:deleted' : 'chunk:not-found',
+        fromPeerId: PEER_ID,
+        toPeerId: message.fromPeerId,
+        createdAt: Date.now(),
+        payload: { chunkHash, ...result },
+      });
+      console.log(result.deleted ? '[storage-peer] deleted chunk' : '[storage-peer] delete missing chunk', chunkHash, 'from', message.fromPeerId || 'unknown');
+    } catch (error) {
+      send(socket, {
+        id: crypto.randomUUID(),
+        type: 'chunk:error',
+        fromPeerId: PEER_ID,
+        toPeerId: message.fromPeerId,
+        createdAt: Date.now(),
+        error: error?.message || 'Failed to delete chunk',
+      });
+    }
+    return;
   }
 }
 
@@ -322,3 +370,4 @@ console.log(`[storage-peer] listening on ws://${HOST}:${PORT}`);
 console.log(`[storage-peer] advertising ${PUBLIC_URL}`);
 console.log(`[storage-peer] chunks: ${CHUNKS_DIR}`);
 console.log(`[storage-peer] max chunk bytes: ${MAX_CHUNK_BYTES}`);
+console.log(`[storage-peer] delete support: enabled${DELETE_ADMIN_TOKEN ? ' with admin token' : ''}`);
