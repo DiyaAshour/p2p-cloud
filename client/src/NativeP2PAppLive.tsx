@@ -265,6 +265,14 @@ function fileKeyMatches(companyFile: CompanyFile, file: P2PFile) {
 }
 
 function protection(file: P2PFile) {
+  if (!file.totalChunks || file.totalChunks <= 0) {
+    return {
+      label: "No chunks",
+      tone: "text-zinc-400",
+      details: "0/0 chunks",
+    };
+  }
+
   const status = file.replicationStatus || "protecting";
 
   if (status === "protected") {
