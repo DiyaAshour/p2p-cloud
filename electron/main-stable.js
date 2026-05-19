@@ -249,7 +249,7 @@ function persistManifests() { ensureDataDir(); fs.writeFileSync(manifestsPath, J
 function walletOwnsManifest(manifest) { return normalizeWallet(manifest.ownerWallet) === activeWallet(); }
 function walletManifests() { return walletState.connected ? manifests.filter(walletOwnsManifest).filter(isUsableManifest) : []; }
 function sanitizeFolderManifest(folder = {}) { Object.assign(folder, { kind: 'folder', isFolder: true, isEncrypted: false, visibility: 'private', isPublic: false, size: 0, storedSize: 0, totalChunks: 0, chunkSize: 0, chunks: [], encryption: null, replicas: Array.isArray(folder.replicas) ? folder.replicas : [] }); return folder; }
-function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && !m.isFolder); }
+function walletFileManifests() { return walletManifests().filter((m) => m.kind !== FOLDER_MANIFEST_KIND && m.kind !== UI_PREFS_KIND && !m.isFolder); }
 function walletFolderManifests() { return walletManifests().filter((m) => m.kind === FOLDER_MANIFEST_KIND || m.isFolder === true || String(m.hash || '').startsWith('folder:')).map(sanitizeFolderManifest); }
 function folderOwnerIdentity() { return typeof activeIdentity === 'function' ? activeIdentity() : activeWallet(); }
 function assertFolderIdentity() { if (typeof assertVerifiedIdentity === 'function') return assertVerifiedIdentity(); return assertVerifiedWallet(); }
@@ -651,6 +651,45 @@ ipcMain.handle('p2p:deleteFolder', async (_event, payload = {}) => {
   for (const removedFolder of removedFolders) await syncDelete(folderOwnerIdentity(), removedFolder.hash);
   await syncPull();
   return { ok: true, removed: removed.size, folders: walletFolderManifests() };
+});
+
+// === UI Preferences (synced across devices via manifest) ===
+const UI_PREFS_KIND = 'ui:prefs';
+
+function getUiPrefsManifest() {
+  const identity = activeWallet();
+  if (!identity) return null;
+  return manifests.find(
+    (m) => m.kind === UI_PREFS_KIND &&
+           normalizeWallet(m.ownerWallet) === normalizeWallet(identity)
+  ) || null;
+}
+
+ipcMain.handle('p2p:getUiPrefs', async () => {
+  if (!walletState.connected || !walletState.verified) return {};
+  try { await syncPull(); } catch {}
+  return getUiPrefsManifest()?.prefs || {};
+});
+
+ipcMain.handle('p2p:setUiPrefs', async (_event, prefs = {}) => {
+  if (!walletState.connected || !walletState.verified) return { ok: false };
+  const identity = activeWallet();
+  const existing = getUiPrefsManifest();
+  const now = new Date().toISOString();
+  const hash = 'ui:prefs:' + normalizeWallet(identity);
+  if (existing) {
+    Object.assign(existing, { prefs: { ...existing.prefs, ...prefs }, updatedAt: now });
+  } else {
+    manifests.push({
+      kind: UI_PREFS_KIND, hash, rootHash: hash,
+      id: normalizeWallet(identity) + ':' + hash,
+      ownerWallet: normalizeWallet(identity),
+      prefs, createdAt: now, updatedAt: now,
+    });
+  }
+  persistManifests();
+  try { await syncPush(getUiPrefsManifest()); } catch {}
+  return { ok: true };
 });
 
 ipcMain.handle('p2p:moveFile', async (_event, payload = {}) => {
