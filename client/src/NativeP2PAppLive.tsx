@@ -1184,18 +1184,26 @@ const upload = () =>
       throw new Error("Your company role cannot upload files");
     }
 
-    const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
-      "p2p:uploadFiles",
-      {
-        isEncrypted,
-        drivePassword: password(),
-        workspaceId:
-          view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
-        folderPath:
-          activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-        folderId: activeFolderId || "",
-      }
-    );
+    const targetFolder = activeFolderId ? folderById.get(activeFolderId) : null;
+
+const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
+  "p2p:uploadFiles",
+  {
+    isEncrypted,
+    drivePassword: password(),
+
+    workspaceId:
+      view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
+
+    folderId: activeFolderId || "",
+    parentFolderId: activeFolderId || "",
+    folderName: targetFolder?.name || "",
+    folderPath:
+      activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+        ? activeFolder
+        : "",
+  }
+);
 
     if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
       for (const file of result.files) {
