@@ -156,7 +156,12 @@ async function uploadOne(filePath, payload = {}) {
   const next = manifests().filter((m) => !(normalize(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
   next.push(manifest);
   saveManifests(next);
-  await pushWalletManifest(manifest);
+  // Manifest sync is best-effort — upload must not fail if the sync server is unreachable or slow
+  try {
+    await pushWalletManifest(manifest);
+  } catch (syncErr) {
+    console.warn('[stream-upload] manifest sync push failed (non-fatal, will retry on next pull):', syncErr?.message || syncErr);
+  }
   return manifest;
 }
 async function uploadFiles(payload = {}) {
