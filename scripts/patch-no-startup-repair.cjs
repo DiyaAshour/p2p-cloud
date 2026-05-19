@@ -64,10 +64,11 @@ for (const file of files) {
   }
 }
 
-const extraPatch = 'scripts/patch-upload-folder-ui-prefs.cjs';
-if (fs.existsSync(extraPatch)) {
-  const result = spawnSync(process.execPath, [extraPatch], { stdio: 'inherit' });
-  if (result.status) process.exit(result.status);
-} else {
-  console.warn('[no-startup-repair] missing optional patch:', extraPatch);
+for (const extraPatch of ['scripts/patch-upload-folder-ui-prefs.cjs', 'scripts/patch-ui-protection-status.cjs']) {
+  if (fs.existsSync(extraPatch)) {
+    const result = spawnSync(process.execPath, [extraPatch], { stdio: 'inherit' });
+    if (result.status) process.exit(result.status);
+  } else {
+    console.warn('[no-startup-repair] missing optional patch:', extraPatch);
+  }
 }
