@@ -1,4 +1,5 @@
 import './p2p-disk-first-cache-override.js';
+import './p2p-low-memory-send-override.js';
 import { P2PTransportNode } from './p2p-transport.js';
 
 if (!P2PTransportNode.prototype.__chunknetGlobalRegistryPatched) {
