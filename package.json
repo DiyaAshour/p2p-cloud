@@ -131,9 +131,11 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
+      "argon2",
+      "bufferutil",
       "electron",
       "esbuild",
-      "argon2"
+      "utf-8-validate"
     ]
   }
 }
