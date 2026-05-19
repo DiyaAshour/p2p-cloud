@@ -5,13 +5,32 @@ console.log('[preload] LOADED');
 const allowedChannels = new Set([
   'p2p:start',
   'p2p:listFiles',
+  'p2p:listFolders',
+
   'drive:getFolders',
   'drive:saveFolders',
+
+  'p2p:createFolder',
+  'p2p:deleteFolder',
+  'p2p:deleteItem',
+  'p2p:renameItem',
+  'p2p:moveItem',
+  'p2p:moveFile',
+  'p2p:renameFolder',
+  'p2p:moveFolder',
+
   'p2p:uploadFiles',
+  'p2p:uploadFolder',
   'p2p:uploadPath',
+
   'p2p:downloadToPath',
+
   'p2p:updateFile',
   'p2p:delete',
+
+  'p2p:getUiPrefs',
+  'p2p:setUiPrefs',
+
   'p2p:networkSummary',
   'p2p:bootstrapNow',
   'p2p:connectPeer',
@@ -19,13 +38,16 @@ const allowedChannels = new Set([
   'p2p:protectionRetryNow',
   'p2p:prepareProof',
   'p2p:cancelTransfer',
+
   'wallet:status',
   'wallet:connect',
   'wallet:disconnect',
   'wallet:setPlan',
+
   'seed:create',
   'seed:login',
   'seed:recover',
+
   'company:state',
   'company:deviceIdentity',
   'company:createWorkspace',
@@ -42,6 +64,7 @@ const allowedChannels = new Set([
   'company:removeMember',
   'company:addFile',
   'company:updateFile',
+
   'electron:openDevTools',
   'electron:diagnostics',
   'system:open-external',
