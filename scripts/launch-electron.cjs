@@ -19,7 +19,7 @@ const electronBin = path.join(__dirname, '..', 'node_modules', '.bin', isWin ? '
 const child = spawn(electronBin, ['.'], {
   stdio: 'inherit',
   env: process.env,
-  shell: false,
+  shell: isWin,
 });
 
 child.on('error', (err) => {
