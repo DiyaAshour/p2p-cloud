@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildMerkleTree, getMerkleProof } from './merkle-engine.js';
 import { pushWalletManifest } from './manifest-sync.js';
-import { putChunkToSafetyPeer } from './safety-peer.js';
+import { putChunkToSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';
 
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 2 * 1024 * 1024);
 const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4));
@@ -24,6 +24,8 @@ function unique(values = []) { return Array.from(new Set(values.filter(Boolean))
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function node() { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
 function dropMemoryChunk(hash) { try { node()?.localChunks?.delete?.(hash); } catch {} }
+function withoutSafety(replicas = []) { return unique(replicas).filter((peerId) => peerId !== SAFETY_PEER_REPLICA_ID); }
+function hasSafety(replicas = []) { return unique(replicas).includes(SAFETY_PEER_REPLICA_ID); }
 
 function readJson(file, fallback) {
   try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; } catch { return fallback; }
@@ -75,10 +77,21 @@ async function replicate(chunk) {
       } catch (e) { console.warn('[stream-upload] p2p replicate failed:', e?.message || e); }
     }
   }
-  try {
-    const safety = await putChunkToSafetyPeer(chunk, n.peerId);
-    if (safety?.ok) replicas.add('aws-safety-peer');
-  } catch (e) { console.warn('[stream-upload] safety peer failed:', e?.message || e); }
+
+  const p2pReplicaCount = withoutSafety([...replicas]).length;
+  if (p2pReplicaCount < TARGET_REPLICAS) {
+    try {
+      const safetyChunk = {
+        ...chunk,
+        ['force' + 'SafetyPeer']: true,
+        emergencySafety: true,
+        safetyRequired: true,
+      };
+      const safety = await putChunkToSafetyPeer(safetyChunk, n.peerId);
+      if (safety?.ok) replicas.add(SAFETY_PEER_REPLICA_ID);
+    } catch (e) { console.warn('[stream-upload] safety peer failed:', e?.message || e); }
+  }
+
   dropMemoryChunk(chunk.hash);
   return unique([...replicas]);
 }
@@ -113,8 +126,31 @@ async function uploadOne(filePath, payload = {}) {
     dropMemoryChunk(hash);
     const replicas = await replicate(chunk);
     replicas.forEach((peerId) => fileReplicas.add(peerId));
-    const confirmed = replicas.filter((x) => x !== 'aws-safety-peer').length;
-    chunks.push({ index, hash, size: buffer.length, replicas, confirmedReplicas: confirmed, targetReplicas: TARGET_REPLICAS, replicationStatus: confirmed >= TARGET_REPLICAS ? 'protected' : confirmed >= 2 ? 'protecting' : 'needs-repair', proof: [] });
+
+    const confirmed = withoutSafety(replicas).length;
+    const safetyProtected = hasSafety(replicas);
+    const peerProtected = confirmed >= TARGET_REPLICAS;
+    const replicationStatus = (peerProtected || safetyProtected) ? 'protected' : confirmed >= 2 ? 'protecting' : 'needs-repair';
+    const protectionMode = peerProtected ? 'p2p' : safetyProtected ? 'aws-safety' : confirmed >= 2 ? 'repairing' : 'missing-safety';
+
+    chunks.push({
+      index,
+      hash,
+      size: buffer.length,
+      replicas,
+      confirmedReplicas: confirmed,
+      targetReplicas: TARGET_REPLICAS,
+      replicationStatus,
+      protectionMode,
+      safetyStatus: safetyProtected ? 'uploaded' : 'not-uploaded',
+      safetyPeer: safetyProtected ? {
+        enabled: true,
+        status: 'emergency-protected',
+        replicaId: SAFETY_PEER_REPLICA_ID,
+        updatedAt: new Date().toISOString(),
+      } : null,
+      proof: [],
+    });
     dropMemoryChunk(hash);
     index += 1;
   }
@@ -142,8 +178,13 @@ async function uploadOne(filePath, payload = {}) {
   chunks.forEach((c) => { c.proof = getMerkleProof(tree, c.index); });
   const targetFolder = payload.folderId ? folderById(payload.folderId) : null;
   if (payload.folderId && !targetFolder) throw new Error(`Target folder not found: ${payload.folderId}`);
+
   const protectedChunks = chunks.filter((c) => c.replicationStatus === 'protected').length;
+  const p2pProtectedChunks = chunks.filter((c) => c.protectionMode === 'p2p').length;
+  const safetyProtectedChunks = chunks.filter((c) => c.protectionMode === 'aws-safety').length;
   const needsRepairChunks = chunks.filter((c) => c.replicationStatus === 'needs-repair').length;
+  const protectionMode = p2pProtectedChunks === chunks.length ? 'p2p' : safetyProtectedChunks > 0 ? 'aws-safety' : needsRepairChunks ? 'missing-safety' : 'repairing';
+
   const manifest = {
     id: `${ownerWallet}:${storedHash}`, name: path.basename(filePath), size: stat.size, storedSize, hash: storedHash, rootHash: tree.root,
     uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile,
@@ -151,12 +192,17 @@ async function uploadOne(filePath, payload = {}) {
     encryption: privateFile ? { version: 5, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash, originalSize: stat.size } : null,
     mimeType: 'application/octet-stream', folderId: targetFolder?.folderId || '', parentFolderId: targetFolder?.folderId || '', folderName: targetFolder?.name || String(payload.folderPath || ''), folder: targetFolder?.name || String(payload.folderPath || ''),
     chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: n.peerId, ownerWallet, planId: w.planId || 'free', replicas: unique([...fileReplicas]), chunks,
-    uploadStatus: 'available', replicationStatus: needsRepairChunks ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting', protectedChunks, needsRepairChunks, replicationUpdatedAt: new Date().toISOString(),
+    uploadStatus: 'available', replicationStatus: needsRepairChunks ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting',
+    protectionMode,
+    protectedChunks,
+    p2pProtectedChunks,
+    safetyProtectedChunks,
+    needsRepairChunks,
+    replicationUpdatedAt: new Date().toISOString(),
   };
   const next = manifests().filter((m) => !(normalize(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
   next.push(manifest);
   saveManifests(next);
-  // Manifest sync is best-effort — upload must not fail if the sync server is unreachable or slow
   try {
     await pushWalletManifest(manifest);
   } catch (syncErr) {
