@@ -64,7 +64,11 @@ for (const file of files) {
   }
 }
 
-for (const extraPatch of ['scripts/patch-upload-folder-ui-prefs.cjs', 'scripts/patch-ui-protection-status.cjs']) {
+for (const extraPatch of [
+  'scripts/patch-upload-folder-ui-prefs.cjs',
+  'scripts/patch-ui-protection-status.cjs',
+  'scripts/patch-hard-delete-runtime.cjs',
+]) {
   if (fs.existsSync(extraPatch)) {
     const result = spawnSync(process.execPath, [extraPatch], { stdio: 'inherit' });
     if (result.status) process.exit(result.status);
