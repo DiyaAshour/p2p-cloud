@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { getChunkFromSafetyPeer } from './safety-peer.js';
+import './hard-delete-override.js';
 
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const KDF_ITERATIONS = 310000;
