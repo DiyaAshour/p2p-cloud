@@ -642,6 +642,25 @@ const visibleFiles = useMemo(() => {
     companyFileByKey,
   ]);
 
+  const visibleFolders = useMemo(() => {
+  if (view !== "personal") return [];
+  if (activeFolder === UNCATEGORIZED) return [];
+
+  const q = search.trim().toLowerCase();
+  const parentId = activeFolder === ALL_FILES ? "" : activeFolderId;
+
+  return manifestFolders
+    .filter((folder) => String(folder.parentFolderId || "") === parentId)
+    .filter((folder) => {
+      if (!q) return true;
+
+      return [folder.name, folderPath(folder), folder.folderId, folder.hash, folder.rootHash].some(
+        (value) => String(value || "").toLowerCase().includes(q)
+      );
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}, [view, activeFolder, activeFolderId, search, manifestFolders, folderById]);
+  
   const companyBytes = companyFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
 
   useEffect(() => {
@@ -1449,6 +1468,152 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
   );
 };
 
+  function collectChildFolderIds(folderId: string): Set<string> {
+  const ids = new Set<string>([folderId]);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    for (const folder of manifestFolders) {
+      const parent = String(folder.parentFolderId || "");
+
+      if (parent && ids.has(parent) && !ids.has(folder.folderId)) {
+        ids.add(folder.folderId);
+        changed = true;
+      }
+    }
+  }
+
+  return ids;
+}
+
+function folderStats(folder: DriveFolder) {
+  const ids = collectChildFolderIds(folder.folderId);
+
+  const nestedFiles = personalFiles.filter((file) => {
+    const folderId = getPersonalFileFolderId(file);
+    return folderId && ids.has(folderId);
+  });
+
+  const totalBytes = nestedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  const totalChunks = nestedFiles.reduce((sum, file) => sum + Number(file.totalChunks || 0), 0);
+  const protectedChunks = nestedFiles.reduce(
+    (sum, file) => sum + Number(file.protectedChunks ?? file.totalChunks ?? 0),
+    0
+  );
+
+  return {
+    files: nestedFiles.length,
+    bytes: totalBytes,
+    totalChunks,
+    protectedChunks,
+  };
+}
+
+const openFolder = (folder: DriveFolder) => {
+  setActiveFolder(folderPath(folder));
+  setActiveFolderId(folder.folderId);
+
+  setExpandedFolderIds((prev) => {
+    const next = new Set(prev);
+    next.add(folder.folderId);
+    return next;
+  });
+};
+
+const renderFolderCard = (folder: DriveFolder) => {
+  const stats = folderStats(folder);
+  const isProtected = stats.totalChunks > 0 && stats.protectedChunks >= stats.totalChunks;
+
+  return (
+    <Card
+      key={`folder-card:${folder.folderId}`}
+      onDoubleClick={() => openFolder(folder)}
+      className="cursor-pointer rounded-2xl border-zinc-800 bg-zinc-900 transition-all hover:border-blue-500"
+    >
+      <CardContent className="space-y-4 p-5">
+        <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
+          <FolderOpen className="size-10 text-blue-400" />
+        </div>
+
+        <div>
+          <p className="truncate text-sm font-semibold">{folder.name}</p>
+
+          <p className="text-xs text-zinc-400">
+            {stats.files} file(s) · {bytes(stats.bytes)}
+          </p>
+
+          <p className="mt-1 text-xs text-zinc-500">
+            <FolderOpen className="mr-1 inline size-3" />
+            {folder.parentFolderId ? folderPath(folder) : "Root folder"}
+          </p>
+
+          <div className="mt-2 flex flex-wrap gap-1">
+            {stats.totalChunks > 0 ? (
+              <Badge
+                variant="outline"
+                className={`text-xs ${isProtected ? "text-emerald-300" : "text-blue-300"}`}
+              >
+                <ShieldCheck className="mr-1 size-3" />
+                {isProtected ? "Folder Protected" : "Folder Protecting"}
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-xs text-zinc-400">
+                No chunks
+              </Badge>
+            )}
+          </div>
+
+          <p className="mt-1 text-xs text-zinc-600">
+            {stats.protectedChunks}/{stats.totalChunks} chunks
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-1">
+          <Button size="sm" onClick={() => openFolder(folder)} disabled={busy} className="text-xs">
+            <FolderOpen className="size-3" />
+            Open
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => renameFolder(folder)}
+            disabled={busy}
+            className="text-xs"
+          >
+            <Pencil className="size-3" />
+            Rename
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => moveFolder(folder)}
+            disabled={busy}
+            className="text-xs"
+          >
+            <MoveRight className="size-3" />
+            Move
+          </Button>
+
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => deleteFolder(folder)}
+            disabled={busy}
+            className="text-xs"
+          >
+            <Trash2 className="size-3" />
+            Delete
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+  
   const renderFileCard = (file: P2PFile) => {   
     const p = protection(file);
     const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
@@ -1953,16 +2118,17 @@ const renderFolderNode = (folder: DriveFolder, depth = 0) => {
             </div>
 
             <TabsContent value="personal" className="p-6">
-              {personalFiles.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
-                  <HardDrive className="size-12" />
-                  <p>No personal files yet. Upload to get started.</p>
-                </div>
-              ) : visibleFiles.length > 0 ? (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {visibleFiles.map((file) => renderFileCard(file))}
-                </div>
-              ) : (
+  {personalFiles.length === 0 && manifestFolders.length === 0 ? (
+    <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
+      <HardDrive className="size-12" />
+      <p>No personal files yet. Upload to get started.</p>
+    </div>
+  ) : visibleFiles.length > 0 || visibleFolders.length > 0 ? (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {visibleFolders.map((folder) => renderFolderCard(folder))}
+      {visibleFiles.map((file) => renderFileCard(file))}
+    </div>
+  ) : (
                 <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
                   <Search className="size-12" />
                   <p>No files match this folder/search.</p>
