@@ -184,7 +184,7 @@ function isValidStorageIdentity(identity = '') {
   return isValidWallet(value) || value.startsWith('seed:');
 }
 
-function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
+async function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
   const identity = normalizeWallet(ownerWallet);
 
   if (!isValidStorageIdentity(identity)) {
@@ -194,22 +194,26 @@ function deriveDriveKey({ ownerWallet = activeWallet(), drivePassword, salt }) {
   const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt || ''), 'base64');
 
-  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
+  // async pbkdf2 — does NOT block the main thread (was pbkdf2Sync with 310k iterations)
+  return new Promise((resolve, reject) =>
+    crypto.pbkdf2(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256',
+      (err, key) => (err ? reject(err) : resolve(key)))
+  );
 }
 
-function encryptPrivateBuffer(plainBuffer, ownerWallet = activeWallet(), drivePassword) {
+async function encryptPrivateBuffer(plainBuffer, ownerWallet = activeWallet(), drivePassword) {
   const salt = crypto.randomBytes(16);
   const iv = crypto.randomBytes(12);
-  const key = deriveDriveKey({ ownerWallet, drivePassword, salt });
+  const key = await deriveDriveKey({ ownerWallet, drivePassword, salt });
   const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   const ciphertext = Buffer.concat([cipher.update(plainBuffer), cipher.final()]);
   return { ciphertext, encryption: { version: 4, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash: hashBufferHex(plainBuffer), originalSize: plainBuffer.length } };
 }
 
-function decryptPrivateBuffer(ciphertext, manifest, drivePassword) {
+async function decryptPrivateBuffer(ciphertext, manifest, drivePassword) {
   if (!manifest?.encryption || manifest.encryption.algorithm !== ENCRYPTION_ALGORITHM) throw new Error('Encrypted file metadata is missing or unsupported');
   if (manifest.encryption.keySource !== ENCRYPTION_KEY_SOURCE) throw new Error(`This file was encrypted with an older key source (${manifest.encryption.keySource || 'unknown'}). Re-upload it with Drive Password encryption.`);
-  const key = deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: manifest.encryption.salt });
+  const key = await deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: manifest.encryption.salt });
   const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(manifest.encryption.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(manifest.encryption.authTag, 'base64'));
   const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
@@ -357,6 +361,21 @@ async function runAutoRepair(reason = 'interval') {
 
   const node = ensureTransport({});
   const own = walletManifests();
+
+  // Skip repair if no peers available (P2P peers OR safety peer)
+  const connectedPeers = node.connectedPeerIds?.() || [];
+  const hasSafetyPeer = Boolean(safetyPeerUrl());
+  if (connectedPeers.length === 0 && !hasSafetyPeer) {
+    lastAutoRepairStatus = {
+      ...lastAutoRepairStatus,
+      active: Boolean(autoRepairTimer),
+      skippedReason: 'no-peers',
+      error: null,
+    };
+    console.log('[auto-repair] skipped: no peers connected (will retry on next interval)');
+    return lastAutoRepairStatus;
+  }
+
   const underReplicatedChunks = countUnderReplicatedChunks(node, own, TARGET_REPLICAS);
 
   if (underReplicatedChunks <= 0) {
@@ -426,7 +445,11 @@ function startAutoRepairLoop() {
   }, AUTO_REPAIR_INTERVAL_MS);
   autoRepairTimer.unref?.();
   lastAutoRepairStatus = { ...lastAutoRepairStatus, active: true, intervalMs: AUTO_REPAIR_INTERVAL_MS, skippedReason: 'waiting' };
-  runAutoRepair('startup').catch((error) => console.warn('[auto-repair] startup failed:', error?.message || error));
+  // Delay startup repair by 5 minutes to let peers connect first
+  setTimeout(() => {
+    runAutoRepair('startup-delayed').catch((error) => console.warn('[auto-repair] startup-delayed failed:', error?.message || error));
+  }, 300_000);
+  console.log('[auto-repair] startup repair scheduled in 5 minutes (skips automatically if no peers)');
 }
 
 function stopAutoRepairLoop() {
@@ -737,7 +760,7 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
   const ownerWallet = activeWallet();
   const privateFile = Boolean(payload.isEncrypted);
   const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
-  const secured = privateFile ? encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword) : { ciphertext: originalBuffer, encryption: null };
+  const secured = privateFile ? await encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword) : { ciphertext: originalBuffer, encryption: null };
   const storedBuffer = secured.ciphertext;
   const chunks = splitIntoChunks(storedBuffer);
   const tree = buildMerkleTree(chunks.map((c) => c.hash));
@@ -791,6 +814,11 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   const node = ensureTransport({});
   const manifest = findManifest(payload);
   if (!manifest) throw new Error('File not found for this wallet');
+  // Guard: files >100MB should use save-to-disk to avoid heap exhaustion
+  const IN_MEMORY_MAX_BYTES = 100 * 1024 * 1024;
+  if (Number(manifest.size || manifest.storedSize || 0) > IN_MEMORY_MAX_BYTES) {
+    throw new Error('File is too large for in-memory download (>100 MB). Use "Download to file" instead.');
+  }
   const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
   const buffers = new Array(orderedChunks.length);
   const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
@@ -822,7 +850,7 @@ ipcMain.handle('p2p:download', async (_event, payload = {}) => {
   const storedBuffer = Buffer.concat(buffers);
   if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed');
   const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
-  const outputBuffer = manifest.isEncrypted ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer;
+  const outputBuffer = manifest.isEncrypted ? await decryptPrivateBuffer(storedBuffer, manifest, drivePassword) : storedBuffer;
   finishProgress('download');
   return { ok: true, file: manifest, bytes: Array.from(outputBuffer), progress: transferProgress.download };
 });
@@ -1462,7 +1490,7 @@ ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
     const privateFile = Boolean(payload.isEncrypted);
     const drivePassword = privateFile ? drivePasswordFromPayload(payload) : null;
     const secured = privateFile
-      ? encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword)
+      ? await encryptPrivateBuffer(originalBuffer, ownerWallet, drivePassword)
       : { ciphertext: originalBuffer, encryption: null };
 
     const storedBuffer = secured.ciphertext;
@@ -1593,7 +1621,6 @@ ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
   }
 
   const orderedChunks = [...(manifest.chunks || [])].sort((a, b) => a.index - b.index);
-  const buffers = new Array(orderedChunks.length);
   const downloadConcurrency = clampConcurrency(payload.downloadConcurrency, DOWNLOAD_CONCURRENCY, 16);
 
   createProgress('download', {
@@ -1603,48 +1630,57 @@ ipcMain.handle('p2p:downloadToPath', async (_event, payload = {}) => {
     concurrency: downloadConcurrency,
   });
 
+  // Helper: fetch one chunk from local cache / network / safety peer
+  async function fetchChunk(meta) {
+    const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
+    if (local) return local;
+    try { return await node.fetchChunkFromNetwork(meta.hash); }
+    catch (err) {
+      console.warn('[p2p:downloadToPath] network fetch failed, trying safety peer:', err?.message || err);
+      return getChunkFromSafetyPeer(meta.hash, node.peerId);
+    }
+  }
+
   try {
-    await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
-      const local = node.getLocalChunk?.(meta.hash) || node.localChunks?.get(meta.hash);
-      let chunk = local;
-
-      if (!chunk) {
-        try {
-          chunk = await node.fetchChunkFromNetwork(meta.hash);
-        } catch (error) {
-          console.warn('[p2p:downloadToPath] network fetch failed, trying safety peer:', error?.message || error);
-          chunk = await getChunkFromSafetyPeer(meta.hash, node.peerId);
-        }
+    if (!manifest.isEncrypted) {
+      // ── STREAMING PATH (non-encrypted): write each chunk at its disk offset ──
+      // Peak RAM = one chunk (~2MB), not the whole file.
+      const fd = await fs.promises.open(save.filePath, 'w');
+      try {
+        await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+          const chunk = await fetchChunk(meta);
+          node.storeLocalChunk?.(chunk);
+          const buffer = Buffer.from(chunk.data, 'base64');
+          if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
+          await fd.write(buffer, 0, buffer.length, meta.index * CHUNK_SIZE_BYTES);
+          updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+        });
+      } finally {
+        await fd.close();
       }
-
-      node.storeLocalChunk?.(chunk);
-
-      const buffer = Buffer.from(chunk.data, 'base64');
-
-      if (hashBufferHex(buffer) !== meta.hash) {
-        throw new Error(`Chunk integrity failed: ${meta.hash}`);
-      }
-
-      buffers[meta.index] = buffer;
-      updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
-    });
+    } else {
+      // ── BUFFERED PATH (encrypted): AES-GCM needs full ciphertext in memory ──
+      const buffers = new Array(orderedChunks.length);
+      await mapWithConcurrency(orderedChunks, downloadConcurrency, async (meta) => {
+        const chunk = await fetchChunk(meta);
+        node.storeLocalChunk?.(chunk);
+        const buffer = Buffer.from(chunk.data, 'base64');
+        if (hashBufferHex(buffer) !== meta.hash) throw new Error(`Chunk integrity failed: ${meta.hash}`);
+        buffers[meta.index] = buffer;
+        updateProgress('download', { bytesDelta: buffer.length, chunkDelta: 1 });
+      });
+      const storedBuffer = Buffer.concat(buffers);
+      if (hashBufferHex(storedBuffer) !== manifest.hash) throw new Error('File integrity failed');
+      const drivePassword = drivePasswordFromPayload(payload);
+      const outputBuffer = await decryptPrivateBuffer(storedBuffer, manifest, drivePassword);
+      fs.writeFileSync(save.filePath, outputBuffer);
+    }
   } catch (error) {
     finishProgress('download', 'error', error?.message || String(error));
+    // Remove incomplete file on error
+    try { fs.unlinkSync(save.filePath); } catch { /* ignore */ }
     throw error;
   }
-
-  const storedBuffer = Buffer.concat(buffers);
-
-  if (hashBufferHex(storedBuffer) !== manifest.hash) {
-    throw new Error('File integrity failed');
-  }
-
-  const drivePassword = manifest.isEncrypted ? drivePasswordFromPayload(payload) : null;
-  const outputBuffer = manifest.isEncrypted
-    ? decryptPrivateBuffer(storedBuffer, manifest, drivePassword)
-    : storedBuffer;
-
-  fs.writeFileSync(save.filePath, outputBuffer);
 
   finishProgress('download');
 
