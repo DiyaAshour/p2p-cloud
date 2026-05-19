@@ -313,7 +313,7 @@ async function syncPull() {
     };
 
     console.warn('[manifest-sync] pull failed:', e?.message || e);
-    throw new Error(`Manifest sync pull failed: ${e?.message || e}`);
+    return { ok: false, skipped: false, error: e?.message || String(e) };
   }
 }
 async function syncPush(manifest) {
@@ -324,8 +324,8 @@ async function syncPush(manifest) {
     return result || { ok: true };
   } catch (e) {
     lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) };
-    console.warn('[manifest-sync] push failed:', e?.message || e);
-    throw new Error(`File was saved locally, but cross-device sync failed: ${e?.message || e}`);
+    console.warn('[manifest-sync] push failed (non-fatal, file saved locally):', e?.message || e);
+    return { ok: false, skipped: false, error: e?.message || String(e) };
   }
 }
 async function syncDelete(ownerWallet, hash) { try { if (isManifestSyncEnabled()) await deleteWalletManifest(ownerWallet, hash); } catch (e) { console.warn('[manifest-sync] delete failed:', e?.message || e); } }
@@ -568,7 +568,7 @@ ipcMain.handle('wallet:disconnect', async () => {
   return walletSummary();
 });
 ipcMain.handle('wallet:setPlan', async (_event, payload = {}) => { assertVerifiedWallet(); const planId = String(payload.planId || 'free'); if (!PLANS[planId]) throw new Error('Unknown wallet plan'); walletState = { ...walletState, planId, paidUntil: payload.paidUntil || walletState.paidUntil || null, subscriptionTx: payload.txHash || walletState.subscriptionTx || null }; persistWallet(); return walletSummary(); });
-ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } return networkSummary(); });
+ipcMain.handle('p2p:start', async (_event, options = {}) => { ensureDataDir(); loadWallet(); loadManifests(); ensureTransport(options); if (walletState.connected && walletState.verified) { try { await syncPull(); } catch (e) { lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) }; } startAutoRepairLoop(); } return networkSummary(); });
 ipcMain.handle('p2p:listFolders', async () => {
   if (!walletState.connected || !walletState.verified) return [];
   await syncPull();
@@ -778,7 +778,7 @@ ipcMain.handle('p2p:upload', async (_event, payload = {}) => {
         await putChunkToSafetyPeer(chunkPayload, node.peerId);
         replicas.push('aws-safety-peer');
       } catch (error) {
-        throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+        console.warn(`[p2p:upload] safety peer failed for chunk ${chunk.hash} (non-fatal):`, error?.message || error);
       }
       chunkResults[chunk.index] = { index: chunk.index, hash: chunk.hash, size: chunk.size, replicas: unique(replicas), proof: getMerkleProof(tree, chunk.index) };
       updateProgress('upload', { bytesDelta: chunk.size, chunkDelta: 1 });
@@ -1525,7 +1525,7 @@ ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => {
           await putChunkToSafetyPeer(chunkPayload, node.peerId);
           replicas.push('aws-safety-peer');
         } catch (error) {
-          throw new Error(`Safety peer upload failed for chunk ${chunk.hash}: ${error?.message || error}`);
+          console.warn(`[p2p:uploadFiles] safety peer failed for chunk ${chunk.hash} (non-fatal):`, error?.message || error);
         }
 
         chunkResults[chunk.index] = {
@@ -1692,7 +1692,11 @@ ipcMain.handle('p2p:networkSummary', async () => {
   loadManifests();
 
   if (walletState.connected && walletState.verified) {
-    await syncPull();
+    try {
+      await syncPull();
+    } catch (error) {
+      lastSyncStatus = { ...lastSyncStatus, ok: false, error: error?.message || String(error) };
+    }
     startAutoRepairLoop();
   }
 
@@ -1705,11 +1709,6 @@ ipcMain.handle('p2p:connectPeer', async (_event, payload = {}) => { const peerId
 ipcMain.handle('p2p:repair', async () => { assertFolderIdentity(); const node = ensureTransport({}); const own = walletFileManifests(); const result = await repairManifests({ node, manifests: own, configuredTargetReplicas: TARGET_REPLICAS, persistManifests, syncPush }); return { ok: true, ...result, summary: networkSummary() }; });
 ipcMain.handle('p2p:prepareProof', async (_event, payload = {}) => { assertVerifiedWallet(); const manifest = findManifest(payload); if (!manifest) throw new Error('File not found for this wallet'); const chunk = manifest.chunks?.[0]; if (!chunk) throw new Error('No chunks available for proof'); return { ok: true, proof: { ownerWallet: activeWallet(), rootHash: manifest.rootHash, chunkIndex: chunk.index, leaf: chunk.hash, merkleProof: chunk.proof, encrypted: Boolean(manifest.isEncrypted), keySource: manifest.encryption?.keySource || null, preparedAt: new Date().toISOString() } }; });
 
-app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) { await syncPull(); startAutoRepairLoop(); } createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
+app.whenReady().then(async () => { app.setName(APP_TITLE); ensureDataDir(); loadWallet(); loadManifests(); ensureTransport({}); if (walletState.connected && walletState.verified) { try { await syncPull(); } catch (e) { lastSyncStatus = { ...lastSyncStatus, ok: false, error: e?.message || String(e) }; } startAutoRepairLoop(); } createMainWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); }); }).catch((error) => { console.error('Electron failed:', error); app.exit(1); });
 app.on('before-quit', () => { stopAutoRepairLoop(); persistWallet(); persistManifests(); if (transportNode) transportNode.stop(); });
 app.on('window-all-closed', () => {});
-
-
-
-
-
