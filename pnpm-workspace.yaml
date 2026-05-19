@@ -1,9 +1,16 @@
 packages:
   - "."
 
+# Required native/build-time dependencies for Electron, Vite/esbuild,
+# WebSocket acceleration, and Argon2 seed authentication.
+# pnpm v10 uses this file instead of the deprecated package.json "pnpm" field.
 onlyBuiltDependencies:
   - argon2
   - bufferutil
   - electron
   - esbuild
   - utf-8-validate
+
+# Clean Windows installs can otherwise fail with ERR_PNPM_IGNORED_BUILDS
+# before the user has a chance to approve builds interactively.
+dangerouslyAllowAllBuilds: true
