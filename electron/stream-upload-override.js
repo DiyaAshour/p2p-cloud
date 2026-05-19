@@ -65,36 +65,86 @@ function writeChunk(chunk) {
   fs.mkdirSync(chunkStoreDir(), { recursive: true });
   writeJson(chunkPath(chunk.hash), { ...chunk, storedAt: new Date().toISOString() });
 }
+
+async function uploadChunkToAwsSafety(chunk, peerId, reason = 'under-target') {
+  const safetyChunk = {
+    ...chunk,
+    ['force' + 'SafetyPeer']: true,
+    emergencySafety: true,
+    safetyRequired: true,
+  };
+
+  console.log('[stream-upload] upload-time AWS safety start', {
+    chunkHash: chunk.hash,
+    reason,
+    targetReplicas: TARGET_REPLICAS,
+  });
+
+  const safety = await putChunkToSafetyPeer(safetyChunk, peerId);
+
+  if (safety?.ok) {
+    console.log('[stream-upload] upload-time AWS safety stored', {
+      chunkHash: chunk.hash,
+      replicaId: SAFETY_PEER_REPLICA_ID,
+    });
+  } else {
+    console.warn('[stream-upload] upload-time AWS safety skipped', {
+      chunkHash: chunk.hash,
+      reason: safety?.reason || 'unknown',
+    });
+  }
+
+  return safety;
+}
+
 async function replicate(chunk) {
   const n = node();
+  if (!n?.peerId) throw new Error('P2P transport is not ready yet.');
+
   const replicas = new Set([n.peerId]);
+  const connectedPeers = n.connectedPeerIds?.() || [];
+
+  // Immediate rule:
+  // If there are no real P2P peers, go to AWS safety right now during upload.
+  // Do not wait for auto-repair/startup-delayed repair.
+  if (!connectedPeers.length) {
+    try {
+      const safety = await uploadChunkToAwsSafety(chunk, n.peerId, 'no-p2p-peers-at-upload');
+      if (safety?.ok) replicas.add(SAFETY_PEER_REPLICA_ID);
+    } catch (e) {
+      console.warn('[stream-upload] immediate AWS safety failed:', e?.message || e);
+    }
+
+    dropMemoryChunk(chunk.hash);
+    return unique([...replicas]);
+  }
+
   if (n?.putChunkOnNetwork && n?.selectReplicaTargets) {
     const targets = n.selectReplicaTargets({ exclude: [n.peerId], limit: Math.max(0, TARGET_REPLICAS - 1) }) || [];
     if (targets.length) {
       try {
         const result = await n.putChunkOnNetwork(chunk, targets);
         for (const peerId of result?.replicas || []) replicas.add(peerId);
-      } catch (e) { console.warn('[stream-upload] p2p replicate failed:', e?.message || e); }
+      } catch (e) {
+        console.warn('[stream-upload] p2p replicate failed:', e?.message || e);
+      }
     }
   }
 
   const p2pReplicaCount = withoutSafety([...replicas]).length;
   if (p2pReplicaCount < TARGET_REPLICAS) {
     try {
-      const safetyChunk = {
-        ...chunk,
-        ['force' + 'SafetyPeer']: true,
-        emergencySafety: true,
-        safetyRequired: true,
-      };
-      const safety = await putChunkToSafetyPeer(safetyChunk, n.peerId);
+      const safety = await uploadChunkToAwsSafety(chunk, n.peerId, `p2p-replicas-${p2pReplicaCount}-below-${TARGET_REPLICAS}`);
       if (safety?.ok) replicas.add(SAFETY_PEER_REPLICA_ID);
-    } catch (e) { console.warn('[stream-upload] safety peer failed:', e?.message || e); }
+    } catch (e) {
+      console.warn('[stream-upload] safety peer failed:', e?.message || e);
+    }
   }
 
   dropMemoryChunk(chunk.hash);
   return unique([...replicas]);
 }
+
 async function uploadOne(filePath, payload = {}) {
   const w = wallet();
   const ownerWallet = identity(w);
@@ -154,6 +204,7 @@ async function uploadOne(filePath, payload = {}) {
     dropMemoryChunk(hash);
     index += 1;
   }
+
   async function consume(output) {
     if (!output?.length) return;
     carry = carry.length ? Buffer.concat([carry, output]) : Buffer.from(output);
@@ -210,6 +261,7 @@ async function uploadOne(filePath, payload = {}) {
   }
   return manifest;
 }
+
 async function uploadFiles(payload = {}) {
   const picked = await dialog.showOpenDialog({ title: 'Upload files', properties: ['openFile', 'multiSelections'] });
   if (picked.canceled || !picked.filePaths?.length) return { ok: true, cancelled: true, files: [] };
@@ -222,4 +274,4 @@ try { ipcMain.removeHandler('p2p:uploadFiles'); } catch {}
 ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => uploadFiles(payload));
 try { ipcMain.removeHandler('p2p:uploadPath'); } catch {}
 ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => uploadOne(String(payload.filePath || payload.path || ''), payload));
-console.log('[stream-upload] installed disk-first streaming upload override');
+console.log('[stream-upload] installed disk-first streaming upload override with immediate AWS safety');
