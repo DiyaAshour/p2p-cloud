@@ -298,37 +298,31 @@ function protection(file: P2PFile) {
     details: `${file.protectedChunks ?? 0}/${file.totalChunks} protected`,
   };
 }
-// ─── isRealFileManifest ───────────────────────────────────────────────────────
-// فلتر قوي يمنع ظهور folders / placeholders / ui prefs / ملفات بدون chunks حقيقية
+
 function isRealFileManifest(file: P2PFile): boolean {
   const anyFile = file as any;
 
-  // استبعاد أي عنصر محدد كـ folder من أي حقل
   if (anyFile.kind === "folder") return false;
   if (anyFile.type === "folder") return false;
   if (anyFile.isFolder === true) return false;
 
-  // استبعاد هاشات تبدأ بـ folder:
   if (String(file.hash || "").startsWith("folder:")) return false;
   if (String(file.rootHash || "").startsWith("folder:")) return false;
 
-  // استبعاد UI prefs manifests لأنها ليست ملفات حقيقية
   if (String(file.hash || "").startsWith("ui:prefs:")) return false;
   if (String(file.rootHash || "").startsWith("ui:prefs:")) return false;
   if (String(anyFile.type || "") === "ui-prefs") return false;
 
-  // استبعاد ملف .p2p-folder الداخلي
   const name = String(file.name || "").replace(/\\/g, "/").split("/").pop() || "";
   if (name === ".p2p-folder") return false;
 
-  // يجب أن يكون فيه هاش حقيقي
   if (!file.hash && !file.rootHash) return false;
 
-  // يجب أن يكون فيه chunks حقيقية — هذا يمنع بطاقات "No chunks / 0/0"
   if (!file.totalChunks || file.totalChunks <= 0) return false;
 
   return true;
 }
+
 // ─── Component ────────────────────────────────────────────────────────────────
 type AskTextOptions = {
   title: string;
@@ -550,28 +544,28 @@ export default function NativeP2PAppLive() {
     return map;
   }, [workspaces]);
 
-  // ─── File groups — كلها تمر عبر isRealFileManifest ────────────────────────
+  // ─── File groups ────────────────────────────────────────────────────────────
 
-const personalFiles = useMemo(
-  () =>
-    files.filter(
-      (file) =>
-        isRealFileManifest(file) &&
-        !companyFileByKey.has(keyFor(file)) &&
-        !companyFileByKey.has(file.hash)
-    ),
-  [files, companyFileByKey]
-);
+  const personalFiles = useMemo(
+    () =>
+      files.filter(
+        (file) =>
+          isRealFileManifest(file) &&
+          !companyFileByKey.has(keyFor(file)) &&
+          !companyFileByKey.has(file.hash)
+      ),
+    [files, companyFileByKey]
+  );
 
-const companyFiles = useMemo(() => {
-  if (!activeWorkspace) return [];
+  const companyFiles = useMemo(() => {
+    if (!activeWorkspace) return [];
 
-  const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
+    const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
 
-  return files
-    .filter(isRealFileManifest)
-    .filter((file) => allowed.some((companyFile) => fileKeyMatches(companyFile, file)));
-}, [files, activeWorkspace]);
+    return files
+      .filter(isRealFileManifest)
+      .filter((file) => allowed.some((companyFile) => fileKeyMatches(companyFile, file)));
+  }, [files, activeWorkspace]);
 
   const sharedFiles = useMemo(
     () =>
@@ -583,7 +577,6 @@ const companyFiles = useMemo(() => {
     [files, companyFileByKey]
   );
 
-  // ─── realFilesCount: عداد الملفات الحقيقية فقط (يستبعد folders/ui-prefs/zero-chunks) ───
   const realFilesCount = useMemo(
     () => files.filter(isRealFileManifest).length,
     [files]
@@ -748,8 +741,6 @@ const companyFiles = useMemo(() => {
   const refresh = async () => {
     if (!api) return;
 
-    // مهم: نقرأ الهوية أولًا، لأن seed:login يكتب wallet.json من IPC منفصل.
-    // بعدها نجيب الملفات والفولدرات حسب الهوية الجديدة.
     const nextWallet = await api.invoke<WalletState>("wallet:status");
     setWallet(nextWallet);
 
@@ -1349,9 +1340,28 @@ Type DELETE → delete files too`,
       await refresh();
     });
 
+  // ─── UPDATED: remove — optimistic UI + background delete ──────────────────
   const remove = (file: P2PFile) =>
     run(async () => {
       const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+
+      const deletedKeys = new Set(
+        [itemIdFor(file), file.id, file.hash, file.rootHash].filter(Boolean)
+      );
+
+      // Optimistic UI: hide immediately
+      setFiles((prev) =>
+        prev.filter((item) => {
+          const keys = [itemIdFor(item), item.id, item.hash, item.rootHash].filter(Boolean);
+          return !keys.some((key) => deletedKeys.has(key));
+        })
+      );
+
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev);
+        for (const key of deletedKeys) next.delete(String(key));
+        return next;
+      });
 
       if (match) {
         await api.invoke("company:updateFile", {
@@ -1365,8 +1375,18 @@ Type DELETE → delete files too`,
         return;
       }
 
-      await api.invoke("p2p:delete", { hash: file.hash });
-      await refresh();
+      toast.success("Deleting file in background...");
+
+      try {
+        await api.invoke("p2p:delete", {
+          hash: file.hash,
+          rootHash: file.rootHash,
+          id: file.id,
+          itemId: itemIdFor(file),
+        });
+      } finally {
+        await refresh();
+      }
     });
 
   const proof = (file: P2PFile) =>
@@ -1393,6 +1413,75 @@ Type DELETE → delete files too`,
     });
   };
 
+  // ─── UPDATED: bulkDelete — optimistic UI + parallel delete ────────────────
+  const bulkDelete = () =>
+    run(async () => {
+      if (selectedItemIds.size === 0) return;
+
+      const filesToDelete = visibleFiles.filter(
+        (file) =>
+          selectedItemIds.has(itemIdFor(file)) &&
+          !companyFileByKey.has(keyFor(file)) &&
+          !companyFileByKey.has(file.hash)
+      );
+
+      if (filesToDelete.length === 0) {
+        toast.error("No personal files selected.");
+        return;
+      }
+
+      const confirmed = await askText({
+        title: "Delete selected files",
+        message: `This will delete ${filesToDelete.length} selected file(s).
+
+Type DELETE to confirm.`,
+        placeholder: "DELETE",
+        confirmText: "Delete selected",
+        danger: true,
+      });
+
+      if (confirmed?.trim().toUpperCase() !== "DELETE") return;
+
+      const deletedKeys = new Set(
+        filesToDelete.flatMap((file) =>
+          [itemIdFor(file), file.id, file.hash, file.rootHash].filter(Boolean)
+        )
+      );
+
+      // Optimistic UI: hide selected files immediately
+      setFiles((prev) =>
+        prev.filter((file) => {
+          const keys = [itemIdFor(file), file.id, file.hash, file.rootHash].filter(Boolean);
+          return !keys.some((key) => deletedKeys.has(key));
+        })
+      );
+
+      setSelectedItemIds(new Set());
+
+      toast.success(`Deleting ${filesToDelete.length} file(s) in background...`);
+
+      const results = await Promise.allSettled(
+        filesToDelete.map((file) =>
+          api.invoke("p2p:delete", {
+            hash: file.hash,
+            rootHash: file.rootHash,
+            id: file.id,
+            itemId: itemIdFor(file),
+          })
+        )
+      );
+
+      const failed = results.filter((result) => result.status === "rejected");
+
+      await refresh();
+
+      if (failed.length > 0) {
+        toast.error(`Deleted with ${failed.length} error(s). Check logs.`);
+      } else {
+        toast.success(`Deleted ${filesToDelete.length} file(s)`);
+      }
+    });
+
   const bulkMove = () =>
     run(async () => {
       if (selectedItemIds.size === 0) return;
@@ -1414,48 +1503,6 @@ Type DELETE → delete files too`,
       toast.success(`Moved ${filesToMove.length} file(s)`);
     });
 
-  const bulkDelete = () =>
-  run(async () => {
-    if (selectedItemIds.size === 0) return;
-
-    const filesToDelete = visibleFiles.filter(
-      (file) =>
-        selectedItemIds.has(itemIdFor(file)) &&
-        !companyFileByKey.has(keyFor(file)) &&
-        !companyFileByKey.has(file.hash)
-    );
-
-    if (filesToDelete.length === 0) {
-      toast.error("No personal files selected.");
-      return;
-    }
-
-    const confirmed = await askText({
-      title: "Delete selected files",
-      message: `This will permanently delete ${filesToDelete.length} selected file(s), including local chunks and safety peer chunks when available.
-
-Type DELETE to confirm.`,
-      placeholder: "DELETE",
-      confirmText: "Delete selected",
-      danger: true,
-    });
-
-    if (confirmed?.trim().toUpperCase() !== "DELETE") return;
-
-    for (const file of filesToDelete) {
-      await api.invoke("p2p:delete", {
-        hash: file.hash,
-        rootHash: file.rootHash,
-        id: file.id,
-        itemId: itemIdFor(file),
-      });
-    }
-
-    setSelectedItemIds(new Set());
-    await refresh();
-    toast.success(`Deleted ${filesToDelete.length} file(s)`);
-  });
-  
   const toggleSelect = (itemId: string) => {
     setSelectedItemIds((prev) => {
       const next = new Set(prev);
@@ -1729,27 +1776,27 @@ Type DELETE to confirm.`,
         }`}
       >
         <CardContent className="space-y-4 p-5">
-         {isPersonal && view === "personal" && (
-  <button
-    type="button"
-    onClick={() => toggleSelect(itemIdFor(file))}
-    className={`flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs transition-all ${
-      isSelected
-        ? "border-blue-500 bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/40"
-        : "border-zinc-700 bg-zinc-950 text-zinc-400 hover:border-blue-500 hover:text-blue-300"
-    }`}
-    aria-label={isSelected ? "Unselect file" : "Select file"}
-  >
-    <span
-      className={`flex size-3.5 items-center justify-center rounded-full border ${
-        isSelected ? "border-blue-400 bg-blue-500" : "border-zinc-600"
-      }`}
-    >
-      {isSelected && <span className="size-1.5 rounded-full bg-white" />}
-    </span>
-    {isSelected ? "Selected" : "Select"}
-  </button>
-)}
+          {isPersonal && view === "personal" && (
+            <button
+              type="button"
+              onClick={() => toggleSelect(itemIdFor(file))}
+              className={`flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs transition-all ${
+                isSelected
+                  ? "border-blue-500 bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/40"
+                  : "border-zinc-700 bg-zinc-950 text-zinc-400 hover:border-blue-500 hover:text-blue-300"
+              }`}
+              aria-label={isSelected ? "Unselect file" : "Select file"}
+            >
+              <span
+                className={`flex size-3.5 items-center justify-center rounded-full border ${
+                  isSelected ? "border-blue-400 bg-blue-500" : "border-zinc-600"
+                }`}
+              >
+                {isSelected && <span className="size-1.5 rounded-full bg-white" />}
+              </span>
+              {isSelected ? "Selected" : "Select"}
+            </button>
+          )}
 
           <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
             <FileCheck2 className="size-9 text-zinc-500" />
@@ -1980,7 +2027,6 @@ Type DELETE to confirm.`,
         <div className="mt-2 flex flex-wrap gap-4 text-xs text-zinc-400">
           <span className="flex items-center gap-1">
             <HardDrive className="size-3" />
-            {/* ✅ التعديل: استخدام realFilesCount بدلاً من summary?.totalFiles */}
             {realFilesCount} Files
           </span>
 
@@ -2209,17 +2255,17 @@ Type DELETE to confirm.`,
                         <MoveRight className="size-3" />
                         Move selected
                       </Button>
-<Button
-  size="sm"
-  variant="destructive"
-  onClick={bulkDelete}
-  disabled={busy}
-  className="text-xs"
->
-  <Trash2 className="size-3" />
-  Delete selected
-</Button>
-                        
+
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={bulkDelete}
+                        disabled={busy}
+                        className="text-xs"
+                      >
+                        <Trash2 className="size-3" />
+                        Delete selected
+                      </Button>
                     </>
                   )}
                 </div>
