@@ -18,6 +18,30 @@ let active = false;
 let timer = null;
 let lastStatus = { active: false, lastRunAt: null, repairedChunks: 0, checkedChunks: 0, error: null };
 
+// ─── Pause / Resume Controls ────────────────────────────────────────────────
+let pausedUntil = 0;
+let pauseReason = null;
+
+function pauseProtectionRetry(ms = 5 * 60 * 1000, reason = 'manual-pause') {
+  pausedUntil = Math.max(pausedUntil, Date.now() + Number(ms || 0));
+  pauseReason = reason;
+  const until = new Date(pausedUntil).toISOString();
+  console.log('[protection-retry] paused', { ms, reason, until });
+  return { ok: true, paused: true, pausedUntil: until, reason };
+}
+
+function resumeProtectionRetry(reason = 'manual-resume') {
+  pausedUntil = 0;
+  pauseReason = null;
+  console.log('[protection-retry] resumed', { reason });
+  return { ok: true, paused: false, reason };
+}
+
+function isProtectionRetryPaused() {
+  return Date.now() < pausedUntil;
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
 function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
 function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
@@ -180,6 +204,26 @@ function refreshManifestStatus(manifest) {
 }
 
 async function runProtectionRetryOnce() {
+  // Guard: disabled via environment variable
+  if (process.env.P2P_PROTECTION_RETRY_DISABLED === '1') {
+    lastStatus = { ...lastStatus, active: false, skipped: true, reason: 'disabled', error: null };
+    return lastStatus;
+  }
+
+  // Guard: paused programmatically (e.g. during a delete operation)
+  if (isProtectionRetryPaused()) {
+    lastStatus = {
+      ...lastStatus,
+      active: false,
+      skipped: true,
+      reason: pauseReason || 'paused',
+      paused: true,
+      pausedUntil: new Date(pausedUntil).toISOString(),
+      error: null,
+    };
+    return lastStatus;
+  }
+
   if (active) return lastStatus;
   active = true;
   let checkedChunks = 0;
@@ -228,6 +272,28 @@ function installProtectionRetryLoop() {
   timer.unref?.();
   try { ipcMain.removeHandler('p2p:protectionRetryNow'); } catch {}
   ipcMain.handle('p2p:protectionRetryNow', async () => runProtectionRetryOnce());
+
+  try { ipcMain.removeHandler('p2p:pauseProtectionRetry'); } catch {}
+  ipcMain.handle('p2p:pauseProtectionRetry', async (_event, payload = {}) =>
+    pauseProtectionRetry(
+      Number(payload.ms || 5 * 60 * 1000),
+      String(payload.reason || 'delete-operation')
+    )
+  );
+
+  try { ipcMain.removeHandler('p2p:resumeProtectionRetry'); } catch {}
+  ipcMain.handle('p2p:resumeProtectionRetry', async (_event, payload = {}) =>
+    resumeProtectionRetry(String(payload.reason || 'delete-operation-finished'))
+  );
+
+  try { ipcMain.removeHandler('p2p:protectionRetryStatus'); } catch {}
+  ipcMain.handle('p2p:protectionRetryStatus', async () => ({
+    ...lastStatus,
+    paused: isProtectionRetryPaused(),
+    pausedUntil: pausedUntil ? new Date(pausedUntil).toISOString() : null,
+    pauseReason,
+  }));
+
   console.log('[protection-retry] loop installed', { intervalMs: LOOP_INTERVAL_MS, startDelayMs: START_DELAY_MS, maxChunksPerRun: MAX_CHUNKS_PER_RUN, targetReplicas: TARGET_REPLICAS });
 }
 
