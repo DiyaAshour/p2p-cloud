@@ -147,10 +147,12 @@ async function hardDeleteItem(payload = {}) {
   };
 }
 
+// p2p:delete = file hard delete only (chunks + safety peer + connected peers)
 try { ipcMain.removeHandler('p2p:delete'); } catch {}
 ipcMain.handle('p2p:delete', async (_event, payload = {}) => hardDeleteItem(payload));
 
-try { ipcMain.removeHandler('p2p:deleteItem'); } catch {}
-ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => hardDeleteItem(payload));
-
-console.log('[hard-delete] installed file hard delete override');
+// IMPORTANT: do NOT override p2p:deleteItem here.
+// p2p:deleteItem is used exclusively by the folder delete flow in main.
+// Routing folders into hardDeleteItem() breaks with:
+// "Hard delete override handles files only."
+console.log('[hard-delete] installed file hard delete override for p2p:delete only');
