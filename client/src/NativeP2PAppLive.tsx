@@ -1407,6 +1407,48 @@ Type DELETE → delete files too`,
       toast.success(`Moved ${filesToMove.length} file(s)`);
     });
 
+  const bulkDelete = () =>
+  run(async () => {
+    if (selectedItemIds.size === 0) return;
+
+    const filesToDelete = visibleFiles.filter(
+      (file) =>
+        selectedItemIds.has(itemIdFor(file)) &&
+        !companyFileByKey.has(keyFor(file)) &&
+        !companyFileByKey.has(file.hash)
+    );
+
+    if (filesToDelete.length === 0) {
+      toast.error("No personal files selected.");
+      return;
+    }
+
+    const confirmed = await askText({
+      title: "Delete selected files",
+      message: `This will permanently delete ${filesToDelete.length} selected file(s), including local chunks and safety peer chunks when available.
+
+Type DELETE to confirm.`,
+      placeholder: "DELETE",
+      confirmText: "Delete selected",
+      danger: true,
+    });
+
+    if (confirmed?.trim().toUpperCase() !== "DELETE") return;
+
+    for (const file of filesToDelete) {
+      await api.invoke("p2p:delete", {
+        hash: file.hash,
+        rootHash: file.rootHash,
+        id: file.id,
+        itemId: itemIdFor(file),
+      });
+    }
+
+    setSelectedItemIds(new Set());
+    await refresh();
+    toast.success(`Deleted ${filesToDelete.length} file(s)`);
+  });
+  
   const toggleSelect = (itemId: string) => {
     setSelectedItemIds((prev) => {
       const next = new Set(prev);
@@ -2159,6 +2201,17 @@ Type DELETE → delete files too`,
                         <MoveRight className="size-3" />
                         Move selected
                       </Button>
+<Button
+  size="sm"
+  variant="destructive"
+  onClick={bulkDelete}
+  disabled={busy}
+  className="text-xs"
+>
+  <Trash2 className="size-3" />
+  Delete selected
+</Button>
+                        
                     </>
                   )}
                 </div>
