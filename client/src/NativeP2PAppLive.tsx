@@ -404,7 +404,7 @@ export default function NativeP2PAppLive() {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<View>("personal");
   const [search, setSearch] = useState("");
-  const [isEncrypted, setIsEncrypted] = useState(true);
+  const isEncrypted = true;
   const [drivePassword, setDrivePassword] = useState("");
   const [activeFolder, setActiveFolder] = useState(ALL_FILES);
   const [activeFolderId, setActiveFolderId] = useState<string>("");
@@ -749,16 +749,14 @@ useEffect(() => {
 
   // ─── Actions ────────────────────────────────────────────────────────────────
   const password = () => {
-    if (!isEncrypted) return null;
+  const value = drivePassword.trim();
 
-    const value = drivePassword.trim();
+  if (value.length < minPasswordLength) {
+    throw new Error(`Drive Password must be at least ${minPasswordLength} characters.`);
+  }
 
-    if (value.length < minPasswordLength) {
-      throw new Error(`Drive Password must be at least ${minPasswordLength} characters.`);
-    }
-
-    return value;
-  };
+  return value;
+};
 
     const connectWallet = () =>
   run(async () => {
@@ -1189,8 +1187,8 @@ const upload = () =>
 const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
   "p2p:uploadFiles",
   {
-    isEncrypted,
-    drivePassword: password(),
+    isEncrypted: true,
+drivePassword: password(),
 
     workspaceId:
       view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
@@ -1239,8 +1237,8 @@ const uploadFolder = () =>
     const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
       "p2p:uploadFolder",
       {
-        isEncrypted,
-        drivePassword: password(),
+        isEncrypted: true,
+drivePassword: password(),
         folderId: activeFolderId || "",
       }
     );
@@ -1925,26 +1923,21 @@ const renderFolderCard = (folder: DriveFolder) => {
         </div>
       </header>
 
-      {isEncrypted && (
-        <div className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-6 py-2">
-          <KeyRound className="size-4 shrink-0 text-zinc-500" />
+      <div className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-6 py-2">
+  <KeyRound className="size-4 shrink-0 text-emerald-400" />
 
-          <Input
-            type="password"
-            placeholder={`Drive password (min ${minPasswordLength} chars)`}
-            value={drivePassword}
-            onChange={(event) => setDrivePassword(event.target.value)}
-            className="h-8 max-w-xs border-zinc-700 bg-zinc-950 text-xs"
-          />
+  <Input
+    type="password"
+    placeholder={`Drive password (min ${minPasswordLength} chars)`}
+    value={drivePassword}
+    onChange={(event) => setDrivePassword(event.target.value)}
+    className="h-8 max-w-xs border-zinc-700 bg-zinc-950 text-xs"
+  />
 
-          <button
-            onClick={() => setIsEncrypted(false)}
-            className="text-xs text-zinc-500 hover:text-zinc-300"
-          >
-            Upload unencrypted
-          </button>
-        </div>
-      )}
+  <span className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs text-emerald-300">
+    Encryption locked ON for all uploads
+  </span>
+</div>
 
       <div className="flex min-h-[calc(100vh-120px)]">
         <aside className="w-72 shrink-0 space-y-4 border-r border-zinc-800 bg-zinc-900 p-4">
