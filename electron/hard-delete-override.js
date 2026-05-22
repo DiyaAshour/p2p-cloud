@@ -2,7 +2,7 @@ import { app, ipcMain } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { deleteWalletManifest } from './manifest-sync.js';
+import { deleteWalletManifest, pushWalletManifest } from './manifest-sync.js';
 import { deleteChunkFromSafetyPeer } from './safety-peer.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -76,10 +76,22 @@ function walletOwns(item = {}, owner = identity()) {
   return !itemOwner || itemOwner === owner;
 }
 
+function isDeleteTombstone(item = {}) {
+  return (
+    item.type    === 'delete-tombstone-v1' ||
+    item.kind    === 'delete-tombstone'    ||
+    item.isTombstone === true              ||
+    String(item.id || '').startsWith('tombstone:')
+  );
+}
+
 function findItem(payload = {}) {
   const owner = identity();
   const ids   = payloadIds(payload);
-  return manifests().filter((m) => walletOwns(m, owner)).find((m) => matchesAnyId(m, ids)) || null;
+  return manifests()
+    .filter((m) => !isDeleteTombstone(m))   // never treat a tombstone as a live file
+    .filter((m) => walletOwns(m, owner))
+    .find((m)   => matchesAnyId(m, ids)) || null;
 }
 
 function chunkHashesOf(item = {}) {
@@ -252,10 +264,13 @@ async function hardDeleteItem(payload = {}) {
       report.syncDelete = { ok: false, error: error?.message || String(error) };
     }
 
-    // 4d. TODO: push tombstone as remote manifest once tombstone-sync is wired
-    //     into manifest-sync.js → pushWalletManifest(tombstone).
-    //     Until then the tombstone lives locally and propagates to online peers
-    //     via the chunk:delete messages sent above.
+    // 4d. Push tombstone online so offline devices receive delete command later
+    try {
+      report.tombstoneSync = await pushWalletManifest(tombstone);
+    } catch (error) {
+      report.tombstoneSync = { ok: false, error: error?.message || String(error) };
+      console.warn('[hard-delete] tombstone sync failed:', error?.message || error);
+    }
 
     console.log('[hard-delete] background cleanup finished', {
       name:           item.name,
@@ -265,6 +280,7 @@ async function hardDeleteItem(payload = {}) {
       safetyErrors:   report.safetyErrors.length,
       peerDeleteSent: report.peerDeleteSent.length,
       syncDelete:     report.syncDelete,
+      tombstoneSync:  report.tombstoneSync,
     });
   }, 0);
 
