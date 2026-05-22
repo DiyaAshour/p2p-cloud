@@ -298,6 +298,33 @@ function protection(file: P2PFile) {
   };
 }
 
+// ─── isRealFileManifest ───────────────────────────────────────────────────────
+// فلتر قوي يمنع ظهور عناصر folder-placeholder أو ملفات بدون chunks حقيقية
+function isRealFileManifest(file: P2PFile): boolean {
+  const anyFile = file as any;
+
+  // استبعاد أي عنصر محدد كـ folder من أي حقل
+  if (anyFile.kind === "folder") return false;
+  if (anyFile.type === "folder") return false;
+  if (anyFile.isFolder === true) return false;
+
+  // استبعاد هاشات تبدأ بـ folder:
+  if (String(file.hash || "").startsWith("folder:")) return false;
+  if (String(file.rootHash || "").startsWith("folder:")) return false;
+
+  // استبعاد ملف .p2p-folder الداخلي
+  const name = String(file.name || "").replace(/\\/g, "/").split("/").pop() || "";
+  if (name === ".p2p-folder") return false;
+
+  // يجب أن يكون فيه هاش حقيقي
+  if (!file.hash && !file.rootHash) return false;
+
+  // يجب أن يكون فيه chunks حقيقية — هذا يمنع بطاقات "No chunks / 0/0"
+  if (!file.totalChunks || file.totalChunks <= 0) return false;
+
+  return true;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 type AskTextOptions = {
   title: string;
@@ -417,28 +444,27 @@ export default function NativeP2PAppLive() {
   );
 
   // Bulk select state
-  
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(new Set());
 
   const walletConnected = Boolean(
-  wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
-);
+    wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
+  );
 
-const seedConnected = Boolean(
-  wallet?.connected &&
-    wallet.authMode === "seed" &&
-    (wallet.accountId || wallet.username || wallet.seedFingerprint)
-);
+  const seedConnected = Boolean(
+    wallet?.connected &&
+      wallet.authMode === "seed" &&
+      (wallet.accountId || wallet.username || wallet.seedFingerprint)
+  );
 
-const identityConnected = walletConnected || seedConnected;
+  const identityConnected = walletConnected || seedConnected;
 
-const identityLabel = seedConnected
-  ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}`
-  : walletConnected
-    ? short(wallet?.address || wallet?.accountId || "")
-    : "Guest";
+  const identityLabel = seedConnected
+    ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}`
+    : walletConnected
+      ? short(wallet?.address || wallet?.accountId || "")
+      : "Guest";
 
   const workspaces = company?.workspaces || [];
   const activeWorkspace =
@@ -520,11 +546,15 @@ const identityLabel = seedConnected
     return map;
   }, [workspaces]);
 
-  // File groups
+  // ─── File groups — كلها تمر عبر isRealFileManifest ────────────────────────
+
   const personalFiles = useMemo(
     () =>
       files.filter(
-        (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
+        (file) =>
+          isRealFileManifest(file) &&
+          !companyFileByKey.has(keyFor(file)) &&
+          !companyFileByKey.has(file.hash)
       ),
     [files, companyFileByKey]
   );
@@ -534,15 +564,17 @@ const identityLabel = seedConnected
 
     const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
 
-    return files.filter((file) =>
-      allowed.some((companyFile) => fileKeyMatches(companyFile, file))
-    );
+    return files
+      .filter(isRealFileManifest)
+      .filter((file) => allowed.some((companyFile) => fileKeyMatches(companyFile, file)));
   }, [files, activeWorkspace]);
 
   const sharedFiles = useMemo(
     () =>
       files.filter(
-        (file) => companyFileByKey.has(keyFor(file)) || companyFileByKey.has(file.hash)
+        (file) =>
+          isRealFileManifest(file) &&
+          (companyFileByKey.has(keyFor(file)) || companyFileByKey.has(file.hash))
       ),
     [files, companyFileByKey]
   );
@@ -602,19 +634,20 @@ const identityLabel = seedConnected
     const folder = getPersonalFileFolderObject(file);
     return folder ? folderPath(folder) : UNCATEGORIZED;
   }
-const visibleFiles = useMemo(() => {
-  const q = search.trim().toLowerCase();
 
-  return baseFiles.filter((file) => {
-    const fileName = String(file.name || "").replace(/\\/g, "/");
-    if ((fileName.split("/").pop() || fileName) === ".p2p-folder") return false;
+  const visibleFiles = useMemo(() => {
+    const q = search.trim().toLowerCase();
 
-    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-    const cf = match?.companyFile;
-    const displayName = cf?.name || file.name;
+    return baseFiles.filter((file) => {
+      const fileName = String(file.name || "").replace(/\\/g, "/");
+      if ((fileName.split("/").pop() || fileName) === ".p2p-folder") return false;
 
-    const personalFolderId = match ? "" : getPersonalFileFolderId(file);
-    const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
+      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+      const cf = match?.companyFile;
+      const displayName = cf?.name || file.name;
+
+      const personalFolderId = match ? "" : getPersonalFileFolderId(file);
+      const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
 
       const folderOk = match
         ? activeFolder === ALL_FILES ||
@@ -643,52 +676,52 @@ const visibleFiles = useMemo(() => {
   ]);
 
   const visibleFolders = useMemo(() => {
-  if (view !== "personal") return [];
-  if (activeFolder === UNCATEGORIZED) return [];
+    if (view !== "personal") return [];
+    if (activeFolder === UNCATEGORIZED) return [];
 
-  const q = search.trim().toLowerCase();
-  const parentId = activeFolder === ALL_FILES ? "" : activeFolderId;
+    const q = search.trim().toLowerCase();
+    const parentId = activeFolder === ALL_FILES ? "" : activeFolderId;
 
-  return manifestFolders
-    .filter((folder) => String(folder.parentFolderId || "") === parentId)
-    .filter((folder) => {
-      if (!q) return true;
+    return manifestFolders
+      .filter((folder) => String(folder.parentFolderId || "") === parentId)
+      .filter((folder) => {
+        if (!q) return true;
 
-      return [folder.name, folderPath(folder), folder.folderId, folder.hash, folder.rootHash].some(
-        (value) => String(value || "").toLowerCase().includes(q)
-      );
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
-}, [view, activeFolder, activeFolderId, search, manifestFolders, folderById]);
-  
+        return [folder.name, folderPath(folder), folder.folderId, folder.hash, folder.rootHash].some(
+          (value) => String(value || "").toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [view, activeFolder, activeFolderId, search, manifestFolders, folderById]);
+
   const companyBytes = companyFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
 
   useEffect(() => {
-  if (!api || !wallet?.connected) return;
+    if (!api || !wallet?.connected) return;
 
-  api
-    .invoke<{ expandedFolderIds?: string[] }>("p2p:getUiPrefs")
-    .then((prefs) => {
-      if (prefs?.expandedFolderIds?.length) {
-        setExpandedFolderIds(new Set(prefs.expandedFolderIds));
-      }
-    })
-    .catch(() => {});
-}, [api, wallet?.connected]);
-
-useEffect(() => {
-  if (!api || !wallet?.connected) return;
-
-  const t = setTimeout(() => {
     api
-      .invoke("p2p:setUiPrefs", {
-        expandedFolderIds: Array.from(expandedFolderIds),
+      .invoke<{ expandedFolderIds?: string[] }>("p2p:getUiPrefs")
+      .then((prefs) => {
+        if (prefs?.expandedFolderIds?.length) {
+          setExpandedFolderIds(new Set(prefs.expandedFolderIds));
+        }
       })
       .catch(() => {});
-  }, 800);
+  }, [api, wallet?.connected]);
 
-  return () => clearTimeout(t);
-}, [api, expandedFolderIds, wallet?.connected]);
+  useEffect(() => {
+    if (!api || !wallet?.connected) return;
+
+    const t = setTimeout(() => {
+      api
+        .invoke("p2p:setUiPrefs", {
+          expandedFolderIds: Array.from(expandedFolderIds),
+        })
+        .catch(() => {});
+    }, 800);
+
+    return () => clearTimeout(t);
+  }, [api, expandedFolderIds, wallet?.connected]);
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -702,30 +735,30 @@ useEffect(() => {
     }
   };
 
-    const refresh = async () => {
-  if (!api) return;
+  const refresh = async () => {
+    if (!api) return;
 
-  // مهم: نقرأ الهوية أولًا، لأن seed:login يكتب wallet.json من IPC منفصل.
-  // بعدها نجيب الملفات والفولدرات حسب الهوية الجديدة.
-  const nextWallet = await api.invoke<WalletState>("wallet:status");
-  setWallet(nextWallet);
+    // مهم: نقرأ الهوية أولًا، لأن seed:login يكتب wallet.json من IPC منفصل.
+    // بعدها نجيب الملفات والفولدرات حسب الهوية الجديدة.
+    const nextWallet = await api.invoke<WalletState>("wallet:status");
+    setWallet(nextWallet);
 
-  const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
-    api.invoke<Summary>("p2p:networkSummary"),
-    api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
-    api.invoke<CompanyState>("company:state"),
-    api.invoke<DriveFolder[]>("p2p:listFolders"),
-  ]);
+    const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
+      api.invoke<Summary>("p2p:networkSummary"),
+      api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
+      api.invoke<CompanyState>("company:state"),
+      api.invoke<DriveFolder[]>("p2p:listFolders"),
+    ]);
 
-  setSummary(nextSummary);
-  setFiles(Array.isArray(nextFiles) ? nextFiles : []);
-  setCompany(nextCompany);
-  setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
+    setSummary(nextSummary);
+    setFiles(Array.isArray(nextFiles) ? nextFiles : []);
+    setCompany(nextCompany);
+    setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
 
-  if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
-    setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
-  }
-};
+    if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
+      setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
+    }
+  };
 
   useEffect(() => {
     if (!api) return;
@@ -749,89 +782,89 @@ useEffect(() => {
 
   // ─── Actions ────────────────────────────────────────────────────────────────
   const password = () => {
-  const value = drivePassword.trim();
+    const value = drivePassword.trim();
 
-  if (value.length < minPasswordLength) {
-    throw new Error(`Drive Password must be at least ${minPasswordLength} characters.`);
-  }
-
-  return value;
-};
-
-    const connectWallet = () =>
-  run(async () => {
-    if (!WALLETCONNECT_PROJECT_ID) {
-      throw new Error("Missing VITE_WALLETCONNECT_PROJECT_ID in .env");
+    if (value.length < minPasswordLength) {
+      throw new Error(`Drive Password must be at least ${minPasswordLength} characters.`);
     }
 
-    const signClient = await SignClient.init({
-      projectId: WALLETCONNECT_PROJECT_ID,
-      metadata: {
-        name: "Chunknet",
-        description: "Chunknet P2P Cloud Wallet Login",
-        url: "https://chunknet.local",
-        icons: [],
-      },
-    });
+    return value;
+  };
 
-    const modal = new WalletConnectModal({
-      projectId: WALLETCONNECT_PROJECT_ID,
-      chains: [WALLETCONNECT_CHAIN_ID],
-    });
+  const connectWallet = () =>
+    run(async () => {
+      if (!WALLETCONNECT_PROJECT_ID) {
+        throw new Error("Missing VITE_WALLETCONNECT_PROJECT_ID in .env");
+      }
 
-    const { uri, approval } = await signClient.connect({
-      requiredNamespaces: {
-        eip155: {
-          methods: ["personal_sign"],
-          chains: [WALLETCONNECT_CHAIN_ID],
-          events: ["accountsChanged", "chainChanged"],
+      const signClient = await SignClient.init({
+        projectId: WALLETCONNECT_PROJECT_ID,
+        metadata: {
+          name: "Chunknet",
+          description: "Chunknet P2P Cloud Wallet Login",
+          url: "https://chunknet.local",
+          icons: [],
         },
-      },
+      });
+
+      const modal = new WalletConnectModal({
+        projectId: WALLETCONNECT_PROJECT_ID,
+        chains: [WALLETCONNECT_CHAIN_ID],
+      });
+
+      const { uri, approval } = await signClient.connect({
+        requiredNamespaces: {
+          eip155: {
+            methods: ["personal_sign"],
+            chains: [WALLETCONNECT_CHAIN_ID],
+            events: ["accountsChanged", "chainChanged"],
+          },
+        },
+      });
+
+      if (uri) {
+        await modal.openModal({ uri });
+      }
+
+      const session = await approval();
+      modal.closeModal();
+
+      const account = session.namespaces.eip155?.accounts?.[0];
+      if (!account) {
+        throw new Error("No wallet account returned from WalletConnect");
+      }
+
+      const address = account.split(":").pop()?.toLowerCase();
+      if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+        throw new Error("Invalid wallet address returned from WalletConnect");
+      }
+
+      const loginMessage = [
+        "p2p.cloud login",
+        `Wallet: ${address}`,
+        `Time: ${new Date().toISOString()}`,
+        "Purpose: unlock encrypted P2P cloud storage",
+      ].join("\n");
+
+      const signature = await signClient.request<string>({
+        topic: session.topic,
+        chainId: WALLETCONNECT_CHAIN_ID,
+        request: {
+          method: "personal_sign",
+          params: [loginMessage, address],
+        },
+      });
+
+      setWallet(
+        await api.invoke<WalletState>("wallet:connect", {
+          address,
+          loginMessage,
+          signature,
+        })
+      );
+
+      await refresh();
     });
-
-    if (uri) {
-      await modal.openModal({ uri });
-    }
-
-    const session = await approval();
-    modal.closeModal();
-
-    const account = session.namespaces.eip155?.accounts?.[0];
-    if (!account) {
-      throw new Error("No wallet account returned from WalletConnect");
-    }
-
-    const address = account.split(":").pop()?.toLowerCase();
-    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
-      throw new Error("Invalid wallet address returned from WalletConnect");
-    }
-
-    const loginMessage = [
-      "p2p.cloud login",
-      `Wallet: ${address}`,
-      `Time: ${new Date().toISOString()}`,
-      "Purpose: unlock encrypted P2P cloud storage",
-    ].join("\n");
-
-    const signature = await signClient.request<string>({
-      topic: session.topic,
-      chainId: WALLETCONNECT_CHAIN_ID,
-      request: {
-        method: "personal_sign",
-        params: [loginMessage, address],
-      },
-    });
-
-    setWallet(
-      await api.invoke<WalletState>("wallet:connect", {
-        address,
-        loginMessage,
-        signature,
-      })
-    );
-
-    await refresh();
-  });
 
   const seedLogin = () =>
     run(async () => {
@@ -891,8 +924,8 @@ useEffect(() => {
       });
 
       setWallet(result);
-await api.invoke("p2p:start");
-await refresh();
+      await api.invoke("p2p:start");
+      await refresh();
 
       if (result.seed) {
         await showInfo("Recovery seed — save it now", result.seed);
@@ -935,14 +968,14 @@ await refresh();
       if (!pw) return;
 
       const result = await api.invoke<WalletState>("seed:recover", {
-  username,
-  seed,
-  password: pw,
-});
+        username,
+        seed,
+        password: pw,
+      });
 
-setWallet(result);
-await api.invoke("p2p:start");
-await refresh();
+      setWallet(result);
+      await api.invoke("p2p:start");
+      await refresh();
     });
 
   const disconnectWallet = () =>
@@ -1050,215 +1083,217 @@ await refresh();
     });
 
   const renameFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const name = (
-      await askText({
-        title: "Rename Folder",
-        message: `Rename "${folder.name}"`,
-        defaultValue: folder.name,
-        placeholder: "New folder name",
-        confirmText: "Rename",
-      })
-    )?.trim();
+    run(async () => {
+      const name = (
+        await askText({
+          title: "Rename Folder",
+          message: `Rename "${folder.name}"`,
+          defaultValue: folder.name,
+          placeholder: "New folder name",
+          confirmText: "Rename",
+        })
+      )?.trim();
 
-    if (!name || name === folder.name) return;
+      if (!name || name === folder.name) return;
 
-    await api.invoke("p2p:renameItem", { itemId: folder.folderId, name });
-    await refresh();
+      await api.invoke("p2p:renameItem", { itemId: folder.folderId, name });
+      await refresh();
 
-    if (activeFolderId === folder.folderId) {
-      setActiveFolder(name);
-    }
+      if (activeFolderId === folder.folderId) {
+        setActiveFolder(name);
+      }
 
-    toast.success("Folder renamed");
-  });
+      toast.success("Folder renamed");
+    });
 
   const moveFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const target = await askText({
-      title: "Move Folder",
-      message: `Move "${folderPath(folder)}" inside folder.
+    run(async () => {
+      const target = await askText({
+        title: "Move Folder",
+        message: `Move "${folderPath(folder)}" inside folder.
 
 Leave empty = Root
 Type folder name or full path = move inside it`,
-      placeholder: "Target folder name/path",
-      confirmText: "Move",
+        placeholder: "Target folder name/path",
+        confirmText: "Move",
+      });
+
+      if (target === null) return;
+
+      const targetFolder = folderByNameOrPath(target);
+      const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
+
+      if (target.trim() && !targetFolder) {
+        throw new Error("Target folder not found");
+      }
+
+      if (targetFolderId === folder.folderId) {
+        throw new Error("Cannot move folder into itself");
+      }
+
+      await api.invoke("p2p:moveItem", {
+        itemId: folder.folderId,
+        targetFolderId,
+      });
+
+      await refresh();
+      toast.success("Folder moved");
     });
-
-    if (target === null) return;
-
-    const targetFolder = folderByNameOrPath(target);
-    const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
-
-    if (target.trim() && !targetFolder) {
-      throw new Error("Target folder not found");
-    }
-
-    if (targetFolderId === folder.folderId) {
-      throw new Error("Cannot move folder into itself");
-    }
-
-    await api.invoke("p2p:moveItem", {
-      itemId: folder.folderId,
-      targetFolderId,
-    });
-
-    await refresh();
-    toast.success("Folder moved");
-  });
 
   const deleteFolder = (folder: DriveFolder) =>
-  run(async () => {
-    const disposition = await askText({
-      title: "Delete Folder",
-      message: `Files inside "${folderPath(folder)}":
+    run(async () => {
+      const disposition = await askText({
+        title: "Delete Folder",
+        message: `Files inside "${folderPath(folder)}":
 
 Leave empty → Uncategorized
 Type a folder name/path → move files there
 Type DELETE → delete files too`,
-      placeholder: "empty / folder name / DELETE",
-      confirmText: "Delete Folder",
-      danger: true,
+        placeholder: "empty / folder name / DELETE",
+        confirmText: "Delete Folder",
+        danger: true,
+      });
+
+      if (disposition === null) return;
+
+      const trimmed = disposition.trim();
+      const isDelete = trimmed.toUpperCase() === "DELETE";
+      const targetFolder = isDelete || !trimmed ? null : folderByNameOrPath(trimmed);
+
+      if (trimmed && !isDelete && !targetFolder) {
+        throw new Error("Target folder not found");
+      }
+
+      const folderAny = folder as any;
+
+      const deleteFolderId = String(
+        folderAny.folderId ||
+          folderAny.id ||
+          folderAny.hash ||
+          folderAny.rootHash ||
+          folderAny.path ||
+          folder.name ||
+          folderPath(folder) ||
+          ""
+      ).trim();
+
+      if (!deleteFolderId) {
+        throw new Error(`Cannot delete folder: missing folder identity. folder=${JSON.stringify(folder)}`);
+      }
+
+      await api.invoke("p2p:deleteItem", {
+        itemId: deleteFolderId,
+        folderId: deleteFolderId,
+        id: deleteFolderId,
+        name: folder.name,
+        folderPath: folderPath(folder),
+        fileDisposition: isDelete ? "delete" : "move",
+        targetFolderId: targetFolder?.folderId || "",
+      });
+
+      await refresh();
+
+      if (activeFolderId === folder.folderId) {
+        setActiveFolder(ALL_FILES);
+        setActiveFolderId("");
+      }
+
+      toast.success(`Folder "${folder.name}" deleted`);
     });
 
-    if (disposition === null) return;
-
-    const trimmed = disposition.trim();
-    const isDelete = trimmed.toUpperCase() === "DELETE";
-    const targetFolder = isDelete || !trimmed ? null : folderByNameOrPath(trimmed);
-
-    if (trimmed && !isDelete && !targetFolder) {
-      throw new Error("Target folder not found");
-    }
-
-    const folderAny = folder as any;
-
-const deleteFolderId = String(
-  folderAny.folderId ||
-  folderAny.id ||
-  folderAny.hash ||
-  folderAny.rootHash ||
-  folderAny.path ||
-  folder.name ||
-  folderPath(folder) ||
-  ""
-).trim();
-
-if (!deleteFolderId) {
-  throw new Error(`Cannot delete folder: missing folder identity. folder=${JSON.stringify(folder)}`);
-}
-
-await api.invoke("p2p:deleteItem", {
-  itemId: deleteFolderId,
-  folderId: deleteFolderId,
-  id: deleteFolderId,
-  name: folder.name,
-  folderPath: folderPath(folder),
-  fileDisposition: isDelete ? "delete" : "move",
-  targetFolderId: targetFolder?.folderId || "",
-});
-
-    await refresh();
-
-    if (activeFolderId === folder.folderId) {
-      setActiveFolder(ALL_FILES);
-      setActiveFolderId("");
-    }
-
-    toast.success(`Folder "${folder.name}" deleted`);
-  });
-
-const upload = () =>
-  run(async () => {
-    if (!identityConnected) {
-      throw new Error("Connect wallet or sign in with Seed Account before uploading");
-    }
-
-    if ((view === "company" || view === "admin") && !activeWorkspace) {
-      throw new Error("Create or select a company first");
-    }
-
-    if ((view === "company" || view === "admin") && !canUpload(localRole)) {
-      throw new Error("Your company role cannot upload files");
-    }
-
-    const targetFolder = activeFolderId ? folderById.get(activeFolderId) : null;
-
-const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
-  "p2p:uploadFiles",
-  {
-    isEncrypted: true,
-drivePassword: password(),
-
-    workspaceId:
-      view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
-
-    folderId: activeFolderId || "",
-    parentFolderId: activeFolderId || "",
-    folderName: targetFolder?.name || "",
-    folderPath:
-      activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
-        ? activeFolder
-        : "",
-  }
-);
-
-    if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
-      for (const file of result.files) {
-        await api.invoke("company:addFile", {
-          workspaceId: activeWorkspace.workspaceId,
-          file,
-          folder:
-            activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-        });
+  const upload = () =>
+    run(async () => {
+      if (!identityConnected) {
+        throw new Error("Connect wallet or sign in with Seed Account before uploading");
       }
-    }
 
-    if (!result?.cancelled) {
-      toast.success(`${result?.files?.length || 1} file(s) stored safely`);
-    }
-
-    await refresh();
-  });
-const uploadFolder = () =>
-  run(async () => {
-    if (!identityConnected) {
-      throw new Error("Connect wallet or sign in with Seed Account before uploading");
-    }
-
-    if ((view === "company" || view === "admin") && !activeWorkspace) {
-      throw new Error("Create or select a company first");
-    }
-
-    if ((view === "company" || view === "admin") && !canUpload(localRole)) {
-      throw new Error("Your company role cannot upload files");
-    }
-
-    const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
-      "p2p:uploadFolder",
-      {
-        isEncrypted: true,
-drivePassword: password(),
-        folderId: activeFolderId || "",
+      if ((view === "company" || view === "admin") && !activeWorkspace) {
+        throw new Error("Create or select a company first");
       }
-    );
 
-    if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
-      for (const file of result.files) {
-        await api.invoke("company:addFile", {
-          workspaceId: activeWorkspace.workspaceId,
-          file,
-          folder: activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
-        });
+      if ((view === "company" || view === "admin") && !canUpload(localRole)) {
+        throw new Error("Your company role cannot upload files");
       }
-    }
 
-    if (!result?.cancelled) {
-      toast.success(`${result?.files?.length || 0} file(s) uploaded from folder`);
-    }
+      const targetFolder = activeFolderId ? folderById.get(activeFolderId) : null;
 
-    await refresh();
-  });
+      const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
+        "p2p:uploadFiles",
+        {
+          isEncrypted: true,
+          drivePassword: password(),
+
+          workspaceId:
+            view === "company" || view === "admin" ? activeWorkspace?.workspaceId : null,
+
+          folderId: activeFolderId || "",
+          parentFolderId: activeFolderId || "",
+          folderName: targetFolder?.name || "",
+          folderPath:
+            activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+              ? activeFolder
+              : "",
+        }
+      );
+
+      if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
+        for (const file of result.files) {
+          await api.invoke("company:addFile", {
+            workspaceId: activeWorkspace.workspaceId,
+            file,
+            folder:
+              activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+          });
+        }
+      }
+
+      if (!result?.cancelled) {
+        toast.success(`${result?.files?.length || 1} file(s) stored safely`);
+      }
+
+      await refresh();
+    });
+
+  const uploadFolder = () =>
+    run(async () => {
+      if (!identityConnected) {
+        throw new Error("Connect wallet or sign in with Seed Account before uploading");
+      }
+
+      if ((view === "company" || view === "admin") && !activeWorkspace) {
+        throw new Error("Create or select a company first");
+      }
+
+      if ((view === "company" || view === "admin") && !canUpload(localRole)) {
+        throw new Error("Your company role cannot upload files");
+      }
+
+      const result = await api.invoke<{ cancelled?: boolean; files?: P2PFile[] }>(
+        "p2p:uploadFolder",
+        {
+          isEncrypted: true,
+          drivePassword: password(),
+          folderId: activeFolderId || "",
+        }
+      );
+
+      if ((view === "company" || view === "admin") && activeWorkspace && result?.files?.length) {
+        for (const file of result.files) {
+          await api.invoke("company:addFile", {
+            workspaceId: activeWorkspace.workspaceId,
+            file,
+            folder: activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+          });
+        }
+      }
+
+      if (!result?.cancelled) {
+        toast.success(`${result?.files?.length || 0} file(s) uploaded from folder`);
+      }
+
+      await refresh();
+    });
+
   const download = (file: P2PFile) =>
     run(async () => {
       const result = await api.invoke<{ cancelled?: boolean; path?: string }>(
@@ -1349,278 +1384,278 @@ drivePassword: password(),
   };
 
   const bulkMove = () =>
-  run(async () => {
-    if (selectedItemIds.size === 0) return;
+    run(async () => {
+      if (selectedItemIds.size === 0) return;
 
-    const filesToMove = visibleFiles.filter(
-      (file) =>
-        selectedItemIds.has(itemIdFor(file)) &&
-        !companyFileByKey.has(keyFor(file)) &&
-        !companyFileByKey.has(file.hash)
-    );
+      const filesToMove = visibleFiles.filter(
+        (file) =>
+          selectedItemIds.has(itemIdFor(file)) &&
+          !companyFileByKey.has(keyFor(file)) &&
+          !companyFileByKey.has(file.hash)
+      );
 
-    for (const file of filesToMove) {
-      await movePersonalFileTo(file, bulkTargetFolderId);
-    }
+      for (const file of filesToMove) {
+        await movePersonalFileTo(file, bulkTargetFolderId);
+      }
 
-    setSelectedItemIds(new Set());
-    setBulkTargetFolderId("");
-    await refresh();
-    toast.success(`Moved ${filesToMove.length} file(s)`);
-  });
+      setSelectedItemIds(new Set());
+      setBulkTargetFolderId("");
+      await refresh();
+      toast.success(`Moved ${filesToMove.length} file(s)`);
+    });
 
-const toggleSelect = (itemId: string) => {
-  setSelectedItemIds((prev) => {
-    const next = new Set(prev);
-
-    if (next.has(itemId)) next.delete(itemId);
-    else next.add(itemId);
-
-    return next;
-  });
-};
-
-const selectAll = () => {
-  const personalVisible = visibleFiles.filter(
-    (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
-  );
-
-  setSelectedItemIds(new Set(personalVisible.map((file) => itemIdFor(file))));
-};
-
-const clearSelection = () => {
-  setSelectedItemIds(new Set());
-};
-
-const renderFolderNode = (folder: DriveFolder, depth = 0) => {
-  const selected = activeFolderId === folder.folderId;
-  const children = folderChildren.get(folder.folderId) || [];
-  const hasChildren = children.length > 0;
-  const expanded = expandedFolderIds.has(folder.folderId);
-
-  const toggleExpanded = () => {
-    setExpandedFolderIds((prev) => {
+  const toggleSelect = (itemId: string) => {
+    setSelectedItemIds((prev) => {
       const next = new Set(prev);
 
-      if (next.has(folder.folderId)) {
-        next.delete(folder.folderId);
-      } else {
-        next.add(folder.folderId);
-      }
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
 
       return next;
     });
   };
 
-  return (
-    <div key={folder.folderId} className="space-y-1">
-      <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
-        {hasChildren ? (
-          <button
-            type="button"
-            onClick={toggleExpanded}
-            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-            title={expanded ? "Collapse" : "Expand"}
-          >
-            {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-          </button>
-        ) : (
-          <span className="w-5" />
-        )}
+  const selectAll = () => {
+    const personalVisible = visibleFiles.filter(
+      (file) => !companyFileByKey.has(keyFor(file)) && !companyFileByKey.has(file.hash)
+    );
 
-        <button
-          onClick={() => {
-            setActiveFolder(folderPath(folder));
-            setActiveFolderId(folder.folderId);
-          }}
-          className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-            selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
-          }`}
-        >
-          <FolderOpen className="mr-1.5 inline size-3" />
-          {folder.name}
-          <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
-            manifest
-          </Badge>
-        </button>
-
-        <button
-          onClick={() => renameFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
-          title="Rename"
-        >
-          <Pencil className="size-3" />
-        </button>
-
-        <button
-          onClick={() => moveFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
-          title="Move"
-        >
-          <MoveRight className="size-3" />
-        </button>
-
-        <button
-          onClick={() => deleteFolder(folder)}
-          className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
-          title="Delete"
-        >
-          <Trash2 className="size-3" />
-        </button>
-      </div>
-
-      {expanded && children.map((child) => renderFolderNode(child, depth + 1))}
-    </div>
-  );
-};
-
-  function collectChildFolderIds(folderId: string): Set<string> {
-  const ids = new Set<string>([folderId]);
-  let changed = true;
-
-  while (changed) {
-    changed = false;
-
-    for (const folder of manifestFolders) {
-      const parent = String(folder.parentFolderId || "");
-
-      if (parent && ids.has(parent) && !ids.has(folder.folderId)) {
-        ids.add(folder.folderId);
-        changed = true;
-      }
-    }
-  }
-
-  return ids;
-}
-
-function folderStats(folder: DriveFolder) {
-  const ids = collectChildFolderIds(folder.folderId);
-
-  const nestedFiles = personalFiles.filter((file) => {
-    const folderId = getPersonalFileFolderId(file);
-    return folderId && ids.has(folderId);
-  });
-
-  const totalBytes = nestedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
-  const totalChunks = nestedFiles.reduce((sum, file) => sum + Number(file.totalChunks || 0), 0);
-  const protectedChunks = nestedFiles.reduce(
-    (sum, file) => sum + Number(file.protectedChunks ?? file.totalChunks ?? 0),
-    0
-  );
-
-  return {
-    files: nestedFiles.length,
-    bytes: totalBytes,
-    totalChunks,
-    protectedChunks,
+    setSelectedItemIds(new Set(personalVisible.map((file) => itemIdFor(file))));
   };
-}
 
-const openFolder = (folder: DriveFolder) => {
-  setActiveFolder(folderPath(folder));
-  setActiveFolderId(folder.folderId);
+  const clearSelection = () => {
+    setSelectedItemIds(new Set());
+  };
 
-  setExpandedFolderIds((prev) => {
-    const next = new Set(prev);
-    next.add(folder.folderId);
-    return next;
-  });
-};
+  const renderFolderNode = (folder: DriveFolder, depth = 0) => {
+    const selected = activeFolderId === folder.folderId;
+    const children = folderChildren.get(folder.folderId) || [];
+    const hasChildren = children.length > 0;
+    const expanded = expandedFolderIds.has(folder.folderId);
 
-const renderFolderCard = (folder: DriveFolder) => {
-  const stats = folderStats(folder);
-  const isProtected = stats.totalChunks > 0 && stats.protectedChunks >= stats.totalChunks;
+    const toggleExpanded = () => {
+      setExpandedFolderIds((prev) => {
+        const next = new Set(prev);
 
-  return (
-    <Card
-      key={`folder-card:${folder.folderId}`}
-      onDoubleClick={() => openFolder(folder)}
-      className="cursor-pointer rounded-2xl border-zinc-800 bg-zinc-900 transition-all hover:border-blue-500"
-    >
-      <CardContent className="space-y-4 p-5">
-        <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
-          <FolderOpen className="size-10 text-blue-400" />
-        </div>
+        if (next.has(folder.folderId)) {
+          next.delete(folder.folderId);
+        } else {
+          next.add(folder.folderId);
+        }
 
-        <div>
-          <p className="truncate text-sm font-semibold">{folder.name}</p>
+        return next;
+      });
+    };
 
-          <p className="text-xs text-zinc-400">
-            {stats.files} file(s) · {bytes(stats.bytes)}
-          </p>
+    return (
+      <div key={folder.folderId} className="space-y-1">
+        <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={toggleExpanded}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              title={expanded ? "Collapse" : "Expand"}
+            >
+              {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            </button>
+          ) : (
+            <span className="w-5" />
+          )}
 
-          <p className="mt-1 text-xs text-zinc-500">
-            <FolderOpen className="mr-1 inline size-3" />
-            {folder.parentFolderId ? folderPath(folder) : "Root folder"}
-          </p>
+          <button
+            onClick={() => {
+              setActiveFolder(folderPath(folder));
+              setActiveFolderId(folder.folderId);
+            }}
+            className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
+              selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
+            }`}
+          >
+            <FolderOpen className="mr-1.5 inline size-3" />
+            {folder.name}
+            <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
+              manifest
+            </Badge>
+          </button>
 
-          <div className="mt-2 flex flex-wrap gap-1">
-            {stats.totalChunks > 0 ? (
-              <Badge
-                variant="outline"
-                className={`text-xs ${isProtected ? "text-emerald-300" : "text-blue-300"}`}
-              >
-                <ShieldCheck className="mr-1 size-3" />
-                {isProtected ? "Folder Protected" : "Folder Protecting"}
-              </Badge>
-            ) : (
-              <Badge variant="outline" className="text-xs text-zinc-400">
-                No chunks
-              </Badge>
-            )}
-          </div>
-
-          <p className="mt-1 text-xs text-zinc-600">
-            {stats.protectedChunks}/{stats.totalChunks} chunks
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-1">
-          <Button size="sm" onClick={() => openFolder(folder)} disabled={busy} className="text-xs">
-            <FolderOpen className="size-3" />
-            Open
-          </Button>
-
-          <Button
-            variant="outline"
-            size="sm"
+          <button
             onClick={() => renameFolder(folder)}
-            disabled={busy}
-            className="text-xs"
+            className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
+            title="Rename"
           >
             <Pencil className="size-3" />
-            Rename
-          </Button>
+          </button>
 
-          <Button
-            variant="outline"
-            size="sm"
+          <button
             onClick={() => moveFolder(folder)}
-            disabled={busy}
-            className="text-xs"
+            className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
+            title="Move"
           >
             <MoveRight className="size-3" />
-            Move
-          </Button>
+          </button>
 
-          <Button
-            variant="destructive"
-            size="sm"
+          <button
             onClick={() => deleteFolder(folder)}
-            disabled={busy}
-            className="text-xs"
+            className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
+            title="Delete"
           >
             <Trash2 className="size-3" />
-            Delete
-          </Button>
+          </button>
         </div>
-      </CardContent>
-    </Card>
-  );
-};
-  
-  const renderFileCard = (file: P2PFile) => {   
+
+        {expanded && children.map((child) => renderFolderNode(child, depth + 1))}
+      </div>
+    );
+  };
+
+  function collectChildFolderIds(folderId: string): Set<string> {
+    const ids = new Set<string>([folderId]);
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+
+      for (const folder of manifestFolders) {
+        const parent = String(folder.parentFolderId || "");
+
+        if (parent && ids.has(parent) && !ids.has(folder.folderId)) {
+          ids.add(folder.folderId);
+          changed = true;
+        }
+      }
+    }
+
+    return ids;
+  }
+
+  function folderStats(folder: DriveFolder) {
+    const ids = collectChildFolderIds(folder.folderId);
+
+    const nestedFiles = personalFiles.filter((file) => {
+      const folderId = getPersonalFileFolderId(file);
+      return folderId && ids.has(folderId);
+    });
+
+    const totalBytes = nestedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+    const totalChunks = nestedFiles.reduce((sum, file) => sum + Number(file.totalChunks || 0), 0);
+    const protectedChunks = nestedFiles.reduce(
+      (sum, file) => sum + Number(file.protectedChunks ?? file.totalChunks ?? 0),
+      0
+    );
+
+    return {
+      files: nestedFiles.length,
+      bytes: totalBytes,
+      totalChunks,
+      protectedChunks,
+    };
+  }
+
+  const openFolder = (folder: DriveFolder) => {
+    setActiveFolder(folderPath(folder));
+    setActiveFolderId(folder.folderId);
+
+    setExpandedFolderIds((prev) => {
+      const next = new Set(prev);
+      next.add(folder.folderId);
+      return next;
+    });
+  };
+
+  const renderFolderCard = (folder: DriveFolder) => {
+    const stats = folderStats(folder);
+    const isProtected = stats.totalChunks > 0 && stats.protectedChunks >= stats.totalChunks;
+
+    return (
+      <Card
+        key={`folder-card:${folder.folderId}`}
+        onDoubleClick={() => openFolder(folder)}
+        className="cursor-pointer rounded-2xl border-zinc-800 bg-zinc-900 transition-all hover:border-blue-500"
+      >
+        <CardContent className="space-y-4 p-5">
+          <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
+            <FolderOpen className="size-10 text-blue-400" />
+          </div>
+
+          <div>
+            <p className="truncate text-sm font-semibold">{folder.name}</p>
+
+            <p className="text-xs text-zinc-400">
+              {stats.files} file(s) · {bytes(stats.bytes)}
+            </p>
+
+            <p className="mt-1 text-xs text-zinc-500">
+              <FolderOpen className="mr-1 inline size-3" />
+              {folder.parentFolderId ? folderPath(folder) : "Root folder"}
+            </p>
+
+            <div className="mt-2 flex flex-wrap gap-1">
+              {stats.totalChunks > 0 ? (
+                <Badge
+                  variant="outline"
+                  className={`text-xs ${isProtected ? "text-emerald-300" : "text-blue-300"}`}
+                >
+                  <ShieldCheck className="mr-1 size-3" />
+                  {isProtected ? "Folder Protected" : "Folder Protecting"}
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-xs text-zinc-400">
+                  No chunks
+                </Badge>
+              )}
+            </div>
+
+            <p className="mt-1 text-xs text-zinc-600">
+              {stats.protectedChunks}/{stats.totalChunks} chunks
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-1">
+            <Button size="sm" onClick={() => openFolder(folder)} disabled={busy} className="text-xs">
+              <FolderOpen className="size-3" />
+              Open
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => renameFolder(folder)}
+              disabled={busy}
+              className="text-xs"
+            >
+              <Pencil className="size-3" />
+              Rename
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => moveFolder(folder)}
+              disabled={busy}
+              className="text-xs"
+            >
+              <MoveRight className="size-3" />
+              Move
+            </Button>
+
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => deleteFolder(folder)}
+              disabled={busy}
+              className="text-xs"
+            >
+              <Trash2 className="size-3" />
+              Delete
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
+
+  const renderFileCard = (file: P2PFile) => {
     const p = protection(file);
     const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
     const cf = match?.companyFile;
@@ -1924,20 +1959,20 @@ const renderFolderCard = (folder: DriveFolder) => {
       </header>
 
       <div className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900 px-6 py-2">
-  <KeyRound className="size-4 shrink-0 text-emerald-400" />
+        <KeyRound className="size-4 shrink-0 text-emerald-400" />
 
-  <Input
-    type="password"
-    placeholder={`Drive password (min ${minPasswordLength} chars)`}
-    value={drivePassword}
-    onChange={(event) => setDrivePassword(event.target.value)}
-    className="h-8 max-w-xs border-zinc-700 bg-zinc-950 text-xs"
-  />
+        <Input
+          type="password"
+          placeholder={`Drive password (min ${minPasswordLength} chars)`}
+          value={drivePassword}
+          onChange={(event) => setDrivePassword(event.target.value)}
+          className="h-8 max-w-xs border-zinc-700 bg-zinc-950 text-xs"
+        />
 
-  <span className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs text-emerald-300">
-    Encryption locked ON for all uploads
-  </span>
-</div>
+        <span className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs text-emerald-300">
+          Encryption locked ON for all uploads
+        </span>
+      </div>
 
       <div className="flex min-h-[calc(100vh-120px)]">
         <aside className="w-72 shrink-0 space-y-4 border-r border-zinc-800 bg-zinc-900 p-4">
@@ -2059,18 +2094,18 @@ const renderFolderCard = (folder: DriveFolder) => {
                 </div>
 
                 {(view === "personal" || view === "company" || view === "admin") && (
-  <>
-    <Button onClick={upload} disabled={busy}>
-      <Upload className="size-4" />
-      Upload
-    </Button>
+                  <>
+                    <Button onClick={upload} disabled={busy}>
+                      <Upload className="size-4" />
+                      Upload
+                    </Button>
 
-    <Button onClick={uploadFolder} disabled={busy} variant="outline">
-      <FolderPlus className="size-4" />
-      Upload Folder
-    </Button>
-  </>
-)}
+                    <Button onClick={uploadFolder} disabled={busy} variant="outline">
+                      <FolderPlus className="size-4" />
+                      Upload Folder
+                    </Button>
+                  </>
+                )}
               </div>
 
               {view === "personal" && (
@@ -2119,17 +2154,17 @@ const renderFolderCard = (folder: DriveFolder) => {
             </div>
 
             <TabsContent value="personal" className="p-6">
-  {personalFiles.length === 0 && manifestFolders.length === 0 ? (
-    <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
-      <HardDrive className="size-12" />
-      <p>No personal files yet. Upload to get started.</p>
-    </div>
-  ) : visibleFiles.length > 0 || visibleFolders.length > 0 ? (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {visibleFolders.map((folder) => renderFolderCard(folder))}
-      {visibleFiles.map((file) => renderFileCard(file))}
-    </div>
-  ) : (
+              {personalFiles.length === 0 && manifestFolders.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
+                  <HardDrive className="size-12" />
+                  <p>No personal files yet. Upload to get started.</p>
+                </div>
+              ) : visibleFiles.length > 0 || visibleFolders.length > 0 ? (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {visibleFolders.map((folder) => renderFolderCard(folder))}
+                  {visibleFiles.map((file) => renderFileCard(file))}
+                </div>
+              ) : (
                 <div className="flex flex-col items-center justify-center gap-3 py-24 text-zinc-600">
                   <Search className="size-12" />
                   <p>No files match this folder/search.</p>
