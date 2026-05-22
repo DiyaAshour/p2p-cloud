@@ -154,7 +154,7 @@ async function uploadOne(filePath, payload = {}) {
   const stat = fs.statSync(filePath);
   if (walletBytes(ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');
 
-  const privateFile = Boolean(payload.isEncrypted);
+  const privateFile = true;
   const salt = privateFile ? crypto.randomBytes(16) : null;
   const iv = privateFile ? crypto.randomBytes(12) : null;
   const cipher = privateFile ? crypto.createCipheriv(ENCRYPTION_ALGORITHM, driveKey({ ownerWallet, drivePassword: payload.drivePassword, salt }), iv) : null;
@@ -239,7 +239,7 @@ async function uploadOne(filePath, payload = {}) {
   const manifest = {
     id: `${ownerWallet}:${storedHash}`, name: path.basename(filePath), size: stat.size, storedSize, hash: storedHash, rootHash: tree.root,
     uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile,
-    visibility: privateFile ? 'private' : 'public', isPublic: !privateFile,
+    visibility: 'private', isPublic: false,
     encryption: privateFile ? { version: 5, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash, originalSize: stat.size } : null,
     mimeType: 'application/octet-stream', folderId: targetFolder?.folderId || '', parentFolderId: targetFolder?.folderId || '', folderName: targetFolder?.name || String(payload.folderPath || ''), folder: targetFolder?.name || String(payload.folderPath || ''),
     chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: n.peerId, ownerWallet, planId: w.planId || 'free', replicas: unique([...fileReplicas]), chunks,
