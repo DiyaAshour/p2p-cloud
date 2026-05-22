@@ -1680,18 +1680,27 @@ Type DELETE → delete files too`,
         }`}
       >
         <CardContent className="space-y-4 p-5">
-          {isPersonal && view === "personal" && (
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={isSelected}
-                onChange={() => toggleSelect(itemIdFor(file))}
-                className="h-4 w-4 cursor-pointer accent-blue-500"
-                aria-label="Select file"
-              />
-              <span className="text-xs text-zinc-500">Select</span>
-            </div>
-          )}
+         {isPersonal && view === "personal" && (
+  <button
+    type="button"
+    onClick={() => toggleSelect(itemIdFor(file))}
+    className={`flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs transition-all ${
+      isSelected
+        ? "border-blue-500 bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/40"
+        : "border-zinc-700 bg-zinc-950 text-zinc-400 hover:border-blue-500 hover:text-blue-300"
+    }`}
+    aria-label={isSelected ? "Unselect file" : "Select file"}
+  >
+    <span
+      className={`flex size-3.5 items-center justify-center rounded-full border ${
+        isSelected ? "border-blue-400 bg-blue-500" : "border-zinc-600"
+      }`}
+    >
+      {isSelected && <span className="size-1.5 rounded-full bg-white" />}
+    </span>
+    {isSelected ? "Selected" : "Select"}
+  </button>
+)}
 
           <div className="flex h-20 items-center justify-center rounded-2xl bg-zinc-950">
             <FileCheck2 className="size-9 text-zinc-500" />
