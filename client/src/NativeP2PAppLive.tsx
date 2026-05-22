@@ -54,6 +54,8 @@ type Channel =
   | "p2p:delete"
   | "p2p:deleteFolder"
   | "p2p:networkSummary"
+  | "p2p:pauseProtectionRetry"
+  | "p2p:resumeProtectionRetry"
   | "p2p:prepareProof"
   | "wallet:status"
   | "wallet:connect"
@@ -1339,80 +1341,91 @@ Type DELETE → delete files too`,
 
       await refresh();
     });
+// ─── UPDATED: remove — optimistic UI + pause repair during delete ───────────
+const remove = (file: P2PFile) =>
+  run(async () => {
+    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
 
-  // ─── UPDATED: remove — optimistic UI + background delete ──────────────────
-  const remove = (file: P2PFile) =>
-    run(async () => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+    const deletedKeys = new Set(
+      [itemIdFor(file), file.id, file.hash, file.rootHash].filter(Boolean)
+    );
 
-      const deletedKeys = new Set(
-        [itemIdFor(file), file.id, file.hash, file.rootHash].filter(Boolean)
-      );
+    // Optimistic UI: hide immediately
+    setFiles((prev) =>
+      prev.filter((item) => {
+        const keys = [itemIdFor(item), item.id, item.hash, item.rootHash].filter(Boolean);
+        return !keys.some((key) => deletedKeys.has(key));
+      })
+    );
 
-      // Optimistic UI: hide immediately
-      setFiles((prev) =>
-        prev.filter((item) => {
-          const keys = [itemIdFor(item), item.id, item.hash, item.rootHash].filter(Boolean);
-          return !keys.some((key) => deletedKeys.has(key));
-        })
-      );
-
-      setSelectedItemIds((prev) => {
-        const next = new Set(prev);
-        for (const key of deletedKeys) next.delete(String(key));
-        return next;
-      });
-
-      if (match) {
-        await api.invoke("company:updateFile", {
-          workspaceId: match.workspace.workspaceId,
-          rootHash: match.companyFile.rootHash,
-          patch: { deleted: true },
-        });
-
-        await refresh();
-        toast.success("Removed from company manifest.");
-        return;
-      }
-
-      toast.success("Deleting file in background...");
-
-      try {
-        await api.invoke("p2p:delete", {
-          hash: file.hash,
-          rootHash: file.rootHash,
-          id: file.id,
-          itemId: itemIdFor(file),
-        });
-      } finally {
-        await refresh();
-      }
+    setSelectedItemIds((prev) => {
+      const next = new Set(prev);
+      for (const key of deletedKeys) next.delete(String(key));
+      return next;
     });
 
-  const proof = (file: P2PFile) =>
-    run(async () => {
-      const result = await api.invoke<{ proof: unknown }>("p2p:prepareProof", {
+    if (match) {
+      await api.invoke("company:updateFile", {
+        workspaceId: match.workspace.workspaceId,
+        rootHash: match.companyFile.rootHash,
+        patch: { deleted: true },
+      });
+
+      await refresh();
+      toast.success("Removed from company manifest.");
+      return;
+    }
+
+    toast.success("Deleting file in background...");
+
+    try {
+      await api.invoke("p2p:pauseProtectionRetry", {
+        ms: 5 * 60 * 1000,
+        reason: "single-delete",
+      });
+    } catch {}
+
+    try {
+      await api.invoke("p2p:delete", {
         hash: file.hash,
+        rootHash: file.rootHash,
+        id: file.id,
+        itemId: itemIdFor(file),
       });
+    } finally {
+      try {
+        await api.invoke("p2p:resumeProtectionRetry", {
+          reason: "single-delete-finished",
+        });
+      } catch {}
 
-      await navigator.clipboard.writeText(JSON.stringify(result.proof, null, 2));
-      toast.success("Proof copied");
-    });
+      await refresh();
+    }
+  });
 
-  const share = (file: P2PFile) => {
-    const link = `chunknet://file/${file.rootHash || file.hash}`;
-    void navigator.clipboard.writeText(link).then(() => toast.success("Share link copied"));
-  };
-
-  const movePersonalFileTo = async (file: P2PFile, targetFolderId: string) => {
-    await api.invoke("p2p:moveItem", {
-      itemId: itemIdFor(file),
+const proof = (file: P2PFile) =>
+  run(async () => {
+    const result = await api.invoke<{ proof: unknown }>("p2p:prepareProof", {
       hash: file.hash,
-      rootHash: file.rootHash,
-      targetFolderId,
     });
-  };
 
+    await navigator.clipboard.writeText(JSON.stringify(result.proof, null, 2));
+    toast.success("Proof copied");
+  });
+
+const share = (file: P2PFile) => {
+  const link = `chunknet://file/${file.rootHash || file.hash}`;
+  void navigator.clipboard.writeText(link).then(() => toast.success("Share link copied"));
+};
+
+const movePersonalFileTo = async (file: P2PFile, targetFolderId: string) => {
+  await api.invoke("p2p:moveItem", {
+    itemId: itemIdFor(file),
+    hash: file.hash,
+    rootHash: file.rootHash,
+    targetFolderId,
+  });
+};
   // ─── UPDATED: bulkDelete — optimistic UI + parallel delete ────────────────
   const bulkDelete = () =>
     run(async () => {
@@ -1460,20 +1473,37 @@ Type DELETE to confirm.`,
 
       toast.success(`Deleting ${filesToDelete.length} file(s) in background...`);
 
-      const results = await Promise.allSettled(
-        filesToDelete.map((file) =>
-          api.invoke("p2p:delete", {
-            hash: file.hash,
-            rootHash: file.rootHash,
-            id: file.id,
-            itemId: itemIdFor(file),
-          })
-        )
-      );
+let results: PromiseSettledResult<unknown>[] = [];
 
-      const failed = results.filter((result) => result.status === "rejected");
+try {
+  await api.invoke("p2p:pauseProtectionRetry", {
+    ms: 5 * 60 * 1000,
+    reason: "bulk-delete",
+  });
+} catch {}
 
-      await refresh();
+try {
+  results = await Promise.allSettled(
+    filesToDelete.map((file) =>
+      api.invoke("p2p:delete", {
+        hash: file.hash,
+        rootHash: file.rootHash,
+        id: file.id,
+        itemId: itemIdFor(file),
+      })
+    )
+  );
+} finally {
+  try {
+    await api.invoke("p2p:resumeProtectionRetry", {
+      reason: "bulk-delete-finished",
+    });
+  } catch {}
+
+  await refresh();
+}
+
+const failed = results.filter((result) => result.status === "rejected");
 
       if (failed.length > 0) {
         toast.error(`Deleted with ${failed.length} error(s). Check logs.`);
