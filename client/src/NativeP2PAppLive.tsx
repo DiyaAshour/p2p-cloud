@@ -297,9 +297,8 @@ function protection(file: P2PFile) {
     details: `${file.protectedChunks ?? 0}/${file.totalChunks} protected`,
   };
 }
-
 // ─── isRealFileManifest ───────────────────────────────────────────────────────
-// فلتر قوي يمنع ظهور عناصر folder-placeholder أو ملفات بدون chunks حقيقية
+// فلتر قوي يمنع ظهور folders / placeholders / ui prefs / ملفات بدون chunks حقيقية
 function isRealFileManifest(file: P2PFile): boolean {
   const anyFile = file as any;
 
@@ -311,6 +310,11 @@ function isRealFileManifest(file: P2PFile): boolean {
   // استبعاد هاشات تبدأ بـ folder:
   if (String(file.hash || "").startsWith("folder:")) return false;
   if (String(file.rootHash || "").startsWith("folder:")) return false;
+
+  // استبعاد UI prefs manifests لأنها ليست ملفات حقيقية
+  if (String(file.hash || "").startsWith("ui:prefs:")) return false;
+  if (String(file.rootHash || "").startsWith("ui:prefs:")) return false;
+  if (String(anyFile.type || "") === "ui-prefs") return false;
 
   // استبعاد ملف .p2p-folder الداخلي
   const name = String(file.name || "").replace(/\\/g, "/").split("/").pop() || "";
@@ -324,7 +328,6 @@ function isRealFileManifest(file: P2PFile): boolean {
 
   return true;
 }
-
 // ─── Component ────────────────────────────────────────────────────────────────
 type AskTextOptions = {
   title: string;
@@ -548,26 +551,26 @@ export default function NativeP2PAppLive() {
 
   // ─── File groups — كلها تمر عبر isRealFileManifest ────────────────────────
 
-  const personalFiles = useMemo(
-    () =>
-      files.filter(
-        (file) =>
-          isRealFileManifest(file) &&
-          !companyFileByKey.has(keyFor(file)) &&
-          !companyFileByKey.has(file.hash)
-      ),
-    [files, companyFileByKey]
-  );
+const personalFiles = useMemo(
+  () =>
+    files.filter(
+      (file) =>
+        isRealFileManifest(file) &&
+        !companyFileByKey.has(keyFor(file)) &&
+        !companyFileByKey.has(file.hash)
+    ),
+  [files, companyFileByKey]
+);
 
-  const companyFiles = useMemo(() => {
-    if (!activeWorkspace) return [];
+const companyFiles = useMemo(() => {
+  if (!activeWorkspace) return [];
 
-    const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
+  const allowed = (activeWorkspace.files || []).filter((file) => !file.deleted);
 
-    return files
-      .filter(isRealFileManifest)
-      .filter((file) => allowed.some((companyFile) => fileKeyMatches(companyFile, file)));
-  }, [files, activeWorkspace]);
+  return files
+    .filter(isRealFileManifest)
+    .filter((file) => allowed.some((companyFile) => fileKeyMatches(companyFile, file)));
+}, [files, activeWorkspace]);
 
   const sharedFiles = useMemo(
     () =>
