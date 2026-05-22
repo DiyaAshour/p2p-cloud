@@ -243,6 +243,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] protection retry loop import finished');
     await import('./download-to-path-override.js');
     console.log('[main-wrapper] download override import finished');
+    await import('./hard-delete-override.js');
+    console.log('[main-wrapper] hard delete override import finished');
     await import('./delete-tombstone-sync.js');
     console.log('[main-wrapper] delete tombstone sync import finished');
     setTimeout(() => createFallbackWindow('runtime imported but no BrowserWindow appeared'), 3000);
