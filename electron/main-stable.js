@@ -313,8 +313,8 @@ async function syncPull() {
       error: e?.message || String(e),
     };
 
-    console.warn('[manifest-sync] pull failed:', e?.message || e);
-    return { ok: false, skipped: false, error: e?.message || String(e) };
+console.warn('[manifest-sync] pull failed (non-fatal):', e?.message || e);
+return { ok: false, skipped: false, error: e?.message || String(e) };
   }
 }
 async function syncPush(manifest) {
