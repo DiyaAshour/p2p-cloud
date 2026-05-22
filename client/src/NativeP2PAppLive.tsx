@@ -1,3 +1,4 @@
+cat > /mnt/user-data/outputs/NativeP2PAppLive.tsx << 'ENDOFFILE'
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -580,6 +581,12 @@ const companyFiles = useMemo(() => {
           (companyFileByKey.has(keyFor(file)) || companyFileByKey.has(file.hash))
       ),
     [files, companyFileByKey]
+  );
+
+  // ─── realFilesCount: عداد الملفات الحقيقية فقط (يستبعد folders/ui-prefs/zero-chunks) ───
+  const realFilesCount = useMemo(
+    () => files.filter(isRealFileManifest).length,
+    [files]
   );
 
   // Manifest-based folder list for sidebar
@@ -1973,7 +1980,8 @@ Type DELETE to confirm.`,
         <div className="mt-2 flex flex-wrap gap-4 text-xs text-zinc-400">
           <span className="flex items-center gap-1">
             <HardDrive className="size-3" />
-            {summary?.totalFiles || 0} Files
+            {/* ✅ التعديل: استخدام realFilesCount بدلاً من summary?.totalFiles */}
+            {realFilesCount} Files
           </span>
 
           <span className="flex items-center gap-1">
