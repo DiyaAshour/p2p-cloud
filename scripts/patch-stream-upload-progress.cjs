@@ -6,7 +6,7 @@ if (!fs.existsSync(file)) throw new Error(`${file} not found`);
 let src = fs.readFileSync(file, 'utf8');
 let changed = false;
 
-function replaceOnce(find, replacement, label) {
+function add(find, replacement, label) {
   if (!src.includes(find)) {
     console.log(`[patch-stream-upload-progress] marker not found: ${label}`);
     return false;
@@ -17,28 +17,20 @@ function replaceOnce(find, replacement, label) {
 }
 
 if (!src.includes("./transfer-progress-state.js")) {
-  replaceOnce(
+  add(
     "import { putChunkToSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';",
     "import { putChunkToSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';\nimport { startTransfer, updateTransfer, finishTransfer, failTransfer } from './transfer-progress-state.js';",
-    'transfer progress import'
+    'transfer-progress-state import'
   );
 }
 
-// Make the progress visible to the existing TransferProgressOverlay by ensuring
-// p2p:networkSummary is wrapped from the same runtime module that owns upload.
 if (!src.includes("./transfer-progress-network-summary-override.js")) {
   if (src.includes("await import('./stream-folder-upload-override.js');")) {
-    src = src.replace(
+    add(
       "await import('./stream-folder-upload-override.js');",
-      "await import('./transfer-progress-network-summary-override.js');\nawait import('./stream-folder-upload-override.js');"
+      "await import('./transfer-progress-network-summary-override.js');\nawait import('./stream-folder-upload-override.js');",
+      'network summary import before folder override'
     );
-    changed = true;
-  } else if (src.includes("console.log('[stream-upload] installed")) {
-    src = src.replace(
-      "console.log('[stream-upload] installed",
-      "await import('./transfer-progress-network-summary-override.js');\nconsole.log('[stream-upload] installed"
-    );
-    changed = true;
   } else {
     src += "\nawait import('./transfer-progress-network-summary-override.js');\n";
     changed = true;
@@ -46,7 +38,7 @@ if (!src.includes("./transfer-progress-network-summary-override.js")) {
 }
 
 if (!src.includes('let uploadPlainBytes = 0;')) {
-  replaceOnce(
+  add(
     "  if (walletBytes(ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');",
     "  if (walletBytes(ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');\n\n  let uploadPlainBytes = 0;\n  let uploadProgressChunksDone = 0;\n  const uploadTotalChunks = Math.max(1, Math.ceil(stat.size / CHUNK_SIZE_BYTES));\n  startTransfer('upload', {\n    fileName: path.basename(filePath),\n    totalBytes: stat.size,\n    totalChunks: uploadTotalChunks,\n    concurrency: 1,\n  });",
     'startTransfer block'
@@ -54,25 +46,25 @@ if (!src.includes('let uploadPlainBytes = 0;')) {
 }
 
 if (!src.includes('uploadPlainBytes += plain.length;')) {
-  replaceOnce(
-    "    const plain = Buffer.from(part);\n    originalHasher.update(plain);",
-    "    const plain = Buffer.from(part);\n    uploadPlainBytes += plain.length;\n    updateTransfer('upload', {\n      transferredBytes: Math.min(stat.size, uploadPlainBytes),\n      chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),\n      totalChunks: uploadTotalChunks,\n    });\n    originalHasher.update(plain);",
-    'read loop updateTransfer block'
+  add(
+    "  for await (const part of fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES })) {\n    const plain = Buffer.from(part);\n    originalHasher.update(plain);",
+    "  for await (const part of fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES })) {\n    const plain = Buffer.from(part);\n    uploadPlainBytes += plain.length;\n    updateTransfer('upload', {\n      transferredBytes: Math.min(stat.size, uploadPlainBytes),\n      chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),\n      totalChunks: uploadTotalChunks,\n    });\n    originalHasher.update(plain);",
+    'read loop progress update'
   );
 }
 
 if (!src.includes('uploadProgressChunksDone += 1;')) {
-  replaceOnce(
-    "    index += 1;\n  }",
-    "    uploadProgressChunksDone += 1;\n    updateTransfer('upload', {\n      chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),\n      totalChunks: uploadTotalChunks,\n      transferredBytes: Math.min(stat.size, uploadPlainBytes),\n    });\n    index += 1;\n  }",
-    'chunk flush updateTransfer block'
+  add(
+    "    dropMemoryChunk(hash);\n    index += 1;\n  }",
+    "    dropMemoryChunk(hash);\n    uploadProgressChunksDone += 1;\n    updateTransfer('upload', {\n      chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),\n      totalChunks: uploadTotalChunks,\n      transferredBytes: Math.min(stat.size, uploadPlainBytes),\n    });\n    index += 1;\n  }",
+    'flush progress update'
   );
 }
 
 if (!src.includes("finishTransfer('upload'")) {
-  replaceOnce(
-    "  return manifest;\n}",
-    "  finishTransfer('upload', { transferredBytes: stat.size, chunksDone: uploadTotalChunks, totalChunks: uploadTotalChunks });\n  return manifest;\n}",
+  add(
+    "  try {\n    await pushWalletManifest(manifest);\n  } catch (syncErr) {\n    console.warn('[stream-upload] manifest sync push failed (non-fatal, will retry on next pull):', syncErr?.message || syncErr);\n  }\n  return manifest;",
+    "  try {\n    await pushWalletManifest(manifest);\n  } catch (syncErr) {\n    console.warn('[stream-upload] manifest sync push failed (non-fatal, will retry on next pull):', syncErr?.message || syncErr);\n  }\n  finishTransfer('upload', {\n    transferredBytes: stat.size,\n    chunksDone: uploadTotalChunks,\n    totalChunks: uploadTotalChunks,\n  });\n  return manifest;",
     'finishTransfer block'
   );
 }
