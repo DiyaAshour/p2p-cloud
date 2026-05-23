@@ -226,6 +226,8 @@ async function importMainWhenReady() {
   try {
     await import('./p2p-transport-global-registry.js');
     console.log('[main-wrapper] p2p global registry import finished');
+    await import('./p2p-delete-message-override.js');
+    console.log('[main-wrapper] p2p delete message override import finished');
     await importPrimaryRuntime();
     await import('./company-workspace-ipc.js');
     console.log('[main-wrapper] company workspace IPC import finished');
