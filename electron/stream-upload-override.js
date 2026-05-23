@@ -274,4 +274,5 @@ try { ipcMain.removeHandler('p2p:uploadFiles'); } catch {}
 ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => uploadFiles(payload));
 try { ipcMain.removeHandler('p2p:uploadPath'); } catch {}
 ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => uploadOne(String(payload.filePath || payload.path || ''), payload));
-console.log('[stream-upload] installed disk-first streaming upload override with immediate AWS safety');
+await import('./stream-folder-upload-override.js');
+console.log('[stream-upload] installed disk-first streaming upload override with immediate AWS safety and folder streaming');
