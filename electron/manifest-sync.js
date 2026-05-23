@@ -1,5 +1,8 @@
+import crypto from 'node:crypto';
+
 const DEFAULT_MANIFEST_SYNC_URL = 'http://54.166.171.208:8790';
 const MANIFEST_SYNC_TIMEOUT_MS = Math.max(500, Number(process.env.P2P_MANIFEST_SYNC_TIMEOUT_MS || 8000));
+const MANIFEST_SYNC_AUTH_VERSION = 'hmac-sha256-v1';
 
 function normalizeBaseUrl(value = '') {
   return String(value || '').trim().replace(/\/$/, '');
@@ -29,6 +32,50 @@ function manifestSyncBaseUrl() {
     process.env.VITE_MANIFEST_SYNC_URL ||
     DEFAULT_MANIFEST_SYNC_URL
   );
+}
+
+function manifestSyncAuthSecret() {
+  return String(
+    process.env.P2P_MANIFEST_SYNC_AUTH_SECRET ||
+    process.env.MANIFEST_SYNC_AUTH_SECRET ||
+    ''
+  ).trim();
+}
+
+function sha256Hex(value = '') {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function signManifestSyncRequest({ method, path, identity, body = '' }) {
+  const secret = manifestSyncAuthSecret();
+  if (!secret) return {};
+
+  const timestamp = String(Date.now());
+  const nonce = crypto.randomUUID();
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  const normalizedPath = String(path || '');
+  const normalizedIdentity = normalizeIdentity(identity);
+  const bodySha256 = sha256Hex(body);
+  const canonical = [
+    MANIFEST_SYNC_AUTH_VERSION,
+    normalizedMethod,
+    normalizedPath,
+    normalizedIdentity,
+    bodySha256,
+    timestamp,
+    nonce,
+  ].join('\n');
+
+  const signature = crypto.createHmac('sha256', secret).update(canonical).digest('hex');
+
+  return {
+    'x-manifest-auth-version': MANIFEST_SYNC_AUTH_VERSION,
+    'x-manifest-identity': normalizedIdentity,
+    'x-manifest-timestamp': timestamp,
+    'x-manifest-nonce': nonce,
+    'x-manifest-body-sha256': bodySha256,
+    'x-manifest-signature': signature,
+  };
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -154,10 +201,16 @@ export async function pushWalletManifest(manifest = {}) {
       isPublic: manifest.isPublic === true || manifest.visibility === 'public' || manifest.isEncrypted === false,
     },
   };
-  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests`, {
+
+  const requestPath = `/wallet/${identityPath(identity)}/manifests`;
+  const body = JSON.stringify(payload);
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}${requestPath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    headers: {
+      'content-type': 'application/json',
+      ...signManifestSyncRequest({ method: 'POST', path: requestPath, identity, body }),
+    },
+    body,
   });
   return parseJsonResponse(response);
 }
@@ -166,8 +219,13 @@ export async function deleteWalletManifest(walletAddress, hash) {
   const identity = normalizeIdentity(walletAddress);
   if (!validIdentity(identity)) throw new Error('Valid wallet or seed identity required for manifest sync delete');
   if (!hash) throw new Error('Manifest hash required for delete');
-  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}/wallet/${identityPath(identity)}/manifests/${encodeURIComponent(hash)}`, {
+  const requestPath = `/wallet/${identityPath(identity)}/manifests/${encodeURIComponent(hash)}`;
+  const body = '';
+  const response = await fetchWithTimeout(`${manifestSyncBaseUrl()}${requestPath}`, {
     method: 'DELETE',
+    headers: {
+      ...signManifestSyncRequest({ method: 'DELETE', path: requestPath, identity, body }),
+    },
   });
   return parseJsonResponse(response);
 }
