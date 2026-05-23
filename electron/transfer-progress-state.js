@@ -1,6 +1,8 @@
 const DEFAULT_PROGRESS = { upload: null, download: null };
+const DEFAULT_CANCEL = { upload: false, download: false };
 
 globalThis.__chunknetTransferProgress ||= { ...DEFAULT_PROGRESS };
+globalThis.__chunknetTransferCancel ||= { ...DEFAULT_CANCEL };
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,7 +39,45 @@ export function getTransferProgress() {
   return globalThis.__chunknetTransferProgress;
 }
 
+export function clearTransferCancel(type) {
+  globalThis.__chunknetTransferCancel ||= { ...DEFAULT_CANCEL };
+  globalThis.__chunknetTransferCancel[type] = false;
+}
+
+export function requestTransferCancel(type) {
+  globalThis.__chunknetTransferCancel ||= { ...DEFAULT_CANCEL };
+  globalThis.__chunknetTransferCancel[type] = true;
+
+  const progress = getTransferProgress();
+  const current = progress[type];
+  if (current) {
+    progress[type] = computeProgress({
+      ...current,
+      active: true,
+      phase: 'cancelling',
+      error: null,
+      cancellable: false,
+    });
+  }
+
+  return progress[type] || null;
+}
+
+export function isTransferCancelled(type) {
+  globalThis.__chunknetTransferCancel ||= { ...DEFAULT_CANCEL };
+  return Boolean(globalThis.__chunknetTransferCancel[type]);
+}
+
+export function throwIfTransferCancelled(type) {
+  if (isTransferCancelled(type)) {
+    const error = new Error(type === 'upload' ? 'Upload cancelled' : 'Download cancelled');
+    error.code = 'TRANSFER_CANCELLED';
+    throw error;
+  }
+}
+
 export function startTransfer(type, options = {}) {
+  clearTransferCancel(type);
   const progress = getTransferProgress();
   const now = Date.now();
   progress[type] = computeProgress({
@@ -71,6 +111,7 @@ export function updateTransfer(type, patch = {}) {
 }
 
 export function finishTransfer(type, patch = {}) {
+  clearTransferCancel(type);
   const progress = getTransferProgress();
   const current = progress[type];
   if (!current) return null;
@@ -96,15 +137,23 @@ export function finishTransfer(type, patch = {}) {
 }
 
 export function failTransfer(type, error) {
+  clearTransferCancel(type);
   const progress = getTransferProgress();
   const current = progress[type];
   if (!current) return null;
+  const cancelled = error?.code === 'TRANSFER_CANCELLED' || String(error?.message || error || '').toLowerCase().includes('cancelled');
   progress[type] = computeProgress({
     ...current,
     active: false,
-    phase: 'error',
+    phase: cancelled ? 'cancelled' : 'error',
     error: error?.message || String(error || 'Transfer failed'),
     cancellable: false,
   });
+  setTimeout(() => {
+    const latest = getTransferProgress()[type];
+    if ((latest?.phase === 'cancelled' || latest?.phase === 'error') && latest?.startedAt === progress[type]?.startedAt) {
+      getTransferProgress()[type] = null;
+    }
+  }, cancelled ? 3500 : 8000).unref?.();
   return progress[type];
 }
