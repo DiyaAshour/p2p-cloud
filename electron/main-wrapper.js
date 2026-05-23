@@ -249,6 +249,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] hard delete override import finished');
     await import('./delete-tombstone-sync.js');
     console.log('[main-wrapper] delete tombstone sync import finished');
+    await import('./tombstone-sync-pull-override.js');
+    console.log('[main-wrapper] tombstone sync pull override import finished');
     setTimeout(() => createFallbackWindow('runtime imported but no BrowserWindow appeared'), 3000);
   } catch (error) {
     console.error('[main-wrapper] import failed:', error?.stack || error?.message || error);
