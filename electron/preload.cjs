@@ -36,6 +36,11 @@ const allowedChannels = new Set([
   'p2p:connectPeer',
   'p2p:repair',
   'p2p:protectionRetryNow',
+  'p2p:pauseProtectionRetry',
+  'p2p:resumeProtectionRetry',
+  'p2p:protectionRetryStatus',
+  'p2p:applyDeleteTombstones',
+  'p2p:listTombstones',
   'p2p:prepareProof',
   'p2p:cancelTransfer',
 
