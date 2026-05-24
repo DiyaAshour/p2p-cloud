@@ -6,24 +6,16 @@ import { pipeline } from 'node:stream/promises';
 import { getChunkFromSafetyPeer } from './safety-peer.js';
 import { ENCRYPTION_ALGORITHM, KDF_ITERATIONS, MIN_DRIVE_PASSWORD_LENGTH } from './core/config.js';
 import { activeIdentity, normalizeIdentity } from './core/identity.js';
-import { chunkPath, manifestsPath, walletPath } from './core/storage-paths.js';
+import { chunkPath, walletPath } from './core/storage-paths.js';
+import { readJson, readManifests } from './core/storage-json.js';
 import './hard-delete-override.js';
 
 function safeName(name = '') {
   return String(name || 'download.bin').replace(/[\\/:*?"<>|]/g, '_');
 }
 
-function loadJson(file, fallback) {
-  try {
-    if (!fs.existsSync(file)) return fallback;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
 function currentIdentity() {
-  return activeIdentity(loadJson(walletPath(), {}));
+  return activeIdentity(readJson(walletPath(), {}));
 }
 
 function p2pNode() {
@@ -38,10 +30,10 @@ function findManifest(payload = {}) {
   const identity = currentIdentity();
   const hash = String(payload.hash || '');
   const rootHash = String(payload.rootHash || '');
-  const all = loadJson(manifestsPath(), []);
-  return Array.isArray(all)
-    ? all.find((manifest) => normalizeIdentity(manifest.ownerWallet) === identity && (manifest.hash === hash || manifest.rootHash === rootHash))
-    : null;
+  return readManifests().find((manifest) =>
+    normalizeIdentity(manifest.ownerWallet) === identity &&
+    (manifest.hash === hash || manifest.rootHash === rootHash)
+  ) || null;
 }
 
 function validateDrivePassword(drivePassword) {
