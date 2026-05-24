@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain } from 'electron';
+import { dialog, ipcMain } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,7 +18,7 @@ import {
 } from './core/config.js';
 import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } from './core/identity.js';
 import { chunkPath, chunkStoreDir } from './core/storage-paths.js';
-import { readJson, writeJson, readManifests, writeManifests } from './core/storage-json.js';
+import { writeJson, readWallet, readManifests, writeManifests } from './core/storage-json.js';
 
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -27,14 +27,7 @@ function dropMemoryChunk(hash) { try { node()?.localChunks?.delete?.(hash); } ca
 function withoutSafety(replicas = []) { return unique(replicas).filter((peerId) => peerId !== SAFETY_PEER_REPLICA_ID); }
 function hasSafety(replicas = []) { return unique(replicas).includes(SAFETY_PEER_REPLICA_ID); }
 
-function wallet() { return readJson('./native-p2p-storage/wallet.json', {})?.address ? readJson('./native-p2p-storage/wallet.json', {}) : readJson(process.env.P2P_WALLET_PATH || '', {}) || {}; }
-function runtimeWallet() { return readJson(process.env.P2P_WALLET_PATH || '', null); }
-function actualWallet() {
-  const override = runtimeWallet();
-  if (override && typeof override === 'object' && (override.address || override.accountId)) return override;
-  return readJson((awaitImportStoragePathsWalletPath()), {});
-}
-function awaitImportStoragePathsWalletPath() { return globalThis.__chunknetWalletPathForCompat || ''; }
+function wallet() { return readWallet(); }
 function identity(w = wallet()) { return activeIdentity(w); }
 function manifests() { return readManifests(); }
 function saveManifests(v) { writeManifests(v); }
