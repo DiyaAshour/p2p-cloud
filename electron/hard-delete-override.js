@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { deleteWalletManifest, pushWalletManifest } from './manifest-sync.js';
 import { deleteChunkFromSafetyPeer } from './safety-peer.js';
+import { activeIdentity, assertVerifiedIdentity, normalizeIdentity } from './core/identity.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -12,7 +13,6 @@ function walletPath()     { return path.join(dataDir(), 'wallet.json'); }
 function manifestsPath()  { return path.join(dataDir(), 'manifests.json'); }
 function chunkStoreDir()  { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
 function chunkPath(hash)  { return path.join(chunkStoreDir(), `${String(hash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
-function normalize(v = '') { return String(v || '').trim().toLowerCase(); }
 function readJson(file, fallback) {
   try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; }
   catch { return fallback; }
@@ -22,7 +22,7 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
 }
 function wallet()               { return readJson(walletPath(), {}); }
-function identity(w = wallet()) { return normalize(w.accountId || w.address || ''); }
+function identity(w = wallet()) { return activeIdentity(w); }
 function manifests()            { const v = readJson(manifestsPath(), []); return Array.isArray(v) ? v : []; }
 function saveManifests(v)       { writeJson(manifestsPath(), v); }
 function node()                 { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
@@ -72,7 +72,7 @@ function matchesAnyId(item = {}, ids = []) {
 }
 
 function walletOwns(item = {}, owner = identity()) {
-  const itemOwner = normalize(item.ownerWallet || item.owner || item.wallet || '');
+  const itemOwner = normalizeIdentity(item.ownerWallet || item.owner || item.wallet || '');
   return !itemOwner || itemOwner === owner;
 }
 
@@ -166,9 +166,7 @@ async function removeManifestSync(item) {
 
 async function hardDeleteItem(payload = {}) {
   const w = wallet();
-  if (!w.connected || !w.verified || !identity(w)) {
-    throw new Error('Verified identity required.');
-  }
+  assertVerifiedIdentity(w);
 
   const item = findItem(payload);
   if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
@@ -177,7 +175,7 @@ async function hardDeleteItem(payload = {}) {
     throw new Error('Hard delete override handles files only. Delete folders through folder delete flow.');
   }
 
-  const ownerWallet = identity();
+  const ownerWallet = identity(w);
   const n           = node();
   const hashes      = chunkHashesOf(item);
   const removedIds  = new Set(manifestIds(item));
