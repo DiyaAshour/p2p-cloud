@@ -1,26 +1,18 @@
 import { ipcMain } from 'electron';
 import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { deleteWalletManifest, pushWalletManifest } from './manifest-sync.js';
 import { deleteChunkFromSafetyPeer } from './safety-peer.js';
 import { activeIdentity, assertVerifiedIdentity, normalizeIdentity } from './core/identity.js';
-import { chunkPath, manifestsPath, walletPath } from './core/storage-paths.js';
+import { chunkPath } from './core/storage-paths.js';
+import { readWallet, readManifests, writeManifests } from './core/storage-json.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function readJson(file, fallback) {
-  try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; }
-  catch { return fallback; }
-}
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
-}
-function wallet()               { return readJson(walletPath(), {}); }
+function wallet()               { return readWallet(); }
 function identity(w = wallet()) { return activeIdentity(w); }
-function manifests()            { const v = readJson(manifestsPath(), []); return Array.isArray(v) ? v : []; }
-function saveManifests(v)       { writeJson(manifestsPath(), v); }
+function manifests()            { return readManifests(); }
+function saveManifests(v)       { writeManifests(v); }
 function node()                 { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
 function unique(values = [])    { return Array.from(new Set(values.filter(Boolean))); }
 
