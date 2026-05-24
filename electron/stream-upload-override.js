@@ -17,7 +17,8 @@ import {
   quotaBytes,
 } from './core/config.js';
 import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } from './core/identity.js';
-import { chunkPath, chunkStoreDir, manifestsPath, walletPath } from './core/storage-paths.js';
+import { chunkPath, chunkStoreDir } from './core/storage-paths.js';
+import { readJson, writeJson, readManifests, writeManifests } from './core/storage-json.js';
 
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -26,19 +27,17 @@ function dropMemoryChunk(hash) { try { node()?.localChunks?.delete?.(hash); } ca
 function withoutSafety(replicas = []) { return unique(replicas).filter((peerId) => peerId !== SAFETY_PEER_REPLICA_ID); }
 function hasSafety(replicas = []) { return unique(replicas).includes(SAFETY_PEER_REPLICA_ID); }
 
-function readJson(file, fallback) {
-  try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; } catch { return fallback; }
+function wallet() { return readJson('./native-p2p-storage/wallet.json', {})?.address ? readJson('./native-p2p-storage/wallet.json', {}) : readJson(process.env.P2P_WALLET_PATH || '', {}) || {}; }
+function runtimeWallet() { return readJson(process.env.P2P_WALLET_PATH || '', null); }
+function actualWallet() {
+  const override = runtimeWallet();
+  if (override && typeof override === 'object' && (override.address || override.accountId)) return override;
+  return readJson((awaitImportStoragePathsWalletPath()), {});
 }
-
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
-}
-
-function wallet() { return readJson(walletPath(), {}); }
+function awaitImportStoragePathsWalletPath() { return globalThis.__chunknetWalletPathForCompat || ''; }
 function identity(w = wallet()) { return activeIdentity(w); }
-function manifests() { const v = readJson(manifestsPath(), []); return Array.isArray(v) ? v : []; }
-function saveManifests(v) { writeJson(manifestsPath(), v); }
+function manifests() { return readManifests(); }
+function saveManifests(v) { writeManifests(v); }
 
 function password(value = '') {
   const p = String(value || '').trim();
@@ -151,7 +150,6 @@ async function replicate(chunk) {
   const replicas = new Set([n.peerId]);
   const connectedPeers = n.connectedPeerIds?.() || [];
 
-  // Immediate rule: if there are no real P2P peers, go to AWS safety during upload.
   if (!connectedPeers.length) {
     try {
       const safety = await uploadChunkToAwsSafety(chunk, n.peerId, 'no-p2p-peers-at-upload');
