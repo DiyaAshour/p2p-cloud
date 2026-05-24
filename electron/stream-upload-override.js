@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildMerkleTree, getMerkleProof } from './merkle-engine.js';
 import { pushWalletManifest } from './manifest-sync.js';
-import { putChunkToSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';
+import { putChunkToSafetyPeer, deleteChunkFromSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';
+import { startTransfer, updateTransfer, finishTransfer, failTransfer, throwIfTransferCancelled } from './transfer-progress-state.js';
 
 const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 2 * 1024 * 1024);
 const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4));
@@ -30,30 +31,44 @@ function hasSafety(replicas = []) { return unique(replicas).includes(SAFETY_PEER
 function readJson(file, fallback) {
   try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; } catch { return fallback; }
 }
+
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
 }
+
 function wallet() { return readJson(walletPath(), {}); }
 function identity(w = wallet()) { return normalize(w.accountId || w.address || ''); }
 function manifests() { const v = readJson(manifestsPath(), []); return Array.isArray(v) ? v : []; }
 function saveManifests(v) { writeJson(manifestsPath(), v); }
+
 function password(value = '') {
   const p = String(value || '').trim();
   if (p.length < MIN_DRIVE_PASSWORD_LENGTH) throw new Error(`Drive Password required. Use at least ${MIN_DRIVE_PASSWORD_LENGTH} characters.`);
   return p;
 }
+
 function driveKey({ ownerWallet, drivePassword, salt }) {
   return crypto.pbkdf2Sync(`${normalize(ownerWallet)}:${password(drivePassword)}`, salt, KDF_ITERATIONS, 32, 'sha256');
 }
+
 function folderById(id = '') {
   const clean = String(id || '').replace(/^folder:/, '').trim();
   if (!clean) return null;
-  return manifests().find((m) => (m.kind === 'folder' || m.isFolder || String(m.hash || '').startsWith('folder:')) && [m.folderId, m.id, m.hash, m.rootHash].map((x) => String(x || '').replace(/^folder:/, '').trim()).includes(clean)) || null;
+  return manifests().find((m) =>
+    (m.kind === 'folder' || m.isFolder || String(m.hash || '').startsWith('folder:')) &&
+    [m.folderId, m.id, m.hash, m.rootHash]
+      .map((x) => String(x || '').replace(/^folder:/, '').trim())
+      .includes(clean)
+  ) || null;
 }
+
 function walletBytes(ownerWallet) {
-  return manifests().filter((m) => normalize(m.ownerWallet) === ownerWallet && !(m.kind === 'folder' || m.isFolder || String(m.hash || '').startsWith('folder:'))).reduce((s, f) => s + Number(f.size || 0), 0);
+  return manifests()
+    .filter((m) => normalize(m.ownerWallet) === ownerWallet && !(m.kind === 'folder' || m.isFolder || String(m.hash || '').startsWith('folder:')))
+    .reduce((s, f) => s + Number(f.size || 0), 0);
 }
+
 function quotaBytes(planId = 'free') {
   if (planId === 'tb10') return 10 * 1024 ** 4;
   if (planId === 'tb7') return 7 * 1024 ** 4;
@@ -61,6 +76,7 @@ function quotaBytes(planId = 'free') {
   if (planId === 'tb1') return 1 * 1024 ** 4;
   return 5 * 1024 ** 3;
 }
+
 function writeChunk(chunk) {
   fs.mkdirSync(chunkStoreDir(), { recursive: true });
   writeJson(chunkPath(chunk.hash), { ...chunk, storedAt: new Date().toISOString() });
@@ -97,6 +113,53 @@ async function uploadChunkToAwsSafety(chunk, peerId, reason = 'under-target') {
   return safety;
 }
 
+async function rollbackUploadedChunks(uploadedChunks = [], ownerWallet = '', reason = 'upload-cancelled') {
+  const n = node();
+  const seen = new Set();
+
+  for (const entry of uploadedChunks) {
+    const hash = entry?.hash;
+    if (!hash || seen.has(hash)) continue;
+    seen.add(hash);
+
+    try {
+      dropMemoryChunk(hash);
+      const filePath = chunkPath(hash);
+      if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      try { n?.chunkReplicas?.delete?.(hash); } catch {}
+    } catch (error) {
+      console.warn('[stream-upload] rollback local chunk failed:', hash, error?.message || error);
+    }
+
+    for (const peerId of unique(entry.replicas || [])) {
+      if (!peerId || peerId === n?.peerId) continue;
+
+      if (peerId === SAFETY_PEER_REPLICA_ID) {
+        try {
+          await deleteChunkFromSafetyPeer(hash, n?.peerId || 'desktop-client');
+        } catch (error) {
+          console.warn('[stream-upload] rollback safety chunk failed:', hash, error?.message || error);
+        }
+        continue;
+      }
+
+      try {
+        const socket = n?.peerSockets?.get?.(peerId);
+        n?.send?.(socket, {
+          id: crypto.randomUUID(),
+          type: 'chunk:delete',
+          fromPeerId: n.peerId,
+          toPeerId: peerId,
+          createdAt: Date.now(),
+          payload: { chunkHash: hash, ownerWallet, reason },
+        });
+      } catch (error) {
+        console.warn('[stream-upload] rollback peer chunk delete failed:', hash, peerId, error?.message || error);
+      }
+    }
+  }
+}
+
 async function replicate(chunk) {
   const n = node();
   if (!n?.peerId) throw new Error('P2P transport is not ready yet.');
@@ -104,9 +167,7 @@ async function replicate(chunk) {
   const replicas = new Set([n.peerId]);
   const connectedPeers = n.connectedPeerIds?.() || [];
 
-  // Immediate rule:
-  // If there are no real P2P peers, go to AWS safety right now during upload.
-  // Do not wait for auto-repair/startup-delayed repair.
+  // Immediate rule: if there are no real P2P peers, go to AWS safety during upload.
   if (!connectedPeers.length) {
     try {
       const safety = await uploadChunkToAwsSafety(chunk, n.peerId, 'no-p2p-peers-at-upload');
@@ -149,8 +210,10 @@ async function uploadOne(filePath, payload = {}) {
   const w = wallet();
   const ownerWallet = identity(w);
   if (!w.connected || !w.verified || !ownerWallet) throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
+
   const n = node();
   if (!n?.peerId) throw new Error('P2P transport is not ready yet.');
+
   const stat = fs.statSync(filePath);
   if (walletBytes(ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');
 
@@ -162,20 +225,38 @@ async function uploadOne(filePath, payload = {}) {
   const storedHasher = crypto.createHash('sha256');
   const chunks = [];
   const fileReplicas = new Set([n.peerId]);
+  const uploadedChunksForRollback = [];
   let carry = Buffer.alloc(0);
   let storedSize = 0;
   let index = 0;
+  let uploadPlainBytes = 0;
+  let uploadProgressChunksDone = 0;
+  const uploadTotalChunks = Math.max(1, Math.ceil(stat.size / CHUNK_SIZE_BYTES));
+
+  startTransfer('upload', {
+    fileName: path.basename(filePath),
+    totalBytes: stat.size,
+    totalChunks: uploadTotalChunks,
+    concurrency: 1,
+  });
 
   async function flush(bufferLike) {
+    throwIfTransferCancelled('upload');
+
     const buffer = Buffer.from(bufferLike || Buffer.alloc(0));
     const hash = sha256(buffer);
     storedHasher.update(buffer);
     storedSize += buffer.length;
+
     const chunk = { hash, data: buffer.toString('base64'), index, size: buffer.length, ownerWallet, encrypted: privateFile };
     writeChunk(chunk);
     dropMemoryChunk(hash);
+
     const replicas = await replicate(chunk);
     replicas.forEach((peerId) => fileReplicas.add(peerId));
+    uploadedChunksForRollback.push({ hash, replicas });
+
+    throwIfTransferCancelled('upload');
 
     const confirmed = withoutSafety(replicas).length;
     const safetyProtected = hasSafety(replicas);
@@ -201,7 +282,14 @@ async function uploadOne(filePath, payload = {}) {
       } : null,
       proof: [],
     });
+
     dropMemoryChunk(hash);
+    uploadProgressChunksDone += 1;
+    updateTransfer('upload', {
+      chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),
+      totalChunks: uploadTotalChunks,
+      transferredBytes: Math.min(stat.size, uploadPlainBytes),
+    });
     index += 1;
   }
 
@@ -209,24 +297,44 @@ async function uploadOne(filePath, payload = {}) {
     if (!output?.length) return;
     carry = carry.length ? Buffer.concat([carry, output]) : Buffer.from(output);
     while (carry.length >= CHUNK_SIZE_BYTES) {
+      throwIfTransferCancelled('upload');
       const part = carry.subarray(0, CHUNK_SIZE_BYTES);
       carry = carry.subarray(CHUNK_SIZE_BYTES);
       await flush(part);
     }
   }
 
-  for await (const part of fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES })) {
-    const plain = Buffer.from(part);
-    originalHasher.update(plain);
-    await consume(privateFile ? cipher.update(plain) : plain);
+  try {
+    for await (const part of fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES })) {
+      throwIfTransferCancelled('upload');
+
+      const plain = Buffer.from(part);
+      uploadPlainBytes += plain.length;
+      updateTransfer('upload', {
+        transferredBytes: Math.min(stat.size, uploadPlainBytes),
+        chunksDone: Math.min(uploadTotalChunks, uploadProgressChunksDone),
+        totalChunks: uploadTotalChunks,
+      });
+
+      originalHasher.update(plain);
+      await consume(privateFile ? cipher.update(plain) : plain);
+    }
+
+    throwIfTransferCancelled('upload');
+    if (privateFile) await consume(cipher.final());
+    if (carry.length || chunks.length === 0) await flush(carry);
+    throwIfTransferCancelled('upload');
+  } catch (error) {
+    await rollbackUploadedChunks(uploadedChunksForRollback, ownerWallet, error?.code === 'TRANSFER_CANCELLED' ? 'upload-cancelled' : 'upload-failed');
+    failTransfer('upload', error);
+    throw error;
   }
-  if (privateFile) await consume(cipher.final());
-  if (carry.length || chunks.length === 0) await flush(carry);
 
   const storedHash = storedHasher.digest('hex');
   const originalHash = originalHasher.digest('hex');
   const tree = buildMerkleTree(chunks.map((c) => c.hash));
   chunks.forEach((c) => { c.proof = getMerkleProof(tree, c.index); });
+
   const targetFolder = payload.folderId ? folderById(payload.folderId) : null;
   if (payload.folderId && !targetFolder) throw new Error(`Target folder not found: ${payload.folderId}`);
 
@@ -237,13 +345,43 @@ async function uploadOne(filePath, payload = {}) {
   const protectionMode = p2pProtectedChunks === chunks.length ? 'p2p' : safetyProtectedChunks > 0 ? 'aws-safety' : needsRepairChunks ? 'missing-safety' : 'repairing';
 
   const manifest = {
-    id: `${ownerWallet}:${storedHash}`, name: path.basename(filePath), size: stat.size, storedSize, hash: storedHash, rootHash: tree.root,
-    uploadedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isEncrypted: privateFile,
-    visibility: 'private', isPublic: false,
-    encryption: privateFile ? { version: 5, algorithm: ENCRYPTION_ALGORITHM, keySource: ENCRYPTION_KEY_SOURCE, kdf: KDF_ALGORITHM, kdfIterations: KDF_ITERATIONS, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), originalHash, originalSize: stat.size } : null,
-    mimeType: 'application/octet-stream', folderId: targetFolder?.folderId || '', parentFolderId: targetFolder?.folderId || '', folderName: targetFolder?.name || String(payload.folderPath || ''), folder: targetFolder?.name || String(payload.folderPath || ''),
-    chunkSize: CHUNK_SIZE_BYTES, totalChunks: chunks.length, ownerNodeId: n.peerId, ownerWallet, planId: w.planId || 'free', replicas: unique([...fileReplicas]), chunks,
-    uploadStatus: 'available', replicationStatus: needsRepairChunks ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting',
+    id: `${ownerWallet}:${storedHash}`,
+    name: path.basename(filePath),
+    size: stat.size,
+    storedSize,
+    hash: storedHash,
+    rootHash: tree.root,
+    uploadedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    isEncrypted: privateFile,
+    visibility: 'private',
+    isPublic: false,
+    encryption: privateFile ? {
+      version: 5,
+      algorithm: ENCRYPTION_ALGORITHM,
+      keySource: ENCRYPTION_KEY_SOURCE,
+      kdf: KDF_ALGORITHM,
+      kdfIterations: KDF_ITERATIONS,
+      salt: salt.toString('base64'),
+      iv: iv.toString('base64'),
+      authTag: cipher.getAuthTag().toString('base64'),
+      originalHash,
+      originalSize: stat.size,
+    } : null,
+    mimeType: 'application/octet-stream',
+    folderId: targetFolder?.folderId || '',
+    parentFolderId: targetFolder?.folderId || '',
+    folderName: targetFolder?.name || String(payload.folderPath || ''),
+    folder: targetFolder?.name || String(payload.folderPath || ''),
+    chunkSize: CHUNK_SIZE_BYTES,
+    totalChunks: chunks.length,
+    ownerNodeId: n.peerId,
+    ownerWallet,
+    planId: w.planId || 'free',
+    replicas: unique([...fileReplicas]),
+    chunks,
+    uploadStatus: 'available',
+    replicationStatus: needsRepairChunks ? 'needs-repair' : protectedChunks === chunks.length ? 'protected' : 'protecting',
     protectionMode,
     protectedChunks,
     p2pProtectedChunks,
@@ -251,28 +389,60 @@ async function uploadOne(filePath, payload = {}) {
     needsRepairChunks,
     replicationUpdatedAt: new Date().toISOString(),
   };
+
   const next = manifests().filter((m) => !(normalize(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
   next.push(manifest);
   saveManifests(next);
+
   try {
     await pushWalletManifest(manifest);
   } catch (syncErr) {
     console.warn('[stream-upload] manifest sync push failed (non-fatal, will retry on next pull):', syncErr?.message || syncErr);
   }
+
+  finishTransfer('upload', {
+    transferredBytes: stat.size,
+    chunksDone: uploadTotalChunks,
+    totalChunks: uploadTotalChunks,
+  });
+
   return manifest;
 }
 
 async function uploadFiles(payload = {}) {
   const picked = await dialog.showOpenDialog({ title: 'Upload files', properties: ['openFile', 'multiSelections'] });
   if (picked.canceled || !picked.filePaths?.length) return { ok: true, cancelled: true, files: [] };
+
   const files = [];
-  for (const filePath of picked.filePaths) files.push(await uploadOne(filePath, payload));
+  for (const filePath of picked.filePaths) {
+    try {
+      files.push(await uploadOne(filePath, payload));
+    } catch (error) {
+      failTransfer('upload', error);
+      if (error?.code === 'TRANSFER_CANCELLED') return { ok: false, cancelled: true, files, error: error.message };
+      throw error;
+    }
+  }
+
   const summaryHandler = ipcMain._invokeHandlers?.get?.('p2p:networkSummary');
   return { ok: true, cancelled: false, files, summary: summaryHandler ? await summaryHandler({}, {}) : null };
 }
+
 try { ipcMain.removeHandler('p2p:uploadFiles'); } catch {}
 ipcMain.handle('p2p:uploadFiles', async (_event, payload = {}) => uploadFiles(payload));
+
 try { ipcMain.removeHandler('p2p:uploadPath'); } catch {}
-ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => uploadOne(String(payload.filePath || payload.path || ''), payload));
+ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => {
+  try {
+    return await uploadOne(String(payload.filePath || payload.path || ''), payload);
+  } catch (error) {
+    failTransfer('upload', error);
+    if (error?.code === 'TRANSFER_CANCELLED') return { ok: false, cancelled: true, error: error.message };
+    throw error;
+  }
+});
+
+await import('./transfer-progress-network-summary-override.js');
+await import('./transfer-cancel-ipc.js');
 await import('./stream-folder-upload-override.js');
-console.log('[stream-upload] installed disk-first streaming upload override with immediate AWS safety and folder streaming');
+console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, and folder streaming');
