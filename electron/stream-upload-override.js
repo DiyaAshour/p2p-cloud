@@ -17,12 +17,8 @@ import {
   quotaBytes,
 } from './core/config.js';
 import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } from './core/identity.js';
+import { chunkPath, chunkStoreDir, manifestsPath, walletPath } from './core/storage-paths.js';
 
-function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
-function walletPath() { return path.join(dataDir(), 'wallet.json'); }
-function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
-function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
-function chunkPath(hash) { return path.join(chunkStoreDir(), `${String(hash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function node() { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
