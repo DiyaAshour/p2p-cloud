@@ -6,31 +6,11 @@ import { pipeline } from 'node:stream/promises';
 import { getChunkFromSafetyPeer } from './safety-peer.js';
 import { ENCRYPTION_ALGORITHM, KDF_ITERATIONS, MIN_DRIVE_PASSWORD_LENGTH } from './core/config.js';
 import { activeIdentity, normalizeIdentity } from './core/identity.js';
+import { chunkPath, manifestsPath, walletPath } from './core/storage-paths.js';
 import './hard-delete-override.js';
 
 function safeName(name = '') {
   return String(name || 'download.bin').replace(/[\\/:*?"<>|]/g, '_');
-}
-
-function dataDir() {
-  return path.join(app.getPath('userData'), 'native-p2p-storage');
-}
-
-function manifestsPath() {
-  return path.join(dataDir(), 'manifests.json');
-}
-
-function walletPath() {
-  return path.join(dataDir(), 'wallet.json');
-}
-
-function chunkStoreDir() {
-  return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks');
-}
-
-function chunkPath(chunkHash) {
-  const safe = String(chunkHash || '').replace(/[^a-fA-F0-9]/g, '');
-  return path.join(chunkStoreDir(), `${safe}.json`);
 }
 
 function loadJson(file, fallback) {
