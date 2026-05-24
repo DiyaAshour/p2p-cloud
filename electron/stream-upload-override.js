@@ -6,21 +6,23 @@ import { buildMerkleTree, getMerkleProof } from './merkle-engine.js';
 import { pushWalletManifest } from './manifest-sync.js';
 import { putChunkToSafetyPeer, deleteChunkFromSafetyPeer, SAFETY_PEER_REPLICA_ID } from './safety-peer.js';
 import { startTransfer, updateTransfer, finishTransfer, failTransfer, throwIfTransferCancelled } from './transfer-progress-state.js';
-
-const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 2 * 1024 * 1024);
-const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4));
-const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
-const KDF_ALGORITHM = 'pbkdf2-sha256';
-const KDF_ITERATIONS = 310000;
-const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
+import {
+  CHUNK_SIZE_BYTES,
+  TARGET_REPLICAS,
+  ENCRYPTION_ALGORITHM,
+  ENCRYPTION_KEY_SOURCE,
+  KDF_ALGORITHM,
+  KDF_ITERATIONS,
+  MIN_DRIVE_PASSWORD_LENGTH,
+  quotaBytes,
+} from './core/config.js';
+import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } from './core/identity.js';
 
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
 function walletPath() { return path.join(dataDir(), 'wallet.json'); }
 function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
 function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
 function chunkPath(hash) { return path.join(chunkStoreDir(), `${String(hash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
-function normalize(value = '') { return String(value || '').trim().toLowerCase(); }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function node() { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
@@ -38,7 +40,7 @@ function writeJson(file, value) {
 }
 
 function wallet() { return readJson(walletPath(), {}); }
-function identity(w = wallet()) { return normalize(w.accountId || w.address || ''); }
+function identity(w = wallet()) { return activeIdentity(w); }
 function manifests() { const v = readJson(manifestsPath(), []); return Array.isArray(v) ? v : []; }
 function saveManifests(v) { writeJson(manifestsPath(), v); }
 
@@ -49,7 +51,7 @@ function password(value = '') {
 }
 
 function driveKey({ ownerWallet, drivePassword, salt }) {
-  return crypto.pbkdf2Sync(`${normalize(ownerWallet)}:${password(drivePassword)}`, salt, KDF_ITERATIONS, 32, 'sha256');
+  return crypto.pbkdf2Sync(`${normalizeIdentity(ownerWallet)}:${password(drivePassword)}`, salt, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function folderById(id = '') {
@@ -61,20 +63,6 @@ function folderById(id = '') {
       .map((x) => String(x || '').replace(/^folder:/, '').trim())
       .includes(clean)
   ) || null;
-}
-
-function walletBytes(ownerWallet) {
-  return manifests()
-    .filter((m) => normalize(m.ownerWallet) === ownerWallet && !(m.kind === 'folder' || m.isFolder || String(m.hash || '').startsWith('folder:')))
-    .reduce((s, f) => s + Number(f.size || 0), 0);
-}
-
-function quotaBytes(planId = 'free') {
-  if (planId === 'tb10') return 10 * 1024 ** 4;
-  if (planId === 'tb7') return 7 * 1024 ** 4;
-  if (planId === 'tb3') return 3 * 1024 ** 4;
-  if (planId === 'tb1') return 1 * 1024 ** 4;
-  return 5 * 1024 ** 3;
 }
 
 function writeChunk(chunk) {
@@ -208,14 +196,14 @@ async function replicate(chunk) {
 
 async function uploadOne(filePath, payload = {}) {
   const w = wallet();
+  assertVerifiedIdentity(w);
   const ownerWallet = identity(w);
-  if (!w.connected || !w.verified || !ownerWallet) throw new Error('Verified identity required. Connect wallet or sign in with Seed Account first.');
 
   const n = node();
   if (!n?.peerId) throw new Error('P2P transport is not ready yet.');
 
   const stat = fs.statSync(filePath);
-  if (walletBytes(ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');
+  if (usedBytes(manifests(), ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');
 
   const privateFile = true;
   const salt = privateFile ? crypto.randomBytes(16) : null;
@@ -390,7 +378,7 @@ async function uploadOne(filePath, payload = {}) {
     replicationUpdatedAt: new Date().toISOString(),
   };
 
-  const next = manifests().filter((m) => !(normalize(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
+  const next = manifests().filter((m) => !(normalizeIdentity(m.ownerWallet) === ownerWallet && m.hash === manifest.hash));
   next.push(manifest);
   saveManifests(next);
 
