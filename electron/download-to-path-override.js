@@ -4,15 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { getChunkFromSafetyPeer } from './safety-peer.js';
+import { ENCRYPTION_ALGORITHM, KDF_ITERATIONS, MIN_DRIVE_PASSWORD_LENGTH } from './core/config.js';
+import { activeIdentity, normalizeIdentity } from './core/identity.js';
 import './hard-delete-override.js';
-
-const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-const KDF_ITERATIONS = 310000;
-const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
-
-function normalizeIdentity(value = '') {
-  return String(value || '').trim().toLowerCase();
-}
 
 function safeName(name = '') {
   return String(name || 'download.bin').replace(/[\\/:*?"<>|]/g, '_');
@@ -48,9 +42,8 @@ function loadJson(file, fallback) {
   }
 }
 
-function activeIdentity() {
-  const wallet = loadJson(walletPath(), {});
-  return normalizeIdentity(wallet.accountId || wallet.address || '');
+function currentIdentity() {
+  return activeIdentity(loadJson(walletPath(), {}));
 }
 
 function p2pNode() {
@@ -62,12 +55,12 @@ function dropMemoryChunk(hash) {
 }
 
 function findManifest(payload = {}) {
-  const identity = activeIdentity();
+  const identity = currentIdentity();
   const hash = String(payload.hash || '');
   const rootHash = String(payload.rootHash || '');
   const all = loadJson(manifestsPath(), []);
   return Array.isArray(all)
-    ? all.find((m) => normalizeIdentity(m.ownerWallet) === identity && (m.hash === hash || m.rootHash === rootHash))
+    ? all.find((manifest) => normalizeIdentity(manifest.ownerWallet) === identity && (manifest.hash === hash || manifest.rootHash === rootHash))
     : null;
 }
 
@@ -83,8 +76,7 @@ function deriveDriveKey({ ownerWallet, drivePassword, salt }) {
   const identity = normalizeIdentity(ownerWallet);
   const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.from(String(salt || ''), 'base64');
-  const iterations = Number(process.env.P2P_KDF_ITERATIONS || KDF_ITERATIONS);
-  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, iterations, 32, 'sha256');
+  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function readLocalChunkBuffer(hash) {
