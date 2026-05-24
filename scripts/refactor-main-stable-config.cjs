@@ -6,7 +6,7 @@ if (!fs.existsSync(file)) throw new Error(`${file} not found`);
 let src = fs.readFileSync(file, 'utf8');
 let changed = false;
 
-function replaceOnce(find, replacement, label) {
+function patchText(find, replacement, label) {
   if (!src.includes(find)) {
     console.log(`[refactor-main-stable-config] skip ${label}: marker not found`);
     return false;
@@ -17,8 +17,19 @@ function replaceOnce(find, replacement, label) {
   return true;
 }
 
+function patchRegex(regex, replacement, label) {
+  if (!regex.test(src)) {
+    console.log(`[refactor-main-stable-config] skip ${label}: regex not found`);
+    return false;
+  }
+  src = src.replace(regex, replacement);
+  changed = true;
+  console.log(`[refactor-main-stable-config] patched ${label}`);
+  return true;
+}
+
 if (!src.includes("./core/config.js")) {
-  replaceOnce(
+  patchText(
     "import './seed-auth-cooldown-ipc.js';",
     `import './seed-auth-cooldown-ipc.js';
 import {
@@ -45,61 +56,73 @@ import {
   );
 }
 
-const localConstantsBlock = `const APP_TITLE = 'p2p.cloud';
-const IS_DEV = !app.isPackaged;
-const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
-const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES || 1024 * 1024);
-const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS || 3);
-const AUTO_REPAIR_INTERVAL_MS = Math.max(30_000, Number(process.env.P2P_AUTO_REPAIR_INTERVAL_MS || 60_000));
-const UPLOAD_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.P2P_UPLOAD_CONCURRENCY || 4)));
-const DOWNLOAD_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.P2P_DOWNLOAD_CONCURRENCY || 6)));
-const FREE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
-const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-const ENCRYPTION_KEY_SOURCE = 'wallet-password-v1';
-function keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }
-const KDF_ALGORITHM = 'pbkdf2-sha256';
-const KDF_ITERATIONS = 310000;
-const MIN_DRIVE_PASSWORD_LENGTH = Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12);
-const WALLET_LOGIN_MAX_AGE_MS = 10 * 60 * 1000;
-const WALLET_LOGIN_MAX_FUTURE_MS = 2 * 60 * 1000;
-const FOLDER_MANIFEST_KIND = 'folder';
-const UI_PREFS_KIND = 'ui:prefs';
+// Remove duplicated single-line runtime constants. Keep IS_DEV and DEV_SERVER_URL local.
+const singleLineConstRegexes = [
+  [/^const APP_TITLE\s*=\s*['"][^'"]+['"];\s*\n/m, 'APP_TITLE'],
+  [/^const CHUNK_SIZE_BYTES\s*=.*;\s*\n/m, 'CHUNK_SIZE_BYTES'],
+  [/^const TARGET_REPLICAS\s*=.*;\s*\n/m, 'TARGET_REPLICAS'],
+  [/^const AUTO_REPAIR_INTERVAL_MS\s*=.*;\s*\n/m, 'AUTO_REPAIR_INTERVAL_MS'],
+  [/^const UPLOAD_CONCURRENCY\s*=.*;\s*\n/m, 'UPLOAD_CONCURRENCY'],
+  [/^const DOWNLOAD_CONCURRENCY\s*=.*;\s*\n/m, 'DOWNLOAD_CONCURRENCY'],
+  [/^const FREE_QUOTA_BYTES\s*=.*;\s*\n/m, 'FREE_QUOTA_BYTES'],
+  [/^const ENCRYPTION_ALGORITHM\s*=.*;\s*\n/m, 'ENCRYPTION_ALGORITHM'],
+  [/^const ENCRYPTION_KEY_SOURCE\s*=.*;\s*\n/m, 'ENCRYPTION_KEY_SOURCE'],
+  [/^const KDF_ALGORITHM\s*=.*;\s*\n/m, 'KDF_ALGORITHM'],
+  [/^const KDF_ITERATIONS\s*=.*;\s*\n/m, 'KDF_ITERATIONS'],
+  [/^const MIN_DRIVE_PASSWORD_LENGTH\s*=.*;\s*\n/m, 'MIN_DRIVE_PASSWORD_LENGTH'],
+  [/^const WALLET_LOGIN_MAX_AGE_MS\s*=.*;\s*\n/m, 'WALLET_LOGIN_MAX_AGE_MS'],
+  [/^const WALLET_LOGIN_MAX_FUTURE_MS\s*=.*;\s*\n/m, 'WALLET_LOGIN_MAX_FUTURE_MS'],
+  [/^const FOLDER_MANIFEST_KIND\s*=.*;\s*\n/m, 'FOLDER_MANIFEST_KIND'],
+];
 
-const PLANS = {
-  free: { id: 'free', name: 'Free', quotaBytes: FREE_QUOTA_BYTES, priceUsd: 0, locked: false },
-  tb1: { id: 'tb1', name: '1 TB', quotaBytes: 1 * 1024 ** 4, priceUsd: 1, locked: true },
-  tb3: { id: 'tb3', name: '3 TB', quotaBytes: 3 * 1024 ** 4, priceUsd: 2.5, locked: true },
-  tb7: { id: 'tb7', name: '7 TB', quotaBytes: 7 * 1024 ** 4, priceUsd: 4.99, locked: true },
-  tb10: { id: 'tb10', name: '10 TB', quotaBytes: 10 * 1024 ** 4, priceUsd: 7.99, locked: true },
-};`;
-
-replaceOnce(
-  localConstantsBlock,
-  `const IS_DEV = !app.isPackaged;
-const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';
-const UI_PREFS_KIND = UI_PREFS_MANIFEST_KIND;
-function keySourceForIdentity() { return ENCRYPTION_KEY_SOURCE; }`,
-  'local config constants block'
-);
-
-const quotaRegex = /function\s+quotaBytesForPlan\s*\(\s*planId\s*=\s*['"]free['"]\s*\)\s*\{[\s\S]*?return\s+FREE_QUOTA_BYTES;\s*\}/m;
-if (quotaRegex.test(src)) {
-  src = src.replace(
-    quotaRegex,
-    `function quotaBytesForPlan(planId = 'free') {
-  return quotaBytes(planId);
-}`
-  );
-  changed = true;
-  console.log('[refactor-main-stable-config] patched quotaBytesForPlan');
+for (const [regex, label] of singleLineConstRegexes) {
+  patchRegex(regex, '', label);
 }
 
-const forbidden = [
-  "const CHUNK_SIZE_BYTES = Number(process.env.P2P_CHUNK_SIZE_BYTES",
-  "const TARGET_REPLICAS = Number(process.env.P2P_TARGET_REPLICAS",
-  "const FREE_QUOTA_BYTES = 5 * 1024",
-  "const KDF_ITERATIONS = 310000",
-  "const PLANS = {",
+if (/^const UI_PREFS_KIND\s*=\s*['"]ui:prefs['"];\s*$/m.test(src)) {
+  patchRegex(
+    /^const UI_PREFS_KIND\s*=\s*['"]ui:prefs['"];\s*$/m,
+    'const UI_PREFS_KIND = UI_PREFS_MANIFEST_KIND;',
+    'UI_PREFS_KIND alias'
+  );
+} else if (!src.includes('const UI_PREFS_KIND = UI_PREFS_MANIFEST_KIND;')) {
+  patchText(
+    "const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';",
+    "const DEV_SERVER_URL = process.env.ELECTRON_RENDERER_URL || 'http://127.0.0.1:3000';\nconst UI_PREFS_KIND = UI_PREFS_MANIFEST_KIND;",
+    'UI_PREFS_KIND alias insertion'
+  );
+}
+
+patchRegex(
+  /^const PLANS\s*=\s*\{[\s\S]*?^\};\s*\n/m,
+  '',
+  'PLANS block'
+);
+
+const quotaRegexes = [
+  /function\s+quotaBytesForPlan\s*\(\s*planId\s*=\s*['"]free['"]\s*\)\s*\{[\s\S]*?\n\}/m,
+  /function\s+quotaBytesForPlan\s*\(\s*planId\s*\)\s*\{[\s\S]*?\n\}/m,
+];
+for (const regex of quotaRegexes) {
+  if (regex.test(src)) {
+    src = src.replace(regex, `function quotaBytesForPlan(planId = 'free') {
+  return quotaBytes(planId);
+}`);
+    changed = true;
+    console.log('[refactor-main-stable-config] patched quotaBytesForPlan');
+    break;
+  }
+}
+
+const forbiddenPatterns = [
+  /^const APP_TITLE\s*=/m,
+  /^const CHUNK_SIZE_BYTES\s*=/m,
+  /^const TARGET_REPLICAS\s*=/m,
+  /^const FREE_QUOTA_BYTES\s*=/m,
+  /^const ENCRYPTION_ALGORITHM\s*=/m,
+  /^const ENCRYPTION_KEY_SOURCE\s*=/m,
+  /^const KDF_ITERATIONS\s*=/m,
+  /^const PLANS\s*=/m,
 ];
 
 const checks = {
@@ -108,13 +131,14 @@ const checks = {
   hasChunkSize: src.includes('CHUNK_SIZE_BYTES'),
   hasTargetReplicas: src.includes('TARGET_REPLICAS'),
   hasPlans: src.includes('PLANS'),
-  removedLocalDuplicates: forbidden.every((token) => !src.includes(token)),
+  hasUiPrefsAlias: src.includes('const UI_PREFS_KIND = UI_PREFS_MANIFEST_KIND;'),
+  removedLocalDuplicates: forbiddenPatterns.every((pattern) => !pattern.test(src)),
 };
 
 fs.writeFileSync(file, src, 'utf8');
 console.log('[refactor-main-stable-config] checks', checks);
 
-if (!checks.hasCoreConfigImport || !checks.removedLocalDuplicates) {
+if (!checks.hasCoreConfigImport || !checks.removedLocalDuplicates || !checks.hasUiPrefsAlias) {
   console.warn('[refactor-main-stable-config] warning: refactor incomplete', checks);
   process.exitCode = 1;
 } else if (changed) {
