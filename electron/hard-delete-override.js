@@ -1,18 +1,14 @@
-import { app, ipcMain } from 'electron';
+import { ipcMain } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { deleteWalletManifest, pushWalletManifest } from './manifest-sync.js';
 import { deleteChunkFromSafetyPeer } from './safety-peer.js';
 import { activeIdentity, assertVerifiedIdentity, normalizeIdentity } from './core/identity.js';
+import { chunkPath, manifestsPath, walletPath } from './core/storage-paths.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function dataDir()        { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
-function walletPath()     { return path.join(dataDir(), 'wallet.json'); }
-function manifestsPath()  { return path.join(dataDir(), 'manifests.json'); }
-function chunkStoreDir()  { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
-function chunkPath(hash)  { return path.join(chunkStoreDir(), `${String(hash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
 function readJson(file, fallback) {
   try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback; }
   catch { return fallback; }
