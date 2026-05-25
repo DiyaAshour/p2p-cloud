@@ -254,6 +254,8 @@ async function importMainWhenReady() {
     await importPrimaryRuntime();
     await import('./list-files-normalize-ipc.js');
     console.log('[main-wrapper] list files normalization import finished');
+    await import('./network-summary-normalize-ipc.js');
+    console.log('[main-wrapper] network summary normalization import finished');
     await import('./company-workspace-ipc.js');
     console.log('[main-wrapper] company workspace IPC import finished');
     await import('./company-offline-invite-ipc.js');
