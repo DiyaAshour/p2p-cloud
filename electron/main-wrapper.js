@@ -275,6 +275,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] UI preferences IPC import finished');
     await import('./protected-upload-override.js');
     console.log('[main-wrapper] protected upload status override import finished');
+    await import('./transfer-cancel-ipc.js');
+    console.log('[main-wrapper] transfer cancel IPC import finished');
     await import('./stream-upload-override.js');
     console.log('[main-wrapper] streaming upload override import finished');
     await import('./protection-retry-loop.js');
