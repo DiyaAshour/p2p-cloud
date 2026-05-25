@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "prepare:final": "node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-network-folder-metadata.cjs && node scripts/patch-folder-runtime-stable.cjs && node scripts/patch-folder-actions-stable-final.cjs",
+    "prepare:final": "node scripts/patch-stable-runtime-root-cause.cjs && node scripts/patch-folder-runtime-stable.cjs && node scripts/patch-folder-actions-stable-final.cjs",
     "dev": "pnpm run prepare:final && vite --host 127.0.0.1 --port 3000",
     "dev:fast": "vite --host 127.0.0.1 --port 3000",
     "dev:renderer": "vite --host 127.0.0.1 --port 3000",
