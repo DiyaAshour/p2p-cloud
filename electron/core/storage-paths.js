@@ -5,6 +5,11 @@ export function dataDir() {
   return path.join(app.getPath('userData'), 'native-p2p-storage');
 }
 
+/** Backwards-compatible alias used by runtime health checks and older modules. */
+export function storageRoot() {
+  return dataDir();
+}
+
 export function manifestsPath() {
   return path.join(dataDir(), 'manifests.json');
 }
