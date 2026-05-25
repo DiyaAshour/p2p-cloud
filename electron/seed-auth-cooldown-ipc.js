@@ -1,5 +1,4 @@
 import { app, ipcMain } from 'electron';
-import argon2 from 'argon2';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,6 +12,14 @@ const ARGON2_PARALLELISM = Number(process.env.P2P_ARGON2_PARALLELISM || 1);
 const FREE_TRIES = Number(process.env.P2P_SEED_FREE_TRIES || 5);
 const BASE_WAIT_MS = Number(process.env.P2P_SEED_BASE_WAIT_MS || 5 * 60 * 1000);
 const MAX_WAIT_MS = Number(process.env.P2P_SEED_MAX_WAIT_MS || 24 * 60 * 60 * 1000);
+let argon2ModulePromise = null;
+
+async function getArgon2() {
+  if (!argon2ModulePromise) {
+    argon2ModulePromise = import('argon2').then((mod) => mod.default || mod);
+  }
+  return argon2ModulePromise;
+}
 
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
 function accountsPath() { return path.join(dataDir(), 'seed-accounts.json'); }
@@ -31,7 +38,7 @@ function accountIdFromSeed(seed) { return `${PREFIX}${hash(seedText(seed))}`; }
 function safeHash(v = '') { return String(v || '').replace(/[^a-fA-F0-9]/g, ''); }
 function password(v = '') { const p = String(v || '').trim(); if (p.length < Number(process.env.P2P_MIN_DRIVE_PASSWORD_LENGTH || 12)) throw new Error('Password must be at least 12 characters.'); return p; }
 function deviceId() { const id = readJson(devicePath(), null); if (id?.deviceId) return id.deviceId; const old = readJson(fallbackDevicePath(), null); if (old?.deviceId) return old.deviceId; const created = { deviceId: `device_seed_${crypto.randomUUID()}`, createdAt: new Date().toISOString() }; writeJson(fallbackDevicePath(), created); return created.deviceId; }
-async function keyFromPassword(p, saltBase64) { return argon2.hash(password(p), { type: argon2.argon2id, salt: Buffer.from(String(saltBase64 || ''), 'base64'), raw: true, hashLength: 32, memoryCost: ARGON2_MEMORY_KIB, timeCost: ARGON2_TIME_COST, parallelism: ARGON2_PARALLELISM }); }
+async function keyFromPassword(p, saltBase64) { const argon2 = await getArgon2(); return argon2.hash(password(p), { type: argon2.argon2id, salt: Buffer.from(String(saltBase64 || ''), 'base64'), raw: true, hashLength: 32, memoryCost: ARGON2_MEMORY_KIB, timeCost: ARGON2_TIME_COST, parallelism: ARGON2_PARALLELISM }); }
 async function sealSeed(seed, p) { const salt = crypto.randomBytes(16); const iv = crypto.randomBytes(12); const key = await keyFromPassword(p, salt.toString('base64')); const cipher = crypto.createCipheriv(ALG, key, iv); const encrypted = Buffer.concat([cipher.update(seedText(seed), 'utf8'), cipher.final()]); return { version: 2, algorithm: ALG, kdf: 'argon2id', memoryKiB: ARGON2_MEMORY_KIB, timeCost: ARGON2_TIME_COST, parallelism: ARGON2_PARALLELISM, salt: salt.toString('base64'), iv: iv.toString('base64'), authTag: cipher.getAuthTag().toString('base64'), ciphertext: encrypted.toString('base64') }; }
 async function openSeed(account, p) { const box = account?.seedVault; if (!box?.ciphertext) throw new Error('Seed vault missing.'); if (box.kdf !== 'argon2id') throw new Error('Unsupported seed vault KDF. Recreate the account with Argon2id.'); const key = await keyFromPassword(p, box.salt); const decipher = crypto.createDecipheriv(ALG, key, Buffer.from(box.iv, 'base64')); decipher.setAuthTag(Buffer.from(box.authTag, 'base64')); return seedText(Buffer.concat([decipher.update(Buffer.from(box.ciphertext, 'base64')), decipher.final()]).toString('utf8')); }
 function accounts() { ensure(); return readJson(accountsPath(), { version: 1, accounts: [] }).accounts || []; }
