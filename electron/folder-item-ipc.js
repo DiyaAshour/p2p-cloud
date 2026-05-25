@@ -28,7 +28,9 @@ function isFolderManifest(item = {}) {
     item.kind === 'folder' ||
     item.type === 'folder' ||
     item.isFolder === true ||
-    String(item.hash || '').startsWith('folder:')
+    String(item.hash || '').startsWith('folder:') ||
+    String(item.rootHash || '').startsWith('folder:') ||
+    Boolean(item.folderId && !item.chunks?.length)
   );
 }
 
@@ -79,6 +81,7 @@ function itemLookupIds(payload = {}) {
     payload.rootHash,
     payload.folderId,
     payload.fileId,
+    payload.folderPath,
     payload.name,
   ].map((value) => String(value || '').trim()));
 }
@@ -91,6 +94,68 @@ function findOwnedItem(manifests = [], payload = {}, ownerWallet = '') {
     ownerMatches(item, ownerWallet) &&
     itemMatchesAnyId(item, ids)
   ) || null;
+}
+
+function fallbackFolderItem(payload = {}, ownerWallet = '') {
+  const lookupId = String(
+    payload.itemId ||
+    payload.id ||
+    payload.hash ||
+    payload.rootHash ||
+    payload.folderId ||
+    payload.folderPath ||
+    payload.name ||
+    ''
+  ).trim();
+
+  const folderId = cleanId(lookupId);
+  if (!folderId) return null;
+
+  const name = String(payload.name || payload.folderName || payload.folderPath || folderId).trim();
+  const now = new Date().toISOString();
+
+  return ensureFolderShape({
+    kind: FOLDER_MANIFEST_KIND,
+    type: 'folder',
+    isFolder: true,
+    folderId,
+    id: `${ownerWallet}:folder:${folderId}`,
+    hash: `folder:${folderId}`,
+    rootHash: `folder:${folderId}`,
+    ownerWallet,
+    name,
+    parentFolderId: cleanId(payload.parentFolderId || ''),
+    visibility: 'private',
+    isPublic: false,
+    isEncrypted: false,
+    chunks: [],
+    chunkSize: 0,
+    totalChunks: 0,
+    size: 0,
+    storedSize: 0,
+    createdAt: now,
+    updatedAt: now,
+    __fallbackFolder: true,
+  });
+}
+
+function findOrFallbackOwnedItem(manifests = [], payload = {}, ownerWallet = '') {
+  const item = findOwnedItem(manifests, payload, ownerWallet);
+  if (item) return { item, isFallback: false };
+  const fallback = fallbackFolderItem(payload, ownerWallet);
+  return fallback ? { item: fallback, isFallback: true } : { item: null, isFallback: false };
+}
+
+function attachFallbackIfNeeded(manifests = [], item = {}, isFallback = false) {
+  if (!isFallback || !item) return false;
+  const ids = new Set(manifestItemIds(item));
+  const exists = manifests.some((candidate) => itemMatchesAnyId(candidate, ids));
+  if (!exists) {
+    delete item.__fallbackFolder;
+    manifests.push(item);
+    return true;
+  }
+  return false;
 }
 
 function folderNameLower(item = {}) {
@@ -185,8 +250,9 @@ function loadContext() {
 
 async function renameItem(payload = {}) {
   const { ownerWallet, manifests } = loadContext();
-  const item = findOwnedItem(manifests, payload, ownerWallet);
+  const { item, isFallback } = findOrFallbackOwnedItem(manifests, payload, ownerWallet);
   if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  attachFallbackIfNeeded(manifests, item, isFallback);
 
   const name = sanitizeName(payload.name);
   const oldNameLower = ownNameLower(item);
@@ -220,8 +286,9 @@ async function renameItem(payload = {}) {
 
 async function moveItem(payload = {}) {
   const { ownerWallet, manifests } = loadContext();
-  const item = findOwnedItem(manifests, payload, ownerWallet);
+  const { item, isFallback } = findOrFallbackOwnedItem(manifests, payload, ownerWallet);
   if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  attachFallbackIfNeeded(manifests, item, isFallback);
 
   const targetFolder = assertValidMoveTarget(item, payload.targetFolderId ?? payload.parentFolderId ?? payload.folderId ?? '', manifests, ownerWallet);
   const nextParentId = targetFolder ? cleanId(targetFolder.folderId || targetFolder.id || targetFolder.hash) : '';
@@ -243,7 +310,7 @@ async function moveItem(payload = {}) {
 
 async function deleteItem(payload = {}) {
   const { ownerWallet, manifests } = loadContext();
-  const item = findOwnedItem(manifests, payload, ownerWallet);
+  const { item } = findOrFallbackOwnedItem(manifests, payload, ownerWallet);
   if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
 
   if (!isFolderManifest(item)) {
@@ -354,4 +421,4 @@ ipcMain.handle('p2p:moveItem', async (_event, payload = {}) => moveItem(payload)
 try { ipcMain.removeHandler('p2p:deleteItem'); } catch {}
 ipcMain.handle('p2p:deleteItem', async (_event, payload = {}) => deleteItem(payload));
 
-console.log('[folder-item] rename/move/delete item IPC installed');
+console.log('[folder-item] rename/move/delete item IPC installed with fallback lookup');
