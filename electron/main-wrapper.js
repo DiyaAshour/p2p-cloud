@@ -237,6 +237,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] company distributed objects IPC import finished');
     await import('./seed-auth-cooldown-ipc.js');
     console.log('[main-wrapper] seed auth cooldown IPC import finished');
+    await import('./shared-link-ipc.js');
+    console.log('[main-wrapper] shared link IPC import finished');
     await import('./protected-upload-override.js');
     console.log('[main-wrapper] protected upload status override import finished');
     await import('./stream-upload-override.js');
