@@ -12,6 +12,7 @@ let tray = null;
 let isQuitting = false;
 let closeNoticeShown = false;
 let mainImportStarted = false;
+let lazySeedInstalled = false;
 
 console.log('[main-wrapper] starting', { isPackaged: app.isPackaged, rendererUrl: process.env.ELECTRON_RENDERER_URL || null, dev: IS_DEV_WRAPPER });
 
@@ -43,6 +44,27 @@ if (!gotSingleInstanceLock) {
     console.log('[main-wrapper] second instance requested');
     showMainWindow();
   });
+}
+
+function installLazySeedIpc() {
+  if (lazySeedInstalled) return;
+  lazySeedInstalled = true;
+
+  for (const channel of ['seed:create', 'seed:login', 'seed:recover']) {
+    try { ipcMain.removeHandler(channel); } catch {}
+  }
+
+  const call = async (name, payload) => {
+    const mod = await import('./seed-auth-cooldown-ipc.js');
+    if (name === 'seed:create') return mod.seedCreate(payload);
+    if (name === 'seed:login') return mod.seedLogin(payload);
+    return mod.seedRecover(payload);
+  };
+
+  ipcMain.handle('seed:create', async (_event, payload = {}) => call('seed:create', payload));
+  ipcMain.handle('seed:login', async (_event, payload = {}) => call('seed:login', payload));
+  ipcMain.handle('seed:recover', async (_event, payload = {}) => call('seed:recover', payload));
+  console.log('[main-wrapper] lazy seed IPC handlers registered');
 }
 
 function isVirtualInterfaceName(name = '') {
@@ -224,6 +246,7 @@ async function importMainWhenReady() {
   mainImportStarted = true;
   console.log('[main-wrapper] importing runtime after app ready');
   try {
+    installLazySeedIpc();
     await import('./p2p-transport-global-registry.js');
     console.log('[main-wrapper] p2p global registry import finished');
     await import('./p2p-delete-message-override.js');
@@ -235,8 +258,7 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] company offline invite IPC import finished');
     await import('./company-distributed-objects-ipc.js');
     console.log('[main-wrapper] company distributed objects IPC import finished');
-    await import('./seed-auth-cooldown-ipc.js');
-    console.log('[main-wrapper] seed auth cooldown IPC import finished');
+    console.log('[main-wrapper] seed auth cooldown IPC deferred until first seed action');
     await import('./shared-link-ipc.js');
     console.log('[main-wrapper] shared link IPC import finished');
     await import('./file-update-ipc.js');
