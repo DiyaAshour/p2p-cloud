@@ -252,6 +252,8 @@ async function importMainWhenReady() {
     await import('./p2p-delete-message-override.js');
     console.log('[main-wrapper] p2p delete message override import finished');
     await importPrimaryRuntime();
+    await import('./list-files-normalize-ipc.js');
+    console.log('[main-wrapper] list files normalization import finished');
     await import('./company-workspace-ipc.js');
     console.log('[main-wrapper] company workspace IPC import finished');
     await import('./company-offline-invite-ipc.js');
