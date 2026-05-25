@@ -7,6 +7,9 @@
   "license": "MIT",
   "scripts": {
     "prepare:final": "node scripts/verify-runtime.cjs",
+    "verify": "node scripts/verify-runtime.cjs",
+    "health": "node scripts/full-health-check.cjs",
+    "health:deep": "node scripts/full-health-check.cjs --deep",
     "dev": "vite --host 127.0.0.1 --port 3000",
     "dev:fast": "vite --host 127.0.0.1 --port 3000",
     "dev:renderer": "vite --host 127.0.0.1 --port 3000",
@@ -86,6 +89,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "electron": "^28.0.0",
     "electron-builder": "^24.6.0",
+    "jsdom": "^25.0.1",
     "postcss": "^8.4.47",
     "prettier": "^3.6.2",
     "tailwindcss": "^4.1.14",
@@ -103,9 +107,7 @@
       "node_modules/argon2/**/*",
       "node_modules/node-gyp-build/**/*"
     ],
-    "directories": {
-      "output": "release"
-    },
+    "directories": { "output": "release" },
     "files": [
       "dist/public/**/*",
       "electron/**/*",
@@ -113,15 +115,8 @@
       "build/installer.nsh",
       "package.json"
     ],
-    "extraMetadata": {
-      "main": "electron/main-wrapper.js"
-    },
-    "win": {
-      "target": [
-        "nsis"
-      ],
-      "icon": "assets/icon.ico"
-    },
+    "extraMetadata": { "main": "electron/main-wrapper.js" },
+    "win": { "target": ["nsis"], "icon": "assets/icon.ico" },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
