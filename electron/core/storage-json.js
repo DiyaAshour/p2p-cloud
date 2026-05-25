@@ -20,6 +20,10 @@ export function readWallet() {
   return readJson(walletPath(), {});
 }
 
+export function writeWallet(value = {}) {
+  writeJson(walletPath(), value && typeof value === 'object' ? value : {});
+}
+
 export function readManifests() {
   const value = readJson(manifestsPath(), []);
   return Array.isArray(value) ? value : [];
