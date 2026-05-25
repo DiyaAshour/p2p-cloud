@@ -24,6 +24,7 @@ const allowedChannels = new Set([
   'p2p:uploadPath',
 
   'p2p:downloadToPath',
+  'p2p:importSharedLink',
 
   'p2p:updateFile',
   'p2p:delete',
