@@ -271,6 +271,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] folder item IPC import finished');
     await import('./folder-crud-ipc.js');
     console.log('[main-wrapper] folder CRUD IPC import finished');
+    await import('./folder-tree-normalize-ipc.js');
+    console.log('[main-wrapper] folder tree normalization IPC import finished');
     await import('./ui-prefs-ipc.js');
     console.log('[main-wrapper] UI preferences IPC import finished');
     await import('./protected-upload-override.js');
