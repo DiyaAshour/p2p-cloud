@@ -243,6 +243,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] file update IPC import finished');
     await import('./folder-item-ipc.js');
     console.log('[main-wrapper] folder item IPC import finished');
+    await import('./ui-prefs-ipc.js');
+    console.log('[main-wrapper] UI preferences IPC import finished');
     await import('./protected-upload-override.js');
     console.log('[main-wrapper] protected upload status override import finished');
     await import('./stream-upload-override.js');
