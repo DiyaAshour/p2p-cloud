@@ -69,7 +69,11 @@ type Channel =
   | "company:changeMemberRole"
   | "company:removeMember"
   | "company:addFile"
-  | "company:updateFile";
+  | "company:updateFile"
+  | "audit:list"
+  | "audit:record"
+  | "audit:clear"
+  | "audit:listManifests";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Bridge = { invoke: <T>(channel: Channel, payload?: unknown) => Promise<T> };
@@ -148,6 +152,15 @@ type CompanyState = {
   workspaces: Workspace[];
 };
 
+type AuditEvent = {
+  auditId: string;
+  action: string;
+  actor: string;
+  at: string;
+  details?: Record<string, unknown>;
+  p2p?: unknown;
+};
+
 type P2PFile = {
   id?: string;
   name: string;
@@ -158,6 +171,9 @@ type P2PFile = {
   isEncrypted: boolean;
   totalChunks: number;
   ownerWallet?: string;
+  uploadedByName?: string;
+  uploadedByWallet?: string;
+  uploadedByDeviceId?: string;
   replicas?: string[];
   replicationStatus?: string;
   protectedChunks?: number;
@@ -199,6 +215,8 @@ declare global {
 const ALL_FILES = "All files";
 const UNCATEGORIZED = "Uncategorized";
 const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";
+const PERSONAL_HIDDEN_COMPANY_FILES_KEY = "chunknet.ui.personalHiddenCompanyFiles";
+const COMPANY_FOLDERS_KEY = "chunknet.ui.companyFolders";
 const WALLETCONNECT_PROJECT_ID =
   (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID ||
   "821b9d64c996dc59c7d18583fc7081f0";
@@ -427,7 +445,8 @@ export default function NativeP2PAppLive() {
   const [files, setFiles] = useState<P2PFile[]>([]);
   const [manifestFolders, setManifestFolders] = useState<DriveFolder[]>([]);
   const [company, setCompany] = useState<CompanyState | null>(null);
-  const [busy, setBusy] = useState(false);
+const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+const [busy, setBusy] = useState(false);
   const [view, setView] = useState<View>("personal");
   const [search, setSearch] = useState("");
   const isEncrypted = true;
@@ -436,6 +455,9 @@ export default function NativeP2PAppLive() {
   const [activeFolderId, setActiveFolderId] = useState<string>("");
   const [newFolder, setNewFolder] = useState("");
   const [workspaceNameInput, setWorkspaceNameInput] = useState("");
+  const [companyFoldersByWorkspace, setCompanyFoldersByWorkspace] = useState<Record<string, string[]>>(
+  () => readJson<Record<string, string[]>>(COMPANY_FOLDERS_KEY, {})
+);
   const [memberEmail, setMemberEmail] = useState("");
   const [memberRole, setMemberRole] = useState<Role>("viewer");
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(
@@ -446,6 +468,9 @@ export default function NativeP2PAppLive() {
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [bulkTargetFolderId, setBulkTargetFolderId] = useState<string>("");
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(new Set());
+  const [personalHiddenCompanyFileKeys, setPersonalHiddenCompanyFileKeys] = useState<Set<string>>(
+  () => new Set(readJson<string[]>(PERSONAL_HIDDEN_COMPANY_FILES_KEY, []))
+);
 
   const walletConnected = Boolean(
     wallet?.connected && wallet.authMode !== "seed" && (wallet.accountId || wallet.address)
@@ -547,17 +572,17 @@ export default function NativeP2PAppLive() {
 
   // ─── File groups ────────────────────────────────────────────────────────────
 
-  const personalFiles = useMemo(
-    () =>
-      files.filter(
-        (file) =>
-          isRealFileManifest(file) &&
-          !companyFileByKey.has(keyFor(file)) &&
-          !companyFileByKey.has(file.hash)
-      ),
-    [files, companyFileByKey]
-  );
-
+const personalFiles = useMemo(
+  () =>
+    files.filter(
+      (file) =>
+        isRealFileManifest(file) &&
+        !personalHiddenCompanyFileKeys.has(keyFor(file)) &&
+        !personalHiddenCompanyFileKeys.has(file.hash)
+    ),
+  [files, personalHiddenCompanyFileKeys]
+);
+  
   const companyFiles = useMemo(() => {
     if (!activeWorkspace) return [];
 
@@ -583,27 +608,32 @@ export default function NativeP2PAppLive() {
     [files]
   );
 
-  // Manifest-based folder list for sidebar
-  const sidebarFolders = useMemo(() => {
-    if (view === "company" || view === "admin") {
-      const companyFolderNames = new Set(
-        (activeWorkspace?.files || [])
-          .map((file) => file.folder)
-          .filter(Boolean) as string[]
-      );
+// Company folders are isolated from My Drive folders
+const companyFolderNames = useMemo(() => {
+  if (!activeWorkspace) return [];
 
-      return [ALL_FILES, UNCATEGORIZED, ...Array.from(companyFolderNames).sort()];
-    }
+  const saved = companyFoldersByWorkspace[activeWorkspace.workspaceId] || [];
+  const fromFiles = (activeWorkspace.files || [])
+    .map((file) => file.folder)
+    .filter(Boolean) as string[];
 
-    return [
-      ALL_FILES,
-      UNCATEGORIZED,
-      ...manifestFolders
-        .filter((folder) => !folder.parentFolderId)
-        .map((folder) => folder.name)
-        .sort(),
-    ];
-  }, [view, manifestFolders, activeWorkspace]);
+  return Array.from(new Set([...saved, ...fromFiles])).sort();
+}, [activeWorkspace, companyFoldersByWorkspace]);
+
+const sidebarFolders = useMemo(() => {
+  if (view === "company" || view === "admin") {
+    return [ALL_FILES, UNCATEGORIZED, ...companyFolderNames];
+  }
+
+  return [
+    ALL_FILES,
+    UNCATEGORIZED,
+    ...manifestFolders
+      .filter((folder) => !folder.parentFolderId)
+      .map((folder) => folder.name)
+      .sort(),
+  ];
+}, [view, manifestFolders, companyFolderNames]);
 
   const baseFiles =
     view === "company" || view === "admin"
@@ -727,6 +757,93 @@ export default function NativeP2PAppLive() {
     return () => clearTimeout(t);
   }, [api, expandedFolderIds, wallet?.connected]);
 
+  const refreshAudit = async (workspaceId?: string) => {
+  if (!api) return;
+
+  try {
+    const result = await api.invoke<{ events: AuditEvent[] }>("audit:list", {
+      workspaceId: workspaceId || activeWorkspace?.workspaceId || "",
+      limit: 200,
+    });
+
+    setAuditEvents(Array.isArray(result.events) ? result.events : []);
+  } catch {
+    setAuditEvents([]);
+  }
+};
+
+const recordAudit = async (action: string, details: Record<string, unknown> = {}) => {
+  if (!api) return;
+
+  try {
+    await api.invoke("audit:record", {
+      action,
+      details: {
+        view,
+        workspaceId: activeWorkspace?.workspaceId || "",
+        workspaceName: activeWorkspace?.name || "",
+        actorLabel: identityLabel,
+        ...details,
+      },
+    });
+
+    await refreshAudit(String(details.workspaceId || activeWorkspace?.workspaceId || ""));
+  } catch {}
+};
+
+const uploaderLabel = (file: P2PFile, cf?: CompanyFile | null): string => {
+  const raw = String(
+    cf?.uploadedByName ||
+      cf?.uploadedByDeviceId ||
+      file.uploadedByName ||
+      file.uploadedByWallet ||
+      file.uploadedByDeviceId ||
+      file.ownerWallet ||
+      ""
+  ).trim();
+
+  const currentId = String(wallet?.accountId || wallet?.address || "").trim().toLowerCase();
+  const currentName = wallet?.username ? `Seed: ${wallet.username}` : identityLabel;
+
+  if (!raw) return currentName || "Unknown";
+  if (raw.toLowerCase() === currentId) return currentName || "You";
+  if (raw.startsWith("seed:") || raw.startsWith("0x")) return short(raw);
+  return raw.length > 36 ? short(raw) : raw;
+};
+
+const showCompanyFileInfo = (file: P2PFile) => {
+  const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+  const cf = match?.companyFile;
+  const workspace = match?.workspace || activeWorkspace;
+
+  const details = [
+    "File: " + (cf?.name || file.name),
+    "Company Drive: " + (workspace?.name || "Unknown"),
+    "Uploaded by: " + uploaderLabel(file, cf),
+    "Uploaded at: " + date(cf?.uploadedAt || file.uploadedAt),
+    "Size: " + bytes(file.size),
+    "Folder: " + (cf?.folder || file.folderName || file.folder || UNCATEGORIZED),
+    "Root hash: " + (cf?.rootHash || file.rootHash || file.hash),
+    "Hash: " + (cf?.hash || file.hash || ""),
+    "Total chunks: " + String(file.totalChunks || cf?.totalChunks || 0),
+    "Encrypted: " + (file.isEncrypted ? "Yes" : "No"),
+    "Replication: " + (file.replicationStatus || "unknown"),
+    "Workspace ID: " + (workspace?.workspaceId || ""),
+    "File ID: " + (cf?.fileId || file.id || file.rootHash || file.hash),
+  ].join("\n");
+
+  void showInfo("Company file details", details);
+
+  if (match) {
+    void recordAudit("company:file-info-viewed", {
+      workspaceId: match.workspace.workspaceId,
+      workspaceName: match.workspace.name,
+      fileName: cf?.name || file.name,
+      rootHash: cf?.rootHash || file.rootHash || file.hash,
+    });
+  }
+};
+  
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
 
@@ -757,6 +874,17 @@ export default function NativeP2PAppLive() {
     setCompany(nextCompany);
     setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
 
+    try {
+  const audit = await api.invoke<{ events: AuditEvent[] }>("audit:list", {
+    workspaceId: activeWorkspaceId || nextCompany.workspaces?.[0]?.workspaceId || "",
+    limit: 200,
+  });
+
+  setAuditEvents(Array.isArray(audit.events) ? audit.events : []);
+} catch {
+  setAuditEvents([]);
+}
+    
     if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
       setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
     }
@@ -1055,6 +1183,33 @@ export default function NativeP2PAppLive() {
       const name = newFolder.trim();
       if (!name) return;
 
+      if (view === "company" || view === "admin") {
+  if (!activeWorkspace) throw new Error("Create or select a Company Drive first");
+
+  setCompanyFoldersByWorkspace((prev) => {
+    const current = prev[activeWorkspace.workspaceId] || [];
+    const nextFolders = Array.from(new Set([...current, name])).sort();
+    const next = { ...prev, [activeWorkspace.workspaceId]: nextFolders };
+
+    localStorage.setItem(COMPANY_FOLDERS_KEY, JSON.stringify(next));
+
+    return next;
+  });
+
+  setNewFolder("");
+  setActiveFolder(name);
+  setActiveFolderId("");
+
+  await recordAudit("company:folder-created", {
+    workspaceId: activeWorkspace.workspaceId,
+    workspaceName: activeWorkspace.name,
+    folder: name,
+  });
+
+  toast.success(`Company folder "${name}" created`);
+  return;
+}
+
       const response = await api.invoke<CreateFolderResponse>("p2p:createFolder", {
         name,
         parentFolderId: activeFolderId || "",
@@ -1296,6 +1451,34 @@ Type DELETE → delete files too`,
       await refresh();
     });
 
+  const addFileToCompanyDrive = (file: P2PFile) =>
+  run(async () => {
+    if (!identityConnected) throw new Error("Connect wallet or sign in first");
+    if (!activeWorkspace) throw new Error("Create or select a Company Drive first");
+    if (!canUpload(localRole)) throw new Error("Your company role cannot add files");
+
+    const folderLabel = getPersonalFileFolder(file);
+    const companyFolder = folderLabel === UNCATEGORIZED ? "" : folderLabel;
+
+    await api.invoke("company:addFile", {
+      workspaceId: activeWorkspace.workspaceId,
+      file,
+      folder: companyFolder,
+    });
+
+    await recordAudit("company:file-added-from-my-drive", {
+      workspaceId: activeWorkspace.workspaceId,
+      workspaceName: activeWorkspace.name,
+      fileName: file.name,
+      rootHash: file.rootHash || file.hash,
+      size: file.size,
+      folder: companyFolder,
+    });
+
+    await refresh();
+    toast.success("Added to Company Drive. Original stays in My Drive.");
+  });
+  
   const download = (file: P2PFile) =>
     run(async () => {
       const result = await api.invoke<{ cancelled?: boolean; path?: string }>(
@@ -1310,22 +1493,33 @@ Type DELETE → delete files too`,
       await refresh();
     });
 
-  const renameCompanyFile = (file: P2PFile) =>
-    run(async () => {
-      const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
-      if (!match) return;
+const renameCompanyFile = (file: P2PFile) =>
+  run(async () => {
+    const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
+    if (!match) return;
 
-      const name = window.prompt("New file name", match.companyFile.name || file.name)?.trim();
-      if (!name) return;
+    const oldName = match.companyFile.name || file.name;
 
-      await api.invoke("company:updateFile", {
-        workspaceId: match.workspace.workspaceId,
-        rootHash: match.companyFile.rootHash,
-        patch: { name },
-      });
+    const name = window.prompt("New file name", oldName)?.trim();
+    if (!name || name === oldName) return;
 
-      await refresh();
+    await api.invoke("company:updateFile", {
+      workspaceId: match.workspace.workspaceId,
+      rootHash: match.companyFile.rootHash,
+      patch: { name },
     });
+
+    await recordAudit("company:file-renamed", {
+      workspaceId: match.workspace.workspaceId,
+      workspaceName: match.workspace.name,
+      rootHash: match.companyFile.rootHash,
+      oldName,
+      newName: name,
+    });
+
+    await refresh();
+    toast.success("Company file renamed");
+  });
 
   const toggleHideCompanyFile = (file: P2PFile) =>
     run(async () => {
@@ -1363,17 +1557,50 @@ const remove = (file: P2PFile) =>
       return next;
     });
 
-    if (match) {
-      await api.invoke("company:updateFile", {
-        workspaceId: match.workspace.workspaceId,
-        rootHash: match.companyFile.rootHash,
-        patch: { deleted: true },
-      });
+if (view === "personal" && match) {
+  const keysToHide = [keyFor(file), file.hash, file.rootHash, file.id].filter(Boolean) as string[];
 
-      await refresh();
-      toast.success("Removed from company manifest.");
-      return;
-    }
+  setPersonalHiddenCompanyFileKeys((prev) => {
+    const next = new Set(prev);
+
+    for (const key of keysToHide) next.add(String(key));
+
+    localStorage.setItem(PERSONAL_HIDDEN_COMPANY_FILES_KEY, JSON.stringify(Array.from(next)));
+
+    return next;
+  });
+
+  await recordAudit("drive:file-removed-from-my-drive-view", {
+    workspaceId: match.workspace.workspaceId,
+    workspaceName: match.workspace.name,
+    fileName: match.companyFile.name || file.name,
+    rootHash: match.companyFile.rootHash || file.rootHash || file.hash,
+    keptInCompanyDrive: true,
+  });
+
+await refresh();
+toast.success("Removed from My Drive view. Company Drive keeps the file.");
+return;
+}
+
+if (match) {
+  await api.invoke("company:updateFile", {
+    workspaceId: match.workspace.workspaceId,
+    rootHash: match.companyFile.rootHash,
+    patch: { deleted: true },
+  });
+
+  await recordAudit("company:file-deleted", {
+    workspaceId: match.workspace.workspaceId,
+    workspaceName: match.workspace.name,
+    fileName: match.companyFile.name || file.name,
+    rootHash: match.companyFile.rootHash || file.rootHash || file.hash,
+  });
+
+  await refresh();
+  toast.success("Removed from company manifest.");
+  return;
+}
 
     toast.success("Deleting file in background...");
 
@@ -1804,7 +2031,18 @@ const failed = results.filter((result) => result.status === "rejected");
           isSelected ? "ring-2 ring-blue-500" : ""
         }`}
       >
-        <CardContent className="space-y-4 p-5">
+<CardContent className="relative space-y-4 p-5">
+  {match && (
+    <button
+      type="button"
+      onClick={() => showCompanyFileInfo(file)}
+      className="absolute right-3 top-3 flex size-7 items-center justify-center rounded-full border border-blue-500/60 bg-blue-500/10 text-xs font-bold text-blue-300 hover:bg-blue-500/20"
+      title="Company file info"
+      aria-label="Company file info"
+    >
+      !
+    </button>
+  )}
           {isPersonal && view === "personal" && (
             <button
               type="button"
@@ -1841,9 +2079,9 @@ const failed = results.filter((result) => result.status === "rejected");
               {folderLabel}
             </p>
 
-            {cf?.uploadedByName && (
-              <p className="text-xs text-zinc-500">by: {cf.uploadedByName}</p>
-            )}
+<p className="text-[11px] text-zinc-500">
+  Uploaded by {uploaderLabel(file, cf)}
+</p>
 
             <div className="mt-2 flex flex-wrap gap-1">
               {file.isEncrypted && (
@@ -1893,6 +2131,19 @@ const failed = results.filter((result) => result.status === "rejected");
               Share
             </Button>
 
+            {isPersonal && view === "personal" && activeWorkspace && (
+  <Button
+    variant="outline"
+    size="sm"
+    onClick={() => addFileToCompanyDrive(file)}
+    disabled={busy || !identityConnected || !canUpload(localRole)}
+    className="text-xs"
+  >
+    <Building2 className="size-3" />
+    Add to Company
+  </Button>
+)}
+            
             {match && (
               <Button
                 variant="outline"
@@ -2153,33 +2404,25 @@ const failed = results.filter((result) => result.status === "rejected");
               </button>
             ))}
 
-            {view === "company" || view === "admin"
-              ? Array.from(
-                  new Set(
-                    (activeWorkspace?.files || [])
-                      .map((file) => file.folder)
-                      .filter(Boolean) as string[]
-                  )
-                )
-                  .sort()
-                  .map((folderName) => (
-                    <button
-                      key={folderName}
-                      onClick={() => {
-                        setActiveFolder(folderName);
-                        setActiveFolderId("");
-                      }}
-                      className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-                        activeFolder === folderName
-                          ? "bg-blue-600 text-white"
-                          : "text-zinc-400 hover:bg-zinc-800"
-                      }`}
-                    >
-                      <FolderOpen className="mr-1.5 inline size-3" />
-                      {folderName}
-                    </button>
-                  ))
-              : (folderChildren.get("") || []).map((folder) => renderFolderNode(folder))}
+ {view === "company" || view === "admin"
+  ? companyFolderNames.map((folderName) => (
+      <button
+        key={folderName}
+        onClick={() => {
+          setActiveFolder(folderName);
+          setActiveFolderId("");
+        }}
+        className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
+          activeFolder === folderName
+            ? "bg-blue-600 text-white"
+            : "text-zinc-400 hover:bg-zinc-800"
+        }`}
+      >
+        <FolderOpen className="mr-1.5 inline size-3" />
+        {folderName}
+      </button>
+    ))
+  : (folderChildren.get("") || []).map((folder) => renderFolderNode(folder))}
           </div>
 
           {wallet?.connected && (
@@ -2525,6 +2768,55 @@ const failed = results.filter((result) => result.status === "rejected");
                   )}
 
                   <div>
+
+                    <Card className="border-zinc-800 bg-zinc-900">
+  <CardHeader>
+    <CardTitle className="flex items-center justify-between gap-2 text-sm">
+      <span className="flex items-center gap-2">
+        <ShieldCheck className="size-4" />
+        Company Drive Audit Log
+      </span>
+
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => void refreshAudit(activeWorkspace.workspaceId)}
+        disabled={busy}
+      >
+        <RefreshCw className="size-3" />
+        Refresh
+      </Button>
+    </CardTitle>
+  </CardHeader>
+
+  <CardContent className="space-y-2">
+    {auditEvents.length === 0 ? (
+      <p className="text-sm text-zinc-500">No audit events yet.</p>
+    ) : (
+      <div className="max-h-80 space-y-2 overflow-auto pr-1">
+        {auditEvents.map((event) => (
+          <div key={event.auditId} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-medium text-zinc-100">{event.action}</p>
+              <p className="text-xs text-zinc-500">{date(event.at)}</p>
+            </div>
+
+            <p className="mt-1 text-xs text-zinc-400">
+              Actor: <span className="font-mono">{short(event.actor || "")}</span>
+            </p>
+
+            {event.details && (
+              <pre className="mt-2 max-h-24 overflow-auto rounded bg-zinc-900 p-2 text-[11px] text-zinc-400">
+                {JSON.stringify(event.details, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+    )}
+  </CardContent>
+</Card>
+                    
                     <p className="mb-3 text-sm font-semibold">Company Files ({companyFiles.length})</p>
 
                     {visibleFiles.length > 0 ? (
