@@ -35,7 +35,8 @@
     "apply:download-streaming": "node scripts/apply-download-streaming-to-path.cjs && node scripts/fix-streaming-final-script-syntax.cjs && node scripts/patch-streaming-upload-download-final.cjs",
     "apply:seed-account": "node scripts/enable-seed-account.cjs",
     "apply:seed-session": "node scripts/patch-seed-session-cache.cjs && node scripts/patch-main-seed-session-read.cjs",
-    "patch:folder-actions": "pnpm run prepare:final"
+    "patch:folder-actions": "pnpm run prepare:final",
+    "patch:join-company": "node scripts/patch-live-join-company-drive.cjs"
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.1",
