@@ -8,6 +8,7 @@
   "scripts": {
     "prepare:final": "node scripts/verify-runtime.cjs",
     "verify": "node scripts/verify-runtime.cjs",
+    "verify:company": "node scripts/verify-company-drive-live-contract.cjs",
     "health": "node scripts/full-health-check.cjs",
     "health:deep": "node scripts/full-health-check.cjs --deep",
     "dev": "vite --host 127.0.0.1 --port 3000",
