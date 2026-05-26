@@ -80,3 +80,4 @@ function installCompanyDriveHardening() {
 }
 
 installCompanyDriveHardening();
+setImmediate(installCompanyDriveHardening);
