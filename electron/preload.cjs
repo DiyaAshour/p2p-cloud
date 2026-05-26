@@ -70,7 +70,11 @@ const allowedChannels = new Set([
   'company:removeMember',
   'company:addFile',
   'company:updateFile',
-
+  'audit:list',
+  'audit:record',
+  'audit:clear',
+  'audit:listManifests',
+  
   'electron:openDevTools',
   'electron:diagnostics',
   'system:open-external',
