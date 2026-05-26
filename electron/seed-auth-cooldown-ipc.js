@@ -1,4 +1,5 @@
 import { app, ipcMain } from 'electron';
+import './company-drive-ipc.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
