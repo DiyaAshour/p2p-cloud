@@ -42,7 +42,8 @@ pnpm verify
 
 - `pnpm security:scan` to block committed secrets and unsafe `.env` values.
 - `pnpm production:scan` to block legacy patch/apply scripts from the production path.
-- `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC allowlist.
+- `pnpm verify:ipc` to verify every Electron IPC-like channel is declared in the shared contract.
+- `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC contract wiring.
 
 For deeper checks:
 
@@ -81,6 +82,22 @@ Directory-only package:
 pnpm package:dir
 ```
 
+## IPC Contract Policy
+
+All Electron IPC channels must be declared in one source of truth:
+
+```bash
+electron/ipc-contract.cjs
+```
+
+Rules:
+
+1. Do not add ad-hoc channel strings directly to `preload.cjs`.
+2. Do not expose unrestricted `ipcRenderer.invoke` to the renderer.
+3. Add every new channel to `electron/ipc-contract.cjs` first.
+4. Run `pnpm verify:ipc` after adding or renaming any channel.
+5. Large-file operations must keep using `p2p:downloadToPath` / source-based streaming paths instead of returning huge buffers to React.
+
 ## Core Runtime Rules
 
 1. Electron is the trusted local runtime.
@@ -89,7 +106,8 @@ pnpm package:dir
 4. Large downloads must stream/write to disk through Electron, not return huge buffers to React.
 5. `.env` files are local only and must not contain committed secrets.
 6. Production scripts must be source-based and must not run legacy `patch`/`apply` scripts.
-7. Any new feature must be documented in `المرجع.md`.
+7. IPC channels must be declared in `electron/ipc-contract.cjs`.
+8. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
@@ -97,7 +115,8 @@ pnpm package:dir
 |---|---|
 | `pnpm security:scan` | Blocks committed secrets and unsafe `.env` values |
 | `pnpm production:scan` | Blocks legacy patch/apply scripts from the production path |
-| `pnpm verify` | Runs security, production, and Electron runtime verification |
+| `pnpm verify:ipc` | Verifies IPC channel usage against `electron/ipc-contract.cjs` |
+| `pnpm verify` | Runs security, production, IPC, and Electron runtime verification |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
