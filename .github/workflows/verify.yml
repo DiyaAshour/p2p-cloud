@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: Verify runtime and security
+    name: Verify runtime, security, and production scripts
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +30,9 @@ jobs:
 
       - name: Security scan
         run: pnpm security:scan
+
+      - name: Production script guard
+        run: pnpm production:scan
 
       - name: Runtime verification
         run: pnpm verify
