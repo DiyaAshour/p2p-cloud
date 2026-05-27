@@ -44,6 +44,7 @@ pnpm verify
 - `pnpm production:scan` to block legacy patch/apply scripts from the production path.
 - `pnpm verify:ipc` to verify every Electron IPC-like channel is declared in the shared contract.
 - `pnpm verify:renderer` to verify the React renderer does not use browser network calls for app data.
+- `pnpm verify:large-files` to verify large transfers stay out of renderer memory.
 - `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC contract wiring.
 
 For deeper checks:
@@ -81,6 +82,42 @@ Directory-only package:
 
 ```bash
 pnpm package:dir
+```
+
+## Large File Safety Policy
+
+Large file uploads/downloads must not move complete file payloads through React renderer memory.
+
+Forbidden patterns for app file transfers:
+
+```bash
+p2p:download
+URL.createObjectURL(...)
+arrayBuffer()
+atob(...)
+Buffer.from(...)
+FileReader
+return base64 file payloads
+return raw Buffer file payloads
+```
+
+Required path:
+
+```bash
+p2p:downloadToPath
+```
+
+Runtime files that must stay present:
+
+```bash
+electron/download-to-path-override.js
+electron/stream-upload-override.js
+```
+
+Run this check after touching upload/download paths:
+
+```bash
+pnpm verify:large-files
 ```
 
 ## Electron-only Renderer Policy
@@ -136,7 +173,8 @@ Rules:
 6. Production scripts must be source-based and must not run legacy `patch`/`apply` scripts.
 7. IPC channels must be declared in `electron/ipc-contract.cjs`.
 8. Renderer data access must be Electron-only; no direct browser network data path.
-9. Any new feature must be documented in `المرجع.md`.
+9. Large file transfers must use disk/streaming paths, not renderer Buffer/Base64 paths.
+10. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
@@ -146,7 +184,8 @@ Rules:
 | `pnpm production:scan` | Blocks legacy patch/apply scripts from the production path |
 | `pnpm verify:ipc` | Verifies IPC channel usage against `electron/ipc-contract.cjs` |
 | `pnpm verify:renderer` | Verifies renderer app data access is Electron-only |
-| `pnpm verify` | Runs security, production, IPC, renderer, and Electron runtime verification |
+| `pnpm verify:large-files` | Verifies large file transfers stay out of renderer memory |
+| `pnpm verify` | Runs security, production, IPC, renderer, large-file, and Electron runtime verification |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
