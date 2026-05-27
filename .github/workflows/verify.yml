@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: Verify runtime, security, production scripts, IPC contract, renderer data path, and large file safety
+    name: Verify runtime, security, production scripts, IPC contract, renderer data path, large file safety, and manifest auth
     runs-on: ubuntu-latest
 
     steps:
@@ -42,6 +42,9 @@ jobs:
 
       - name: Large file safety verification
         run: pnpm verify:large-files
+
+      - name: Manifest auth safety verification
+        run: pnpm verify:manifest-auth
 
       - name: Runtime verification
         run: pnpm verify
