@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: Verify runtime, security, production scripts, IPC contract, and renderer data path
+    name: Verify runtime, security, production scripts, IPC contract, renderer data path, and large file safety
     runs-on: ubuntu-latest
 
     steps:
@@ -39,6 +39,9 @@ jobs:
 
       - name: Renderer Electron-only data path verification
         run: pnpm verify:renderer
+
+      - name: Large file safety verification
+        run: pnpm verify:large-files
 
       - name: Runtime verification
         run: pnpm verify
