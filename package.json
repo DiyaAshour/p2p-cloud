@@ -6,8 +6,9 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "prepare:final": "node scripts/verify-runtime.cjs",
-    "verify": "node scripts/verify-runtime.cjs",
+    "security:scan": "node scripts/security-scan.cjs",
+    "prepare:final": "pnpm run security:scan && node scripts/verify-runtime.cjs",
+    "verify": "pnpm run security:scan && node scripts/verify-runtime.cjs",
     "verify:company": "node scripts/verify-company-drive-live-contract.cjs",
     "health": "node scripts/full-health-check.cjs",
     "health:deep": "node scripts/full-health-check.cjs --deep",
