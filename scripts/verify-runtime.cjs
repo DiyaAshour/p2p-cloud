@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { IPC_CHANNELS } = require('../electron/ipc-contract.cjs');
 
 const root = process.cwd();
 
@@ -20,10 +21,15 @@ function assertIncludes(source, needle, label) {
   if (!source.includes(needle)) throw new Error(`Runtime verification failed: missing ${label || needle}`);
 }
 
+function assertIpcChannel(channel) {
+  if (!IPC_CHANNELS.includes(channel)) throw new Error(`Runtime verification failed: IPC contract missing ${channel}`);
+}
+
 const wrapper = assertFile('electron/main-wrapper.js');
 const stable = assertFile('electron/main-stable.js');
 const main = assertFile('electron/main.js');
 const preload = assertFile('electron/preload.cjs');
+assertFile('electron/ipc-contract.cjs');
 
 for (const file of [
   'electron/list-files-normalize-ipc.js',
@@ -47,6 +53,8 @@ assertIncludes(wrapper, "await import('./network-summary-normalize-ipc.js')", 'n
 assertIncludes(wrapper, "await import('./folder-crud-ipc.js')", 'folder CRUD import');
 assertIncludes(wrapper, "await import('./folder-item-ipc.js')", 'folder item import');
 assertIncludes(wrapper, 'installLazySeedIpc();', 'lazy seed IPC setup');
+assertIncludes(preload, "require('./ipc-contract.cjs')", 'shared IPC contract import');
+assertIncludes(preload, 'isAllowedIpcChannel(channel)', 'IPC contract channel guard');
 
 for (const channel of [
   'p2p:start',
@@ -64,7 +72,7 @@ for (const channel of [
   'p2p:getUiPrefs',
   'p2p:setUiPrefs',
 ]) {
-  assertIncludes(preload, `'${channel}'`, `preload allowlist ${channel}`);
+  assertIpcChannel(channel);
 }
 
 function hasCoreHandlers(source) {
@@ -84,5 +92,6 @@ console.log('[verify-runtime] source modules verified:', {
   wrapperFallback: true,
   folderModules: true,
   transferModules: true,
-  preloadAllowlist: true,
+  ipcContract: true,
+  preloadUsesSharedContract: true,
 });
