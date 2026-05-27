@@ -1,4 +1,5 @@
 import http from 'node:http';
+import crypto from 'node:crypto';
 
 const PORT = Number(process.env.PAYPAL_CHECKOUT_PORT || process.env.PAYPAL_PORT || 8791);
 const HOST = process.env.PAYPAL_CHECKOUT_HOST || '0.0.0.0';
@@ -9,6 +10,8 @@ const PAYPAL_API = PAYPAL_ENV === 'live' ? 'https://api-m.paypal.com' : 'https:/
 const RETURN_URL = process.env.PAYPAL_RETURN_URL || 'https://example.com/paypal/success';
 const CANCEL_URL = process.env.PAYPAL_CANCEL_URL || 'https://example.com/paypal/cancel';
 const MAX_BODY_BYTES = 1024 * 1024;
+const PLAN_UNLOCK_VERSION = 'plan-unlock-hmac-sha256-v1';
+const PLAN_UNLOCK_SECRET = String(process.env.P2P_PLAN_UNLOCK_SECRET || process.env.PLAN_UNLOCK_SECRET || '').trim();
 
 const PLANS = {
   tb1: { id: 'tb1', name: '1 TB', quotaBytes: 1 * 1024 ** 4, priceUsd: 1.0 },
@@ -60,6 +63,21 @@ function resolvePlan(value = '') {
   const plan = PLANS[planId];
   if (!plan) throw new Error(`Subscription plan does not exist: ${value || 'missing'}`);
   return plan;
+}
+
+function planUnlockPayload({ wallet, planId, paidUntil, orderId }) {
+  return JSON.stringify({
+    version: PLAN_UNLOCK_VERSION,
+    wallet: normalizeWallet(wallet),
+    planId: String(planId || '').trim(),
+    paidUntil: Number(paidUntil || 0),
+    orderId: String(orderId || '').trim(),
+  });
+}
+
+function signPlanUnlock(payload) {
+  if (!PLAN_UNLOCK_SECRET) throw new Error('Plan unlock secret is not configured');
+  return crypto.createHmac('sha256', PLAN_UNLOCK_SECRET).update(planUnlockPayload(payload)).digest('hex');
 }
 
 function send(res, status, payload) {
@@ -223,6 +241,10 @@ async function handleCaptureOrder(req, res) {
   if (pending?.planId && pending.planId !== plan.id) throw new Error('Subscription plan does not match selected app plan');
   if (pending?.wallet && wallet && pending.wallet !== wallet) throw new Error('Wallet does not match pending PayPal order');
 
+  const paidUntil = oneMonthFromNowSeconds();
+  const unlockWallet = wallet || pending?.wallet;
+  const planUnlockToken = signPlanUnlock({ wallet: unlockWallet, planId: plan.id, paidUntil, orderId });
+
   pendingOrders.delete(orderId);
   return send(res, 200, {
     ok: true,
@@ -231,8 +253,10 @@ async function handleCaptureOrder(req, res) {
     id: orderId,
     planId: plan.id,
     plan,
-    wallet: wallet || pending?.wallet,
-    paidUntil: oneMonthFromNowSeconds(),
+    wallet: unlockWallet,
+    paidUntil,
+    planUnlockVersion: PLAN_UNLOCK_VERSION,
+    planUnlockToken,
     capture,
   });
 }
@@ -249,6 +273,7 @@ function router(req, res) {
       env: PAYPAL_ENV,
       api: PAYPAL_API,
       configured: hasPayPalCredentials(),
+      planUnlockConfigured: Boolean(PLAN_UNLOCK_SECRET),
       plans: Object.values(PLANS),
     });
   }
@@ -270,6 +295,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[paypal-checkout] listening on http://${HOST}:${PORT}`);
-  console.log(`[paypal-checkout] env=${PAYPAL_ENV} api=${PAYPAL_API} configured=${hasPayPalCredentials()}`);
+  console.log(`[paypal-checkout] env=${PAYPAL_ENV} api=${PAYPAL_API} configured=${hasPayPalCredentials()} planUnlockConfigured=${Boolean(PLAN_UNLOCK_SECRET)}`);
   console.log(`[paypal-checkout] plans=${Object.keys(PLANS).join(', ')}`);
 });
