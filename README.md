@@ -38,6 +38,12 @@ Before running or packaging, verify the Electron runtime wiring:
 pnpm verify
 ```
 
+`pnpm verify` now runs:
+
+- `pnpm security:scan` to block committed secrets and unsafe `.env` values.
+- `pnpm production:scan` to block legacy patch/apply scripts from the production path.
+- `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC allowlist.
+
 For deeper checks:
 
 ```bash
@@ -82,22 +88,42 @@ pnpm package:dir
 3. All privileged work goes through IPC/preload.
 4. Large downloads must stream/write to disk through Electron, not return huge buffers to React.
 5. `.env` files are local only and must not contain committed secrets.
-6. Any new feature must be documented in `المرجع.md`.
+6. Production scripts must be source-based and must not run legacy `patch`/`apply` scripts.
+7. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
 | Script | Purpose |
 |---|---|
-| `pnpm verify` | Verifies required Electron runtime modules and IPC allowlist |
+| `pnpm security:scan` | Blocks committed secrets and unsafe `.env` values |
+| `pnpm production:scan` | Blocks legacy patch/apply scripts from the production path |
+| `pnpm verify` | Runs security, production, and Electron runtime verification |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
-| `pnpm renderer:build` | Builds the renderer after runtime verification |
+| `pnpm renderer:build` | Builds the renderer after verification |
 | `pnpm package:win` | Builds and packages the Windows app |
 | `pnpm package:dir` | Builds a directory package |
 | `pnpm paypal:server` | Starts the PayPal checkout service |
 | `pnpm sync:manifests` | Starts manifest sync service |
 | `pnpm storage:peer` | Starts storage peer service |
+
+## Legacy Scripts Policy
+
+Legacy scripts are kept only for historical recovery or manual migration. They must not be used by `verify`, `renderer:build`, `build`, `package:win`, `dist`, `electron:dev`, or `start`.
+
+Allowed naming for old migration helpers:
+
+```bash
+legacy:*
+```
+
+Forbidden naming for production package scripts:
+
+```bash
+patch:*
+apply:*
+```
 
 ## Local Environment Policy
 
