@@ -3,6 +3,8 @@ const path = require('node:path');
 
 const root = process.cwd();
 const mainPath = path.join(root, 'electron', 'main.js');
+const wrapperPath = path.join(root, 'electron', 'main-wrapper.js');
+const planGuardPath = path.join(root, 'electron', 'wallet-plan-guard.js');
 const paypalPath = path.join(root, 'server', 'paypal-checkout.js');
 const envExamplePath = path.join(root, '.env.example');
 
@@ -20,6 +22,8 @@ function assertMatches(text, pattern, label, failures) {
 }
 
 const main = readRequired(mainPath, 'electron/main.js');
+const wrapper = readRequired(wrapperPath, 'electron/main-wrapper.js');
+const planGuard = readRequired(planGuardPath, 'electron/wallet-plan-guard.js');
 const paypal = readRequired(paypalPath, 'server/paypal-checkout.js');
 const envExample = readRequired(envExamplePath, '.env.example');
 const failures = [];
@@ -51,30 +55,37 @@ for (const [needle, label] of [
   assertIncludes(main, needle, label, failures);
 }
 
-assertMatches(
-  main,
-  /ipcMain\.handle\('wallet:setPlan',[\s\S]*?assertVerifiedWallet\(\)/,
-  'wallet:setPlan requires verified identity',
-  failures,
-);
-assertMatches(
-  main,
-  /ipcMain\.handle\('wallet:setPlan',[\s\S]*?if \(!PLANS\[planId\]\) throw new Error\('Unknown wallet plan'\)/,
-  'wallet:setPlan validates plan id',
-  failures,
-);
-assertMatches(
-  main,
-  /ipcMain\.handle\('wallet:setPlan',[\s\S]*?paidUntil:[\s\S]*payload\.paidUntil/,
-  'wallet:setPlan records paidUntil metadata',
-  failures,
-);
-assertMatches(
-  main,
-  /ipcMain\.handle\('wallet:setPlan',[\s\S]*?subscriptionTx:[\s\S]*payload\.txHash/,
-  'wallet:setPlan records payment tx metadata',
-  failures,
-);
+assertMatches(main, /ipcMain\.handle\('wallet:setPlan',[\s\S]*?assertVerifiedWallet\(\)/, 'wallet:setPlan requires verified identity', failures);
+assertMatches(main, /ipcMain\.handle\('wallet:setPlan',[\s\S]*?if \(!PLANS\[planId\]\) throw new Error\('Unknown wallet plan'\)/, 'wallet:setPlan validates plan id', failures);
+assertMatches(main, /ipcMain\.handle\('wallet:setPlan',[\s\S]*?paidUntil:[\s\S]*payload\.paidUntil/, 'wallet:setPlan records paidUntil metadata', failures);
+assertMatches(main, /ipcMain\.handle\('wallet:setPlan',[\s\S]*?subscriptionTx:[\s\S]*payload\.txHash/, 'wallet:setPlan records payment tx metadata', failures);
+
+// Signed unlock guard must wrap wallet:setPlan before main.js registers handlers.
+for (const [needle, label] of [
+  ["await import('./wallet-plan-guard.js')", 'wallet plan guard imported by wrapper'],
+  ["await importPrimaryRuntime()", 'runtime import marker'],
+]) {
+  assertIncludes(wrapper, needle, label, failures);
+}
+if (wrapper.indexOf("await import('./wallet-plan-guard.js')") > wrapper.indexOf('await importPrimaryRuntime()')) {
+  failures.push('wallet-plan-guard must be imported before importPrimaryRuntime()');
+}
+
+for (const [needle, label] of [
+  ['PLAN_UNLOCK_VERSION', 'plan unlock version'],
+  ['plan-unlock-hmac-sha256-v1', 'plan unlock HMAC version'],
+  ['function verifyPlanUnlock(payload = {})', 'plan unlock verifier'],
+  ['Paid plan unlock is disabled: P2P_PLAN_UNLOCK_SECRET is not configured', 'paid plan disabled without secret'],
+  ['Paid plan unlock requires a future paidUntil timestamp', 'future paidUntil guard'],
+  ['Paid plan unlock token is missing or invalid', 'token format guard'],
+  ['Paid plan unlock token verification failed', 'token verification failure'],
+  ['crypto.createHmac(\'sha256\'', 'HMAC signing/verifying'],
+  ['crypto.timingSafeEqual', 'timing-safe token compare'],
+  ['if (planId === \'free\') return;', 'free plan downgrade allowed without token'],
+  ["if (channel !== 'wallet:setPlan')", 'only wraps wallet:setPlan'],
+]) {
+  assertIncludes(planGuard, needle, label, failures);
+}
 
 // Upload-like handlers must not bypass the runtime upload guard.
 const uploadHandlerMatches = [...main.matchAll(/ipcMain\.handle\('p2p:(?:upload|uploadFiles|uploadFolder|uploadPath)'[\s\S]*?\}\);/g)];
@@ -87,15 +98,22 @@ for (const match of uploadHandlerMatches) {
 }
 
 for (const [needle, label] of [
+  ['import crypto from \'node:crypto\';', 'PayPal crypto import'],
   ['const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID ||', 'PayPal client id env'],
   ['const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET ||', 'PayPal client secret env'],
+  ['const PLAN_UNLOCK_VERSION = \'plan-unlock-hmac-sha256-v1\';', 'PayPal plan unlock version'],
+  ['const PLAN_UNLOCK_SECRET = String(process.env.P2P_PLAN_UNLOCK_SECRET || process.env.PLAN_UNLOCK_SECRET || \'\').trim();', 'PayPal plan unlock secret'],
+  ['function signPlanUnlock(payload)', 'PayPal plan unlock signer'],
+  ['crypto.createHmac(\'sha256\', PLAN_UNLOCK_SECRET)', 'PayPal HMAC signer'],
   ['function hasPayPalCredentials()', 'PayPal credential check'],
   ['async function createRealPayPalOrder', 'real PayPal order creation'],
   ['async function captureRealPayPalOrder', 'real PayPal capture'],
   ['if (status && status !== \'COMPLETED\') throw new Error(`PayPal payment not completed: ${status}`);', 'PayPal completed status enforcement'],
   ['if (pending?.planId && pending.planId !== plan.id) throw new Error(\'Subscription plan does not match selected app plan\')', 'PayPal plan matching'],
   ['if (pending?.wallet && wallet && pending.wallet !== wallet) throw new Error(\'Wallet does not match pending PayPal order\')', 'PayPal wallet matching'],
-  ['paidUntil: oneMonthFromNowSeconds()', 'paidUntil issuance after capture'],
+  ['const paidUntil = oneMonthFromNowSeconds();', 'paidUntil issuance after capture'],
+  ['const planUnlockToken = signPlanUnlock({ wallet: unlockWallet, planId: plan.id, paidUntil, orderId });', 'PayPal signed unlock token issuance'],
+  ['planUnlockToken,', 'PayPal returns plan unlock token'],
 ]) {
   assertIncludes(paypal, needle, label, failures);
 }
@@ -104,6 +122,8 @@ for (const [needle, label] of [
   ['PAYPAL_CLIENT_ID=replace-with-paypal-client-id', 'PayPal client id placeholder'],
   ['PAYPAL_CLIENT_SECRET=replace-with-paypal-client-secret', 'PayPal client secret placeholder'],
   ['PAYPAL_ENV=sandbox', 'PayPal env placeholder'],
+  ['P2P_PLAN_UNLOCK_SECRET=replace-with-long-random-plan-unlock-secret', 'Electron plan unlock secret placeholder'],
+  ['PLAN_UNLOCK_SECRET=replace-with-long-random-plan-unlock-secret', 'PayPal plan unlock secret placeholder'],
 ]) {
   assertIncludes(envExample, needle, label, failures);
 }
@@ -114,4 +134,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log('[verify-wallet-payment-safety] ok: uploads are identity/quota gated and payment metadata is validated before plan unlock');
+console.log('[verify-wallet-payment-safety] ok: uploads are identity/quota gated and paid plan unlocks require signed server tokens');
