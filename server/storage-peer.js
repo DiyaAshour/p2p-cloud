@@ -20,7 +20,7 @@ const MAX_CHUNK_BYTES = Number(process.env.STORAGE_PEER_MAX_CHUNK_BYTES || 2 * 1
 const MAX_MESSAGE_BYTES = Number(process.env.STORAGE_PEER_MAX_MESSAGE_BYTES || Math.ceil(MAX_CHUNK_BYTES * 1.45) + 8192);
 const MAX_PUTS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_PUTS_PER_MINUTE || 240);
 const MAX_GETS_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_GETS_PER_MINUTE || 600);
-const MAX_DELETES_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_DELETES_PER_MINUTE || 600);
+const MAX_DELETES_PER_MINUTE = Number(process.env.STORAGE_PEER_MAX_DELETES_PER_MINUTE || 60);
 const DELETE_ADMIN_TOKEN = String(process.env.STORAGE_PEER_ADMIN_TOKEN || process.env.P2P_SAFETY_PEER_DELETE_TOKEN || '').trim();
 const PUBLIC_DISPLAY_URL = 'Network route';
 const PUBLIC_ROLE = 'safety-peer';
@@ -89,6 +89,17 @@ function chunkPath(hash) {
 
 function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function timingSafeEqualText(a = '', b = '') {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && left.length > 0 && crypto.timingSafeEqual(left, right);
+}
+
+function verifyDeleteAdminToken(token = '') {
+  if (!DELETE_ADMIN_TOKEN) throw new Error('Storage peer delete token is not configured');
+  if (!timingSafeEqualText(String(token || ''), DELETE_ADMIN_TOKEN)) throw new Error('Invalid storage peer delete token');
 }
 
 function peerBucket(socket, type) {
@@ -273,9 +284,7 @@ function handlePeerMessage(socket, raw) {
   if (message.type === 'chunk:delete') {
     try {
       peerBucket(socket, 'delete');
-      if (DELETE_ADMIN_TOKEN && message.payload?.adminToken !== DELETE_ADMIN_TOKEN) {
-        throw new Error('Invalid storage peer delete token');
-      }
+      verifyDeleteAdminToken(message.payload?.adminToken || '');
       const chunkHash = normalizeChunkHash(message.payload?.chunkHash || '');
       const result = deleteChunk(chunkHash);
       send(socket, {
@@ -370,4 +379,4 @@ console.log(`[storage-peer] listening on ws://${HOST}:${PORT}`);
 console.log(`[storage-peer] advertising ${PUBLIC_URL}`);
 console.log(`[storage-peer] chunks: ${CHUNKS_DIR}`);
 console.log(`[storage-peer] max chunk bytes: ${MAX_CHUNK_BYTES}`);
-console.log(`[storage-peer] delete support: enabled${DELETE_ADMIN_TOKEN ? ' with admin token' : ''}`);
+console.log(`[storage-peer] delete support: ${DELETE_ADMIN_TOKEN ? 'enabled with admin token' : 'disabled until STORAGE_PEER_ADMIN_TOKEN is configured'}`);
