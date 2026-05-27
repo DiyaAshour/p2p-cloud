@@ -7,8 +7,9 @@
   "license": "MIT",
   "scripts": {
     "security:scan": "node scripts/security-scan.cjs",
-    "prepare:final": "pnpm run security:scan && node scripts/verify-runtime.cjs",
-    "verify": "pnpm run security:scan && node scripts/verify-runtime.cjs",
+    "production:scan": "node scripts/production-scan.cjs",
+    "prepare:final": "pnpm run security:scan && pnpm run production:scan && node scripts/verify-runtime.cjs",
+    "verify": "pnpm run security:scan && pnpm run production:scan && node scripts/verify-runtime.cjs",
     "verify:company": "node scripts/verify-company-drive-live-contract.cjs",
     "health": "node scripts/full-health-check.cjs",
     "health:deep": "node scripts/full-health-check.cjs --deep",
@@ -33,11 +34,11 @@
     "sync:manifests": "node server/manifest-sync.js",
     "storage:peer": "node server/storage-peer.js",
     "repair:electron": "node node_modules/electron/install.js",
-    "apply:download-streaming": "node scripts/apply-download-streaming-to-path.cjs && node scripts/fix-streaming-final-script-syntax.cjs && node scripts/patch-streaming-upload-download-final.cjs",
-    "apply:seed-account": "node scripts/enable-seed-account.cjs",
-    "apply:seed-session": "node scripts/patch-seed-session-cache.cjs && node scripts/patch-main-seed-session-read.cjs",
-    "patch:folder-actions": "pnpm run prepare:final",
-    "patch:join-company": "node scripts/patch-live-join-company-drive.cjs"
+    "legacy:apply-download-streaming": "node scripts/apply-download-streaming-to-path.cjs && node scripts/fix-streaming-final-script-syntax.cjs && node scripts/patch-streaming-upload-download-final.cjs",
+    "legacy:apply-seed-account": "node scripts/enable-seed-account.cjs",
+    "legacy:apply-seed-session": "node scripts/patch-seed-session-cache.cjs && node scripts/patch-main-seed-session-read.cjs",
+    "legacy:folder-actions": "pnpm run prepare:final",
+    "legacy:join-company": "node scripts/patch-live-join-company-drive.cjs"
   },
   "dependencies": {
     "@adraffy/ens-normalize": "^1.11.1",
