@@ -45,6 +45,7 @@ pnpm verify
 - `pnpm verify:ipc` to verify every Electron IPC-like channel is declared in the shared contract.
 - `pnpm verify:renderer` to verify the React renderer does not use browser network calls for app data.
 - `pnpm verify:large-files` to verify large transfers stay out of renderer memory.
+- `pnpm verify:manifest-auth` to verify manifest writes/deletes require authenticated owner-bound requests.
 - `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC contract wiring.
 
 For deeper checks:
@@ -82,6 +83,42 @@ Directory-only package:
 
 ```bash
 pnpm package:dir
+```
+
+## Manifest Auth Safety Policy
+
+Manifest metadata controls file discovery, ownership, and reconstruction. Mutating manifest routes must never be open.
+
+Required for manifest writes/deletes:
+
+```bash
+MANIFEST_SYNC_REQUIRE_AUTH=true
+MANIFEST_SYNC_AUTH_SECRET
+P2P_MANIFEST_SYNC_AUTH_SECRET
+x-manifest-auth-version
+x-manifest-identity
+x-manifest-timestamp
+x-manifest-nonce
+x-manifest-body-sha256
+x-manifest-signature
+```
+
+Required protections:
+
+- HMAC-SHA256 signature verification.
+- Timing-safe signature comparison.
+- Nonce replay protection.
+- Timestamp expiry protection.
+- Body hash verification.
+- Identity/path ownership check.
+- Manifest `ownerWallet` ownership check.
+- `POST /wallet/:address/manifests` must use `requireManifestAuth`.
+- `DELETE /wallet/:address/manifests/:hash` must use `requireManifestAuth`.
+
+Run this check after touching manifest sync code:
+
+```bash
+pnpm verify:manifest-auth
 ```
 
 ## Large File Safety Policy
@@ -174,7 +211,8 @@ Rules:
 7. IPC channels must be declared in `electron/ipc-contract.cjs`.
 8. Renderer data access must be Electron-only; no direct browser network data path.
 9. Large file transfers must use disk/streaming paths, not renderer Buffer/Base64 paths.
-10. Any new feature must be documented in `المرجع.md`.
+10. Manifest writes/deletes must require authenticated owner-bound requests.
+11. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
@@ -185,7 +223,8 @@ Rules:
 | `pnpm verify:ipc` | Verifies IPC channel usage against `electron/ipc-contract.cjs` |
 | `pnpm verify:renderer` | Verifies renderer app data access is Electron-only |
 | `pnpm verify:large-files` | Verifies large file transfers stay out of renderer memory |
-| `pnpm verify` | Runs security, production, IPC, renderer, large-file, and Electron runtime verification |
+| `pnpm verify:manifest-auth` | Verifies manifest writes/deletes require authenticated owner-bound requests |
+| `pnpm verify` | Runs security, production, IPC, renderer, large-file, manifest-auth, and Electron runtime verification |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
