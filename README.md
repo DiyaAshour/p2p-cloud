@@ -46,6 +46,12 @@ pnpm verify
 - `pnpm verify:renderer` to verify the React renderer does not use browser network calls for app data.
 - `pnpm verify:large-files` to verify large transfers stay out of renderer memory.
 - `pnpm verify:manifest-auth` to verify manifest writes/deletes require authenticated owner-bound requests.
+- `pnpm verify:storage-peer` to verify storage peer hash/rate/delete protections.
+- `pnpm verify:bootstrap` to verify bootstrap peer registration safety.
+- `pnpm verify:wallet-payment` to verify wallet quota and signed paid-plan unlock safety.
+- `pnpm verify:encryption` to verify encryption/key safety.
+- `pnpm verify:release` to verify the release build path is guarded.
+- `pnpm verify:smoke-plan` to verify the manual smoke test checklist is present and complete.
 - `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC contract wiring.
 
 For deeper checks:
@@ -83,6 +89,31 @@ Directory-only package:
 
 ```bash
 pnpm package:dir
+```
+
+## Release Smoke Test Gate
+
+Automated checks are required but not enough for a release. Before publishing a build, complete the manual checklist:
+
+```bash
+docs/RELEASE_SMOKE_TEST.md
+```
+
+The checklist covers:
+
+- Clean Windows install.
+- Identity/wallet login.
+- Small, medium, and `1 GB+` upload/download.
+- Multi-peer discovery and transfer.
+- Manifest sync authentication.
+- Storage peer validation and delete protection.
+- PayPal sandbox paid-plan unlock.
+- Encryption cross-device recovery with same wallet/seed and drive password.
+
+Run this check after editing the release checklist:
+
+```bash
+pnpm verify:smoke-plan
 ```
 
 ## Manifest Auth Safety Policy
@@ -212,7 +243,9 @@ Rules:
 8. Renderer data access must be Electron-only; no direct browser network data path.
 9. Large file transfers must use disk/streaming paths, not renderer Buffer/Base64 paths.
 10. Manifest writes/deletes must require authenticated owner-bound requests.
-11. Any new feature must be documented in `المرجع.md`.
+11. Paid plans must require signed plan-unlock tokens, not raw UI payloads.
+12. Release builds must pass automated guards and the manual smoke test checklist.
+13. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
@@ -224,7 +257,13 @@ Rules:
 | `pnpm verify:renderer` | Verifies renderer app data access is Electron-only |
 | `pnpm verify:large-files` | Verifies large file transfers stay out of renderer memory |
 | `pnpm verify:manifest-auth` | Verifies manifest writes/deletes require authenticated owner-bound requests |
-| `pnpm verify` | Runs security, production, IPC, renderer, large-file, manifest-auth, and Electron runtime verification |
+| `pnpm verify:storage-peer` | Verifies storage peer validates chunks, rate-limits peers, and protects deletes |
+| `pnpm verify:bootstrap` | Verifies bootstrap validates peers and rate-limits discovery |
+| `pnpm verify:wallet-payment` | Verifies upload quota and paid-plan unlock safety |
+| `pnpm verify:encryption` | Verifies encryption/key safety |
+| `pnpm verify:release` | Verifies the release build path is fully guarded |
+| `pnpm verify:smoke-plan` | Verifies the release smoke test checklist is complete |
+| `pnpm verify` | Runs all security, runtime, release, and smoke-plan guards |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
