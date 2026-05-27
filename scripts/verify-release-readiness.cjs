@@ -5,6 +5,7 @@ const root = process.cwd();
 const packagePath = path.join(root, 'package.json');
 const workflowPath = path.join(root, '.github', 'workflows', 'verify.yml');
 const readmePath = path.join(root, 'README.md');
+const smokePath = path.join(root, 'docs', 'RELEASE_SMOKE_TEST.md');
 
 function readRequired(filePath, label) {
   if (!fs.existsSync(filePath)) throw new Error(`Missing required release readiness file: ${label}`);
@@ -14,6 +15,7 @@ function readRequired(filePath, label) {
 const pkg = JSON.parse(readRequired(packagePath, 'package.json'));
 const workflow = readRequired(workflowPath, '.github/workflows/verify.yml');
 const readme = readRequired(readmePath, 'README.md');
+const smoke = readRequired(smokePath, 'docs/RELEASE_SMOKE_TEST.md');
 const scripts = pkg.scripts || {};
 const failures = [];
 
@@ -29,6 +31,7 @@ const requiredScripts = [
   'verify:wallet-payment',
   'verify:encryption',
   'verify:release',
+  'verify:smoke-plan',
   'verify',
   'renderer:build',
   'package:win',
@@ -49,6 +52,8 @@ const verifyMustRun = [
   'verify:bootstrap',
   'verify:wallet-payment',
   'verify:encryption',
+  'verify:release',
+  'verify:smoke-plan',
 ];
 
 for (const script of verifyMustRun) {
@@ -67,8 +72,10 @@ if (!String(scripts.build || '').includes('pnpm run package:win')) {
 }
 
 for (const script of verifyMustRun) {
+  if (script === 'verify:release') continue;
   if (!workflow.includes(`pnpm ${script}`)) failures.push(`GitHub Actions workflow does not explicitly run pnpm ${script}`);
 }
+if (!workflow.includes('pnpm verify:release')) failures.push('GitHub Actions workflow must explicitly run pnpm verify:release');
 if (!workflow.includes('pnpm verify')) failures.push('GitHub Actions workflow must run pnpm verify');
 if (!workflow.includes('pnpm renderer:build')) failures.push('GitHub Actions workflow must run pnpm renderer:build');
 
@@ -83,6 +90,17 @@ const requiredReadmeSections = [
 ];
 for (const section of requiredReadmeSections) {
   if (!readme.includes(section)) failures.push(`README missing release readiness section: ${section}`);
+}
+
+const requiredSmokeSections = [
+  'Clean Install Smoke Test',
+  'Multi-Peer Network Smoke Test',
+  'Payment / Paid Plan Smoke Test',
+  'Encryption / Cross-Device Smoke Test',
+  'Release Decision',
+];
+for (const section of requiredSmokeSections) {
+  if (!smoke.includes(section)) failures.push(`Smoke test plan missing release gate section: ${section}`);
 }
 
 const forbiddenShortcuts = [
@@ -100,4 +118,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log('[verify-release-readiness] ok: release build path is guarded by security, runtime, network, storage, payment, and encryption checks');
+console.log('[verify-release-readiness] ok: release build path is guarded and a complete smoke test plan is enforced');
