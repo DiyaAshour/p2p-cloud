@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    name: Verify runtime, security, and production scripts
+    name: Verify runtime, security, production scripts, and IPC contract
     runs-on: ubuntu-latest
 
     steps:
@@ -33,6 +33,9 @@ jobs:
 
       - name: Production script guard
         run: pnpm production:scan
+
+      - name: IPC contract verification
+        run: pnpm verify:ipc
 
       - name: Runtime verification
         run: pnpm verify
