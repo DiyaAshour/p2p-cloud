@@ -1,0 +1,38 @@
+name: Verify
+
+on:
+  push:
+    branches:
+      - big-file-upload-safe
+      - main
+  pull_request:
+
+jobs:
+  verify:
+    name: Verify runtime and security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Security scan
+        run: pnpm security:scan
+
+      - name: Runtime verification
+        run: pnpm verify
+
+      - name: Renderer build
+        run: pnpm renderer:build
