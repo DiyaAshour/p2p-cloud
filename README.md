@@ -43,6 +43,7 @@ pnpm verify
 - `pnpm security:scan` to block committed secrets and unsafe `.env` values.
 - `pnpm production:scan` to block legacy patch/apply scripts from the production path.
 - `pnpm verify:ipc` to verify every Electron IPC-like channel is declared in the shared contract.
+- `pnpm verify:renderer` to verify the React renderer does not use browser network calls for app data.
 - `scripts/verify-runtime.cjs` to verify required Electron runtime modules and IPC contract wiring.
 
 For deeper checks:
@@ -82,6 +83,33 @@ Directory-only package:
 pnpm package:dir
 ```
 
+## Electron-only Renderer Policy
+
+React renderer code must not communicate directly with P2P/storage/payment services through browser networking.
+
+Forbidden in `client/src`:
+
+```bash
+fetch(...)
+axios
+XMLHttpRequest
+VITE_P2P_API_BASE_URL
+VITE_API_URL
+localhost P2P/storage URLs
+```
+
+Allowed path:
+
+```bash
+window.electron.invoke('<declared-channel>', payload)
+```
+
+Run this check after changing renderer data access:
+
+```bash
+pnpm verify:renderer
+```
+
 ## IPC Contract Policy
 
 All Electron IPC channels must be declared in one source of truth:
@@ -107,7 +135,8 @@ Rules:
 5. `.env` files are local only and must not contain committed secrets.
 6. Production scripts must be source-based and must not run legacy `patch`/`apply` scripts.
 7. IPC channels must be declared in `electron/ipc-contract.cjs`.
-8. Any new feature must be documented in `المرجع.md`.
+8. Renderer data access must be Electron-only; no direct browser network data path.
+9. Any new feature must be documented in `المرجع.md`.
 
 ## Useful Scripts
 
@@ -116,7 +145,8 @@ Rules:
 | `pnpm security:scan` | Blocks committed secrets and unsafe `.env` values |
 | `pnpm production:scan` | Blocks legacy patch/apply scripts from the production path |
 | `pnpm verify:ipc` | Verifies IPC channel usage against `electron/ipc-contract.cjs` |
-| `pnpm verify` | Runs security, production, IPC, and Electron runtime verification |
+| `pnpm verify:renderer` | Verifies renderer app data access is Electron-only |
+| `pnpm verify` | Runs security, production, IPC, renderer, and Electron runtime verification |
 | `pnpm health` | Runs the standard health check |
 | `pnpm health:deep` | Runs deeper health checks |
 | `pnpm electron:dev` | Runs the desktop app in development |
