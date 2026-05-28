@@ -1,6 +1,7 @@
 {
   "name": "chunknet",
   "version": "1.0.0",
+  "packageManager": "pnpm@10.33.2",
   "description": "Chunknet is a wallet-based P2P cloud storage desktop app with encrypted chunks, peer discovery, and manifest sync.",
   "author": "Diya Ashour",
   "type": "module",
