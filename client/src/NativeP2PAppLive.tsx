@@ -756,8 +756,24 @@ const personalFiles = useMemo(
         );
 
       return folderOk && queryOk;
+    }).sort((a, b) => {
+      const am = companyFileByKey.get(keyFor(a)) || companyFileByKey.get(a.hash);
+      const bm = companyFileByKey.get(keyFor(b)) || companyFileByKey.get(b.hash);
+
+      const aName = String(am?.companyFile?.name || a.name || "").toLowerCase();
+      const bName = String(bm?.companyFile?.name || b.name || "").toLowerCase();
+
+      if (aName !== bName) return aName.localeCompare(bName);
+
+      const aTime = new Date(am?.companyFile?.uploadedAt || a.uploadedAt || 0).getTime();
+      const bTime = new Date(bm?.companyFile?.uploadedAt || b.uploadedAt || 0).getTime();
+
+      if (aTime !== bTime) return aTime - bTime;
+
+      return String(a.rootHash || a.hash || "").localeCompare(String(b.rootHash || b.hash || ""));
     });
   }, [
+    
     baseFiles,
     search,
     activeFolder,
