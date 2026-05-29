@@ -70,6 +70,9 @@ type Channel =
   | "company:removeMember"
   | "company:addFile"
   | "company:updateFile"
+  | "company:createFolder"
+  | "company:updateFolder"
+  | "company:deleteFolder"
   | "audit:list"
   | "audit:record"
   | "audit:clear"
@@ -128,6 +131,9 @@ type CompanyFile = {
   size: number;
   totalChunks: number;
   folder?: string;
+  folderId?: string;
+  parentFolderId?: string;
+  folderPath?: string;
   uploadedAt: string;
   uploadedByDeviceId: string;
   uploadedByName?: string;
@@ -142,6 +148,7 @@ type Workspace = {
   signatureValid?: boolean;
   members: Member[];
   files: CompanyFile[];
+  folders?: DriveFolder[];
   createdAt: string;
   updatedAt?: string;
 };
@@ -216,7 +223,7 @@ const ALL_FILES = "All files";
 const UNCATEGORIZED = "Uncategorized";
 const ACTIVE_WORKSPACE_KEY = "chunknet.ui.activeWorkspace";
 const PERSONAL_HIDDEN_COMPANY_FILES_KEY = "chunknet.ui.personalHiddenCompanyFiles";
-const COMPANY_FOLDERS_KEY = "chunknet.ui.companyFolders";
+
 const WALLETCONNECT_PROJECT_ID =
   (import.meta as any).env?.VITE_WALLETCONNECT_PROJECT_ID ||
   "821b9d64c996dc59c7d18583fc7081f0";
@@ -455,9 +462,7 @@ const [busy, setBusy] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<string>("");
   const [newFolder, setNewFolder] = useState("");
   const [workspaceNameInput, setWorkspaceNameInput] = useState("");
-  const [companyFoldersByWorkspace, setCompanyFoldersByWorkspace] = useState<Record<string, string[]>>(
-  () => readJson<Record<string, string[]>>(COMPANY_FOLDERS_KEY, {})
-);
+
   const [memberEmail, setMemberEmail] = useState("");
   const [memberRole, setMemberRole] = useState<Role>("viewer");
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(
@@ -485,9 +490,9 @@ const [busy, setBusy] = useState(false);
   const identityConnected = walletConnected || seedConnected;
 
   const identityLabel = seedConnected
-    ? `Seed: ${wallet?.username || short(wallet?.accountId || wallet?.address || "")}`
+    ? `Seed: ${wallet?.username || short(wallet?.seedFingerprint || "")}`
     : walletConnected
-      ? short(wallet?.address || wallet?.accountId || "")
+      ? short(wallet?.accountId || wallet?.address || "")
       : "Guest";
 
   const workspaces = company?.workspaces || [];
@@ -498,7 +503,9 @@ const [busy, setBusy] = useState(false);
   const localMember = activeWorkspace?.members?.find((m) => m.deviceId === deviceId) || null;
   const localRole = localMember?.role || null;
   const minPasswordLength = wallet?.minDrivePasswordLength || 12;
-  const peerCount = (summary?.connectedPeers || 0) + (summary?.safetyPeerUrl ? 1 : 0);
+
+  const peerCount = summary?.connectedPeers ?? 0;
+
   const quota = wallet?.plan?.quotaBytes
     ? Math.min(100, (wallet.usedBytes / wallet.plan.quotaBytes) * 100)
     : 0;
@@ -555,6 +562,81 @@ const [busy, setBusy] = useState(false);
     );
   }
 
+  const companyFolders = useMemo(() => {
+    if (!activeWorkspace?.folders) return [];
+
+    const map = new Map<string, DriveFolder>();
+
+    for (const folder of activeWorkspace.folders) {
+      if (!folder?.folderId || !folder?.name) continue;
+
+      map.set(folder.folderId, {
+        ...folder,
+        folderId: String(folder.folderId),
+        name: String(folder.name),
+        parentFolderId: String(folder.parentFolderId || ""),
+      });
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeWorkspace]);
+
+  const companyFolderById = useMemo(() => {
+    const map = new Map<string, DriveFolder>();
+
+    for (const folder of companyFolders) {
+      map.set(folder.folderId, folder);
+      if (folder.id) map.set(folder.id, folder);
+      if (folder.hash) map.set(folder.hash, folder);
+      if (folder.rootHash) map.set(folder.rootHash, folder);
+    }
+
+    return map;
+  }, [companyFolders]);
+
+  const companyFolderChildren = useMemo(() => {
+    const map = new Map<string, DriveFolder[]>();
+
+    for (const folder of companyFolders) {
+      const parent = String(folder.parentFolderId || "");
+      map.set(parent, [...(map.get(parent) || []), folder]);
+    }
+
+    for (const list of map.values()) {
+      list.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    return map;
+  }, [companyFolders]);
+
+  function companyFolderPath(folder: DriveFolder): string {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    let cursor: DriveFolder | undefined = folder;
+
+    while (cursor) {
+      const id = cursor.folderId || cursor.id || cursor.name;
+      if (seen.has(id)) break;
+
+      seen.add(id);
+      names.unshift(cursor.name);
+      cursor = cursor.parentFolderId ? companyFolderById.get(cursor.parentFolderId) : undefined;
+    }
+
+    return names.join(" / ");
+  }
+
+  function companyFolderByNameOrPath(value: string): DriveFolder | null {
+    const target = value.trim();
+    if (!target) return null;
+
+    return (
+      companyFolders.find(
+        (folder) => folder.name === target || companyFolderPath(folder) === target
+      ) || null
+    );
+  }
+
   // Company file lookup map
   const companyFileByKey = useMemo(() => {
     const map = new Map<string, { workspace: Workspace; companyFile: CompanyFile }>();
@@ -608,33 +690,6 @@ const personalFiles = useMemo(
     [files]
   );
 
-// Company folders are isolated from My Drive folders
-const companyFolderNames = useMemo(() => {
-  if (!activeWorkspace) return [];
-
-  const saved = companyFoldersByWorkspace[activeWorkspace.workspaceId] || [];
-  const fromFiles = (activeWorkspace.files || [])
-    .map((file) => file.folder)
-    .filter(Boolean) as string[];
-
-  return Array.from(new Set([...saved, ...fromFiles])).sort();
-}, [activeWorkspace, companyFoldersByWorkspace]);
-
-const sidebarFolders = useMemo(() => {
-  if (view === "company" || view === "admin") {
-    return [ALL_FILES, UNCATEGORIZED, ...companyFolderNames];
-  }
-
-  return [
-    ALL_FILES,
-    UNCATEGORIZED,
-    ...manifestFolders
-      .filter((folder) => !folder.parentFolderId)
-      .map((folder) => folder.name)
-      .sort(),
-  ];
-}, [view, manifestFolders, companyFolderNames]);
-
   const baseFiles =
     view === "company" || view === "admin"
       ? companyFiles
@@ -681,12 +736,15 @@ const sidebarFolders = useMemo(() => {
       const displayName = cf?.name || file.name;
 
       const personalFolderId = match ? "" : getPersonalFileFolderId(file);
-      const folderLabel = cf?.folder ? cf.folder || UNCATEGORIZED : getPersonalFileFolder(file);
+      const companyFolderId = String(cf?.folderId || cf?.parentFolderId || "").trim();
+      const folderLabel = cf
+        ? cf.folderPath || cf.folder || UNCATEGORIZED
+        : getPersonalFileFolder(file);
 
       const folderOk = match
         ? activeFolder === ALL_FILES ||
-          activeFolder === folderLabel ||
-          (activeFolder === UNCATEGORIZED && (!folderLabel || folderLabel === UNCATEGORIZED))
+          (activeFolder === UNCATEGORIZED && !companyFolderId && (!folderLabel || folderLabel === UNCATEGORIZED)) ||
+          (activeFolderId ? companyFolderId === activeFolderId : activeFolder === folderLabel)
         : activeFolder === ALL_FILES ||
           (activeFolder === UNCATEGORIZED && !personalFolderId) ||
           (activeFolderId ? personalFolderId === activeFolderId : activeFolder === folderLabel);
@@ -1184,31 +1242,28 @@ const showCompanyFileInfo = (file: P2PFile) => {
       if (!name) return;
 
       if (view === "company" || view === "admin") {
-  if (!activeWorkspace) throw new Error("Create or select a Company Drive first");
+        if (!activeWorkspace) throw new Error("Create or select a Company Drive first");
 
-  setCompanyFoldersByWorkspace((prev) => {
-    const current = prev[activeWorkspace.workspaceId] || [];
-    const nextFolders = Array.from(new Set([...current, name])).sort();
-    const next = { ...prev, [activeWorkspace.workspaceId]: nextFolders };
+        const response = await api.invoke<CreateFolderResponse>("company:createFolder", {
+          workspaceId: activeWorkspace.workspaceId,
+          name,
+          parentFolderId: activeFolderId || "",
+        });
 
-    localStorage.setItem(COMPANY_FOLDERS_KEY, JSON.stringify(next));
+        const folder =
+          "folder" in response && response.folder ? response.folder : (response as DriveFolder);
 
-    return next;
-  });
+        setNewFolder("");
 
-  setNewFolder("");
-  setActiveFolder(name);
-  setActiveFolderId("");
+        if (folder?.folderId) {
+          setActiveFolder(folder.name);
+          setActiveFolderId(folder.folderId);
+        }
 
-  await recordAudit("company:folder-created", {
-    workspaceId: activeWorkspace.workspaceId,
-    workspaceName: activeWorkspace.name,
-    folder: name,
-  });
-
-  toast.success(`Company folder "${name}" created`);
-  return;
-}
+        await refresh();
+        toast.success(`Company folder "${name}" created`);
+        return;
+      }
 
       const response = await api.invoke<CreateFolderResponse>("p2p:createFolder", {
         name,
@@ -1358,6 +1413,117 @@ Type DELETE → delete files too`,
       toast.success(`Folder "${folder.name}" deleted`);
     });
 
+  const renameCompanyFolder = (folder: DriveFolder) =>
+    run(async () => {
+      if (!activeWorkspace) throw new Error("Select a Company Drive first");
+
+      const name = (
+        await askText({
+          title: "Rename Company Folder",
+          message: `Rename "${companyFolderPath(folder)}"`,
+          defaultValue: folder.name,
+          placeholder: "New folder name",
+          confirmText: "Rename",
+        })
+      )?.trim();
+
+      if (!name || name === folder.name) return;
+
+      await api.invoke("company:updateFolder", {
+        workspaceId: activeWorkspace.workspaceId,
+        folderId: folder.folderId,
+        patch: { name },
+      });
+
+      await refresh();
+
+      if (activeFolderId === folder.folderId) {
+        setActiveFolder(name);
+      }
+
+      toast.success("Company folder renamed");
+    });
+
+  const moveCompanyFolder = (folder: DriveFolder) =>
+    run(async () => {
+      if (!activeWorkspace) throw new Error("Select a Company Drive first");
+
+      const target = await askText({
+        title: "Move Company Folder",
+        message: `Move "${companyFolderPath(folder)}" inside folder.
+
+Leave empty = Root
+Type folder name or full path = move inside it`,
+        placeholder: "Target folder name/path",
+        confirmText: "Move",
+      });
+
+      if (target === null) return;
+
+      const targetFolder = companyFolderByNameOrPath(target);
+      const targetFolderId = target.trim() ? targetFolder?.folderId || "" : "";
+
+      if (target.trim() && !targetFolder) {
+        throw new Error("Target company folder not found");
+      }
+
+      if (targetFolderId === folder.folderId) {
+        throw new Error("Cannot move folder into itself");
+      }
+
+      await api.invoke("company:updateFolder", {
+        workspaceId: activeWorkspace.workspaceId,
+        folderId: folder.folderId,
+        patch: { parentFolderId: targetFolderId },
+      });
+
+      await refresh();
+      toast.success("Company folder moved");
+    });
+
+  const deleteCompanyFolder = (folder: DriveFolder) =>
+    run(async () => {
+      if (!activeWorkspace) throw new Error("Select a Company Drive first");
+
+      const disposition = await askText({
+        title: "Delete Company Folder",
+        message: `Files inside "${companyFolderPath(folder)}":
+
+Leave empty → Uncategorized
+Type a folder name/path → move files there
+Type DELETE → delete files too`,
+        placeholder: "empty / folder name / DELETE",
+        confirmText: "Delete Folder",
+        danger: true,
+      });
+
+      if (disposition === null) return;
+
+      const trimmed = disposition.trim();
+      const isDelete = trimmed.toUpperCase() === "DELETE";
+      const targetFolder = isDelete || !trimmed ? null : companyFolderByNameOrPath(trimmed);
+
+      if (trimmed && !isDelete && !targetFolder) {
+        throw new Error("Target company folder not found");
+      }
+
+      await api.invoke("company:deleteFolder", {
+        workspaceId: activeWorkspace.workspaceId,
+        folderId: folder.folderId,
+        fileDisposition: isDelete ? "delete" : "move",
+        targetFolderId: targetFolder?.folderId || "",
+      });
+
+      await refresh();
+
+      if (activeFolderId === folder.folderId) {
+        setActiveFolder(ALL_FILES);
+        setActiveFolderId("");
+      }
+
+      toast.success(`Company folder "${folder.name}" deleted`);
+    });
+
   const upload = () =>
     run(async () => {
       if (!identityConnected) {
@@ -1398,8 +1564,16 @@ Type DELETE → delete files too`,
           await api.invoke("company:addFile", {
             workspaceId: activeWorkspace.workspaceId,
             file,
+            folderId: activeFolderId || "",
+            parentFolderId: activeFolderId || "",
+            folderPath:
+              activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+                ? activeFolder
+                : "",
             folder:
-              activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+              activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+                ? activeFolder
+                : "",
           });
         }
       }
@@ -1439,7 +1613,16 @@ Type DELETE → delete files too`,
           await api.invoke("company:addFile", {
             workspaceId: activeWorkspace.workspaceId,
             file,
-            folder: activeFolder === ALL_FILES || activeFolder === UNCATEGORIZED ? "" : activeFolder,
+            folderId: activeFolderId || "",
+            parentFolderId: activeFolderId || "",
+            folderPath:
+              activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+                ? activeFolder
+                : "",
+            folder:
+              activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+                ? activeFolder
+                : "",
           });
         }
       }
@@ -1457,43 +1640,47 @@ Type DELETE → delete files too`,
     if (!activeWorkspace) throw new Error("Create or select a Company Drive first");
     if (!canUpload(localRole)) throw new Error("Your company role cannot add files");
 
-    const folderLabel = getPersonalFileFolder(file);
-    const companyFolder = folderLabel === UNCATEGORIZED ? "" : folderLabel;
-
     await api.invoke("company:addFile", {
       workspaceId: activeWorkspace.workspaceId,
       file,
-      folder: companyFolder,
+      folderId: activeFolderId || "",
+      parentFolderId: activeFolderId || "",
+      folderPath:
+        activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+          ? activeFolder
+          : "",
+      folder:
+        activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED
+          ? activeFolder
+          : "",
     });
 
-    await recordAudit("company:file-added-from-my-drive", {
+    await recordAudit("company:file-added", {
       workspaceId: activeWorkspace.workspaceId,
       workspaceName: activeWorkspace.name,
       fileName: file.name,
       rootHash: file.rootHash || file.hash,
-      size: file.size,
-      folder: companyFolder,
+      folder: activeFolderId && activeFolder !== ALL_FILES && activeFolder !== UNCATEGORIZED ? activeFolder : "",
     });
 
     await refresh();
-    toast.success("Added to Company Drive. Original stays in My Drive.");
+    toast.success(`File "${file.name}" added to Company Drive`);
   });
-  
+
   const download = (file: P2PFile) =>
     run(async () => {
-      const result = await api.invoke<{ cancelled?: boolean; path?: string }>(
-        "p2p:downloadToPath",
-        { hash: file.hash, drivePassword: file.isEncrypted ? password() : null }
-      );
+      await api.invoke("p2p:downloadToPath", {
+        hash: file.hash,
+        rootHash: file.rootHash,
+        name: file.name,
+        isEncrypted: file.isEncrypted,
+        drivePassword: file.isEncrypted ? password() : null,
+      });
 
-      if (!result?.cancelled) {
-        toast.success(result?.path ? `Downloaded to ${result.path}` : "Download complete");
-      }
-
-      await refresh();
+      toast.success(`Download started for ${file.name}`);
     });
 
-const renameCompanyFile = (file: P2PFile) =>
+  const renameCompanyFile = (file: P2PFile) =>
   run(async () => {
     const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
     if (!match) return;
@@ -1782,6 +1969,83 @@ const failed = results.filter((result) => result.status === "rejected");
     setSelectedItemIds(new Set());
   };
 
+  const renderCompanyFolderNode = (folder: DriveFolder, depth = 0) => {
+    const selected = activeFolderId === folder.folderId;
+    const children = companyFolderChildren.get(folder.folderId) || [];
+    const hasChildren = children.length > 0;
+    const expanded = expandedFolderIds.has(folder.folderId);
+
+    const toggleExpanded = () => {
+      setExpandedFolderIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(folder.folderId)) next.delete(folder.folderId);
+        else next.add(folder.folderId);
+        return next;
+      });
+    };
+
+    return (
+      <div key={`company-folder-node:${folder.folderId}`} className="space-y-1">
+        <div className="group flex items-center gap-1" style={{ marginLeft: depth * 12 }}>
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={toggleExpanded}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              title={expanded ? "Collapse" : "Expand"}
+            >
+              {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            </button>
+          ) : (
+            <span className="w-5" />
+          )}
+
+          <button
+            onClick={() => {
+              setActiveFolder(companyFolderPath(folder));
+              setActiveFolderId(folder.folderId);
+            }}
+            className={`flex-1 rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
+              selected ? "bg-blue-600 text-white" : "text-zinc-400 hover:bg-zinc-800"
+            }`}
+          >
+            <FolderOpen className="mr-1.5 inline size-3" />
+            {folder.name}
+            <Badge variant="outline" className="ml-1 px-1 py-0 text-[10px]">
+              company
+            </Badge>
+          </button>
+
+          <button
+            onClick={() => renameCompanyFolder(folder)}
+            className="hidden px-1 text-zinc-500 hover:text-zinc-300 group-hover:block"
+            title="Rename"
+          >
+            <Pencil className="size-3" />
+          </button>
+
+          <button
+            onClick={() => moveCompanyFolder(folder)}
+            className="hidden px-1 text-zinc-500 hover:text-blue-300 group-hover:block"
+            title="Move"
+          >
+            <MoveRight className="size-3" />
+          </button>
+
+          <button
+            onClick={() => deleteCompanyFolder(folder)}
+            className="hidden px-1 text-zinc-500 hover:text-red-400 group-hover:block"
+            title="Delete"
+          >
+            <Trash2 className="size-3" />
+          </button>
+        </div>
+
+        {expanded && children.map((child) => renderCompanyFolderNode(child, depth + 1))}
+      </div>
+    );
+  };
+
   const renderFolderNode = (folder: DriveFolder, depth = 0) => {
     const selected = activeFolderId === folder.folderId;
     const children = folderChildren.get(folder.folderId) || [];
@@ -1967,11 +2231,6 @@ const failed = results.filter((result) => result.status === "rejected");
           </div>
 
           <div className="flex flex-wrap gap-1">
-            <Button size="sm" onClick={() => openFolder(folder)} disabled={busy} className="text-xs">
-              <FolderOpen className="size-3" />
-              Open
-            </Button>
-
             <Button
               variant="outline"
               size="sm"
@@ -2400,105 +2659,80 @@ const failed = results.filter((result) => result.status === "rejected");
                     : "text-zinc-400 hover:bg-zinc-800"
                 }`}
               >
+                <FolderOpen className="mr-1.5 inline size-3" />
                 {label}
               </button>
             ))}
 
- {view === "company" || view === "admin"
-  ? companyFolderNames.map((folderName) => (
-      <button
-        key={folderName}
-        onClick={() => {
-          setActiveFolder(folderName);
-          setActiveFolderId("");
-        }}
-        className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-          activeFolder === folderName
-            ? "bg-blue-600 text-white"
-            : "text-zinc-400 hover:bg-zinc-800"
-        }`}
-      >
-        <FolderOpen className="mr-1.5 inline size-3" />
-        {folderName}
-      </button>
-    ))
-  : (folderChildren.get("") || []).map((folder) => renderFolderNode(folder))}
+              {view === "company" || view === "admin"
+                ? (companyFolderChildren.get("") || []).map((folder) =>
+                    renderCompanyFolderNode(folder)
+                  )
+                : (folderChildren.get("") || []).map((folder) => renderFolderNode(folder))}
           </div>
-
-          {wallet?.connected && (
-            <div className="space-y-1 border-t border-zinc-800 pt-4 text-xs text-zinc-500">
-              {wallet.authMode === "seed" && (
-                <p className="truncate font-mono">
-                  <KeyRound className="mr-1 inline size-3" />
-                  {wallet.username}
-                </p>
-              )}
-
-              {wallet.address && <p className="truncate font-mono">{short(wallet.address)}</p>}
-
-              {wallet.accountId && wallet.authMode !== "seed" && (
-                <p className="truncate font-mono">{short(wallet.accountId)}</p>
-              )}
-            </div>
-          )}
         </aside>
 
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-auto bg-zinc-950">
           <Tabs
             value={view}
-            onValueChange={(value) => {
-              setView(value as View);
+            onValueChange={(v) => {
+              setView(v as View);
               setActiveFolder(ALL_FILES);
               setActiveFolderId("");
               clearSelection();
             }}
+            className="w-full"
           >
-            <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 px-6 pb-0 pt-4 backdrop-blur">
-              <TabsList className="bg-zinc-900">
+            <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-6 py-2">
+              <TabsList className="bg-zinc-950">
                 <TabsTrigger value="personal">My Drive</TabsTrigger>
                 <TabsTrigger value="company">Company Drive</TabsTrigger>
-                <TabsTrigger value="shared">Shared With Me</TabsTrigger>
-                <TabsTrigger value="admin">Admin Panel</TabsTrigger>
+                <TabsTrigger value="shared">Shared with me</TabsTrigger>
+                <TabsTrigger value="admin">Admin</TabsTrigger>
               </TabsList>
 
-              <div className="flex items-center gap-3 py-3">
-                <div className="relative max-w-sm flex-1">
-                  <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-500" />
-
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 size-4 text-zinc-500" />
                   <Input
-                    placeholder="Search files, folders, hash…"
+                    placeholder="Search files..."
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
-                    className="h-9 border-zinc-700 bg-zinc-900 pl-9 text-sm"
+                    className="h-9 w-64 border-zinc-800 bg-zinc-950 pl-9 text-sm"
                   />
                 </div>
 
-                {(view === "personal" || view === "company" || view === "admin") && (
-                  <>
-                    <Button onClick={upload} disabled={busy}>
-                      <Upload className="size-4" />
-                      Upload
-                    </Button>
+                <Button size="sm" onClick={upload} disabled={busy}>
+                  <Upload className="size-4" />
+                  Upload
+                </Button>
 
-                    <Button onClick={uploadFolder} disabled={busy} variant="outline">
-                      <FolderPlus className="size-4" />
-                      Upload Folder
-                    </Button>
-                  </>
-                )}
+                <Button variant="outline" size="sm" onClick={uploadFolder} disabled={busy}>
+                  <FolderPlus className="size-4" />
+                  Upload Folder
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between border-b border-zinc-900 bg-zinc-950/50 px-6 py-2">
+              <div className="flex items-center gap-2 text-sm text-zinc-400">
+                <FolderOpen className="size-4" />
+                <span>{activeFolder}</span>
+                <span className="mx-1">/</span>
+                <span>{visibleFiles.length} file(s)</span>
               </div>
 
               {view === "personal" && (
-                <div className="flex flex-wrap items-center gap-2 pb-3">
-                  <span className="text-xs text-zinc-500">
-                    {selectedItemIds.size} file(s) selected
-                  </span>
-
-                  <button onClick={selectAll} className="text-xs text-blue-400 hover:underline">
-                    Select visible
-                  </button>
-
+                <div className="flex items-center gap-3">
                   <button
+                    type="button"
+                    onClick={selectAll}
+                    className="text-xs text-zinc-500 hover:underline"
+                  >
+                    Select All
+                  </button>
+                  <button
+                    type="button"
                     onClick={clearSelection}
                     className="text-xs text-zinc-500 hover:underline"
                   >
