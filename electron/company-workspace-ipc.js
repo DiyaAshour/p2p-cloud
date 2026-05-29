@@ -177,6 +177,7 @@ function listAuditManifests() {
       workspaceId: workspace.workspaceId,
       name: workspace.name,
       auditEvents: Array.isArray(workspace.audit) ? workspace.audit.length : 0,
+      folders: Array.isArray(workspace.folders) ? workspace.folders.length : 0,
       updatedAt: workspace.updatedAt || workspace.createdAt || null,
       signatureValid: s.verifyWorkspace(workspace),
     })),
@@ -226,6 +227,15 @@ function installCompanyWorkspaceIpc() {
 
   try { ipcMain.removeHandler('company:updateFile'); } catch {}
   ipcMain.handle('company:updateFile', async (_event, payload = {}) => companyStore().updateFile(payload));
+
+  try { ipcMain.removeHandler('company:createFolder'); } catch {}
+  ipcMain.handle('company:createFolder', async (_event, payload = {}) => companyStore().createFolder(payload));
+
+  try { ipcMain.removeHandler('company:updateFolder'); } catch {}
+  ipcMain.handle('company:updateFolder', async (_event, payload = {}) => companyStore().updateFolder(payload));
+
+  try { ipcMain.removeHandler('company:deleteFolder'); } catch {}
+  ipcMain.handle('company:deleteFolder', async (_event, payload = {}) => companyStore().deleteFolder(payload));
 
   installAuditIpc();
 
