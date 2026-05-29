@@ -2889,54 +2889,116 @@ const failed = results.filter((result) => result.status === "rejected");
             </TabsContent>
 
             <TabsContent value="admin" className="space-y-6 p-6">
-              {/* ─── UPDATED: Move Workspace Creation to Admin ───────────────── */}
-              {canManage(localRole) || !activeWorkspace ? (
+              {activeWorkspace ? (
                 <Card className="border-zinc-800 bg-zinc-900">
                   <CardHeader>
-                    <CardTitle className="text-sm">Create Company Workspace</CardTitle>
+                    <CardTitle className="flex items-center justify-between gap-2 text-sm">
+                      <span className="flex items-center gap-2">
+                        <Building2 className="size-4" />
+                        Workspace Actions
+                      </span>
+
+                      <Badge variant="outline" className="text-xs">
+                        Current: {activeWorkspace.name}
+                      </Badge>
+                    </CardTitle>
                   </CardHeader>
-                  <CardContent className="flex gap-2">
-                    <Input
-                      placeholder="Company name"
-                      value={workspaceNameInput}
-                      onChange={(event) => setWorkspaceNameInput(event.target.value)}
-                      className="border-zinc-700 bg-zinc-950"
-                    />
-                    <Button onClick={createWorkspace} disabled={busy}>
-                      <Building2 className="size-4" />
-                      Create
-                    </Button>
+
+                  <CardContent className="grid gap-3 md:grid-cols-2">
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="New workspace name"
+                        value={workspaceNameInput}
+                        onChange={(event) => setWorkspaceNameInput(event.target.value)}
+                        className="border-zinc-700 bg-zinc-950"
+                      />
+
+                      <Button
+                        onClick={createWorkspace}
+                        disabled={busy || !workspaceNameInput.trim()}
+                      >
+                        <Building2 className="size-4" />
+                        Create New
+                      </Button>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <Input
+                        value={joinInviteToken}
+                        onChange={(event) => setJoinInviteToken(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && joinInviteToken.trim() && !busy) {
+                            joinWorkspace();
+                          }
+                        }}
+                        placeholder="Invite token to join another workspace"
+                        className="border-zinc-700 bg-zinc-950"
+                      />
+
+                      <Button
+                        variant="outline"
+                        onClick={joinWorkspace}
+                        disabled={busy || !joinInviteToken.trim()}
+                      >
+                        Join Another
+                      </Button>
+                    </div>
                   </CardContent>
                 </Card>
-              ) : null}
+              ) : (
+                <>
+                  <Card className="border-zinc-800 bg-zinc-900">
+                    <CardHeader>
+                      <CardTitle className="text-sm">Create Company Workspace</CardTitle>
+                    </CardHeader>
 
-              {/* ─── UPDATED: Add Join Company Placeholder ───────────────────── */}
-              <Card className="border-zinc-800 bg-zinc-900">
-                <CardHeader>
-                  <CardTitle className="text-sm">Join Company Workspace</CardTitle>
-                </CardHeader>
-                <CardContent className="flex gap-2">
-<Input
-  value={joinInviteToken}
-  onChange={(event) => setJoinInviteToken(event.target.value)}
-  onKeyDown={(event) => {
-    if (event.key === "Enter" && joinInviteToken.trim() && !busy) {
-      joinWorkspace();
-    }
-  }}
-  placeholder="Paste company invite token"
-  className="border-zinc-700 bg-zinc-950"
-/>
+                    <CardContent className="flex gap-2">
+                      <Input
+                        placeholder="Company name"
+                        value={workspaceNameInput}
+                        onChange={(event) => setWorkspaceNameInput(event.target.value)}
+                        className="border-zinc-700 bg-zinc-950"
+                      />
 
-<Button
-  variant="outline"
-  onClick={joinWorkspace}
-  disabled={busy || !joinInviteToken.trim()}
->
-  Join
-</Button>
-                </CardContent>
-              </Card>
+                      <Button
+                        onClick={createWorkspace}
+                        disabled={busy || !workspaceNameInput.trim()}
+                      >
+                        <Building2 className="size-4" />
+                        Create
+                      </Button>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-zinc-800 bg-zinc-900">
+                    <CardHeader>
+                      <CardTitle className="text-sm">Join Company Workspace</CardTitle>
+                    </CardHeader>
+
+                    <CardContent className="flex gap-2">
+                      <Input
+                        value={joinInviteToken}
+                        onChange={(event) => setJoinInviteToken(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && joinInviteToken.trim() && !busy) {
+                            joinWorkspace();
+                          }
+                        }}
+                        placeholder="Paste company invite token"
+                        className="border-zinc-700 bg-zinc-950"
+                      />
+
+                      <Button
+                        variant="outline"
+                        onClick={joinWorkspace}
+                        disabled={busy || !joinInviteToken.trim()}
+                      >
+                        Join
+                      </Button>
+                    </CardContent>
+                  </Card>
+                </>
+              )}
 
               {activeWorkspace && (
                 <>
@@ -2950,7 +3012,12 @@ const failed = results.filter((result) => result.status === "rejected");
                             : "outline"
                         }
                         size="sm"
-                        onClick={() => setActiveWorkspaceId(workspace.workspaceId)}
+                        onClick={() => {
+  setActiveWorkspaceId(workspace.workspaceId);
+  setActiveFolder(ALL_FILES);
+  setActiveFolderId("");
+  clearSelection();
+}}
                       >
                         <Building2 className="size-4" />
                         {workspace.name}
