@@ -8,6 +8,10 @@ import { app, ipcMain } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const PASSIVE_APPLY_MIN_INTERVAL_MS = Number(process.env.P2P_TOMBSTONE_PASSIVE_APPLY_MIN_INTERVAL_MS || 15000);
+let lastPassiveApplyAt = 0;
+let lastLoggedResultKey = '';
+
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
 function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
 function tombstonesPath() { return path.join(dataDir(), 'delete-tombstones.json'); }
@@ -78,7 +82,22 @@ function mergeTombstones(incoming = []) {
   return next;
 }
 
-export function applyIncomingTombstones(remoteManifests = []) {
+function resultKey(result = {}) {
+  return [result.tombstones, result.applied, result.removedManifests, result.chunksDeleted].join(':');
+}
+
+function logApplyResult(result, { forceLog = false } = {}) {
+  const changed = Boolean(result.applied || result.removedManifests || result.chunksDeleted);
+  if (!changed) return;
+
+  const key = resultKey(result);
+  if (!forceLog && key === lastLoggedResultKey) return;
+
+  lastLoggedResultKey = key;
+  console.log('[tombstone-sync] applied', result);
+}
+
+export function applyIncomingTombstones(remoteManifests = [], options = {}) {
   const incoming = (Array.isArray(remoteManifests) ? remoteManifests : []).filter(isDeleteTombstone);
   const allTombstones = mergeTombstones([...manifests().filter(isDeleteTombstone), ...incoming]);
   const before = manifests();
@@ -100,8 +119,18 @@ export function applyIncomingTombstones(remoteManifests = []) {
   if (after.length !== before.length) saveManifests(after);
 
   const result = { ok: true, tombstones: allTombstones.length, applied: incoming.length, removedManifests: before.length - after.length, chunksDeleted: deletedChunks };
-  if (result.applied || result.removedManifests || result.chunksDeleted) console.log('[tombstone-sync] applied', result);
+  logApplyResult(result, options);
   return result;
+}
+
+function applyIncomingTombstonesPassive() {
+  const nowMs = Date.now();
+  if (nowMs - lastPassiveApplyAt < PASSIVE_APPLY_MIN_INTERVAL_MS) {
+    return { ok: true, skipped: true, reason: 'throttled' };
+  }
+
+  lastPassiveApplyAt = nowMs;
+  return applyIncomingTombstones([], { forceLog: false });
 }
 
 export function broadcastLocalTombstonesToPeer(peerId) {
@@ -123,7 +152,7 @@ export function broadcastLocalTombstonesToPeer(peerId) {
 export function handleIncomingTombstoneMessage(message = {}) {
   const tombstone = message?.payload;
   if (!isDeleteTombstone(tombstone)) return { ok: false, skipped: true };
-  return applyIncomingTombstones([tombstone]);
+  return applyIncomingTombstones([tombstone], { forceLog: true });
 }
 
 function installListFilesFilter() {
@@ -131,7 +160,7 @@ function installListFilesFilter() {
   if (!oldHandler) return false;
   try { ipcMain.removeHandler('p2p:listFiles'); } catch {}
   ipcMain.handle('p2p:listFiles', async (event, payload = {}) => {
-    applyIncomingTombstones([]);
+    applyIncomingTombstonesPassive();
     const result = await oldHandler(event, payload);
     const list = Array.isArray(result) ? result : [];
     return list.filter((item) => !isDeleteTombstone(item) && !isUiPrefs(item) && item?.hash && item?.totalChunks > 0);
@@ -141,18 +170,21 @@ function installListFilesFilter() {
 }
 
 try { ipcMain.removeHandler('p2p:applyDeleteTombstones'); } catch {}
-ipcMain.handle('p2p:applyDeleteTombstones', async (_event, remoteManifests = []) => applyIncomingTombstones(Array.isArray(remoteManifests) ? remoteManifests : []));
+ipcMain.handle('p2p:applyDeleteTombstones', async (_event, remoteManifests = []) => applyIncomingTombstones(Array.isArray(remoteManifests) ? remoteManifests : [], { forceLog: true }));
 try { ipcMain.removeHandler('p2p:listTombstones'); } catch {}
 ipcMain.handle('p2p:listTombstones', () => tombstones());
 
 let installed = false;
 function install() {
-  applyIncomingTombstones([]);
+  applyIncomingTombstonesPassive();
   if (!installed) installed = installListFilesFilter();
 }
 install();
 setTimeout(install, 1000);
 setTimeout(install, 3000);
-setInterval(() => { try { applyIncomingTombstones([]); } catch (error) { console.warn('[tombstone-sync] periodic apply failed:', error?.message || error); } }, Number(process.env.P2P_TOMBSTONE_APPLY_INTERVAL_MS || 60000));
+setInterval(() => {
+  try { applyIncomingTombstonesPassive(); }
+  catch (error) { console.warn('[tombstone-sync] periodic apply failed:', error?.message || error); }
+}, Number(process.env.P2P_TOMBSTONE_APPLY_INTERVAL_MS || 60000));
 
 console.log('[tombstone-sync] delete tombstone sync installed');
