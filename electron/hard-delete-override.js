@@ -157,7 +157,25 @@ async function hardDeleteItem(payload = {}) {
   assertVerifiedIdentity(w);
 
   const item = findItem(payload);
-  if (!item) throw new Error(`Item not found. payload=${JSON.stringify(payload)}`);
+  if (!item) {
+    const ids = payloadIds(payload);
+    console.log('[hard-delete] item already missing; treating delete as success', { ids });
+    return {
+      ok: true,
+      hardDelete: true,
+      deleteMode: 'idempotent-already-deleted',
+      alreadyDeleted: true,
+      deleted: 0,
+      deletedFiles: 0,
+      movedFiles: 0,
+      removedIds: ids,
+      tombstone: null,
+      chunkHashes: [],
+      localDeleted: [],
+      peerErrors: [],
+      remoteCleanupScheduled: false,
+    };
+  }
 
   if (isFolderManifest(item)) {
     throw new Error('Hard delete override handles files only. Delete folders through folder delete flow.');
