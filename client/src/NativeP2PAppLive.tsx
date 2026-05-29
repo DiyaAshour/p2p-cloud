@@ -464,8 +464,9 @@ const [busy, setBusy] = useState(false);
   const [newFolder, setNewFolder] = useState("");
   const [workspaceNameInput, setWorkspaceNameInput] = useState("");
 
-  const [memberEmail, setMemberEmail] = useState("");
-  const [memberRole, setMemberRole] = useState<Role>("viewer");
+const [memberEmail, setMemberEmail] = useState("");
+const [memberRole, setMemberRole] = useState<Role>("viewer");
+const [joinInviteToken, setJoinInviteToken] = useState("");
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>(
     () => readJson(ACTIVE_WORKSPACE_KEY, "")
   );
@@ -903,7 +904,7 @@ const showCompanyFileInfo = (file: P2PFile) => {
     "Uploaded by: " + uploaderLabel(file, cf),
     "Uploaded at: " + date(cf?.uploadedAt || file.uploadedAt),
     "Size: " + bytes(file.size),
-    "Folder: " + (cf?.folder || file.folderName || file.folder || UNCATEGORIZED),
+    "Folder: " + (cf?.folderPath || cf?.folder || file.folderName || file.folder || UNCATEGORIZED),
     "Root hash: " + (cf?.rootHash || file.rootHash || file.hash),
     "Hash: " + (cf?.hash || file.hash || ""),
     "Total chunks: " + String(file.totalChunks || cf?.totalChunks || 0),
@@ -943,12 +944,21 @@ const showCompanyFileInfo = (file: P2PFile) => {
     const nextWallet = await api.invoke<WalletState>("wallet:status");
     setWallet(nextWallet);
 
-    const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
+    const [nextSummary, nextFiles, nextCompany] = await Promise.all([
       api.invoke<Summary>("p2p:networkSummary"),
       api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
       api.invoke<CompanyState>("company:state"),
-      api.invoke<DriveFolder[]>("p2p:listFolders"),
     ]);
+
+    let nextFolders: DriveFolder[] = [];
+
+    if (nextWallet?.connected) {
+      try {
+        nextFolders = await api.invoke<DriveFolder[]>("p2p:listFolders");
+      } catch {
+        nextFolders = [];
+      }
+    }
 
     setSummary(nextSummary);
     setFiles(Array.isArray(nextFiles) ? nextFiles : []);
@@ -956,16 +966,16 @@ const showCompanyFileInfo = (file: P2PFile) => {
     setManifestFolders(Array.isArray(nextFolders) ? nextFolders : []);
 
     try {
-  const audit = await api.invoke<{ events: AuditEvent[] }>("audit:list", {
-    workspaceId: activeWorkspaceId || nextCompany.workspaces?.[0]?.workspaceId || "",
-    limit: 200,
-  });
+      const audit = await api.invoke<{ events: AuditEvent[] }>("audit:list", {
+        workspaceId: activeWorkspaceId || nextCompany.workspaces?.[0]?.workspaceId || "",
+        limit: 200,
+      });
 
-  setAuditEvents(Array.isArray(audit.events) ? audit.events : []);
-} catch {
-  setAuditEvents([]);
-}
-    
+      setAuditEvents(Array.isArray(audit.events) ? audit.events : []);
+    } catch {
+      setAuditEvents([]);
+    }
+
     if (!activeWorkspaceId && nextCompany.workspaces?.[0]?.workspaceId) {
       setActiveWorkspaceId(nextCompany.workspaces[0].workspaceId);
     }
@@ -1217,18 +1227,13 @@ const showCompanyFileInfo = (file: P2PFile) => {
       toast.success("Company workspace created and signed");
     });
 
-    const joinWorkspace = () =>
+  const joinWorkspace = () =>
     run(async () => {
-      const inviteToken = (
-        await askText({
-          title: "Join Company Workspace",
-          message: "Paste the company invite token",
-          placeholder: "chunknet://invite/...",
-          confirmText: "Join",
-        })
-      )?.trim();
+      const inviteToken = joinInviteToken.trim();
 
-      if (!inviteToken) return;
+      if (!inviteToken) {
+        throw new Error("Paste company invite token first");
+      }
 
       const result = await api.invoke<{ ok: boolean; workspace: Workspace }>(
         "company:joinWorkspace",
@@ -1239,6 +1244,7 @@ const showCompanyFileInfo = (file: P2PFile) => {
       );
 
       setActiveWorkspaceId(result.workspace.workspaceId);
+      setJoinInviteToken("");
       setView("admin");
       await refresh();
 
@@ -2910,14 +2916,22 @@ const failed = results.filter((result) => result.status === "rejected");
                   <CardTitle className="text-sm">Join Company Workspace</CardTitle>
                 </CardHeader>
                 <CardContent className="flex gap-2">
-                  <Input
-                    placeholder="Paste company invite token"
-                    className="border-zinc-700 bg-zinc-950"
-                  />
-                  <Button
+<Input
+  value={joinInviteToken}
+  onChange={(event) => setJoinInviteToken(event.target.value)}
+  onKeyDown={(event) => {
+    if (event.key === "Enter" && joinInviteToken.trim() && !busy) {
+      joinWorkspace();
+    }
+  }}
+  placeholder="Paste company invite token"
+  className="border-zinc-700 bg-zinc-950"
+/>
+
+<Button
   variant="outline"
   onClick={joinWorkspace}
-  disabled={busy}
+  disabled={busy || !joinInviteToken.trim()}
 >
   Join
 </Button>
