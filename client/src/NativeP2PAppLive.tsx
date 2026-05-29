@@ -499,6 +499,13 @@ const [busy, setBusy] = useState(false);
   const activeWorkspace =
     workspaces.find((w) => w.workspaceId === activeWorkspaceId) || workspaces[0] || null;
 
+  // ─── UPDATED: Save activeWorkspaceId to localStorage ────────────────────────
+  useEffect(() => {
+    if (!activeWorkspace?.workspaceId) return;
+
+    localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(activeWorkspace.workspaceId));
+  }, [activeWorkspace?.workspaceId]);
+
   const deviceId = company?.deviceIdentity?.deviceId || "";
   const localMember = activeWorkspace?.members?.find((m) => m.deviceId === deviceId) || null;
   const localRole = localMember?.role || null;
@@ -773,7 +780,6 @@ const personalFiles = useMemo(
       return String(a.rootHash || a.hash || "").localeCompare(String(b.rootHash || b.hash || ""));
     });
   }, [
-    
     baseFiles,
     search,
     activeFolder,
@@ -936,21 +942,12 @@ const showCompanyFileInfo = (file: P2PFile) => {
     const nextWallet = await api.invoke<WalletState>("wallet:status");
     setWallet(nextWallet);
 
-    const [nextSummary, nextFiles, nextCompany] = await Promise.all([
+    const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
       api.invoke<Summary>("p2p:networkSummary"),
       api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
       api.invoke<CompanyState>("company:state"),
+      api.invoke<DriveFolder[]>("p2p:listFolders"),
     ]);
-
-    let nextFolders: DriveFolder[] = [];
-
-    if (nextWallet?.connected) {
-      try {
-        nextFolders = await api.invoke<DriveFolder[]>("p2p:listFolders");
-      } catch {
-        nextFolders = [];
-      }
-    }
 
     setSummary(nextSummary);
     setFiles(Array.isArray(nextFiles) ? nextFiles : []);
@@ -1213,7 +1210,8 @@ const showCompanyFileInfo = (file: P2PFile) => {
 
       setActiveWorkspaceId(ws.workspaceId);
       setWorkspaceNameInput("");
-      setView("company");
+      // ─── UPDATED: switch to admin view after create ────────────────────────
+      setView("admin");
       await refresh();
       toast.success("Company workspace created and signed");
     });
@@ -1746,7 +1744,7 @@ Type DELETE → delete files too`,
 
       await refresh();
     });
-// ─── UPDATED: remove — optimistic UI + pause repair during delete ───────────
+
 const remove = (file: P2PFile) =>
   run(async () => {
     const match = companyFileByKey.get(keyFor(file)) || companyFileByKey.get(file.hash);
@@ -1864,7 +1862,7 @@ const movePersonalFileTo = async (file: P2PFile, targetFolderId: string) => {
     targetFolderId,
   });
 };
-  // ─── UPDATED: bulkDelete — optimistic UI + parallel delete ────────────────
+
   const bulkDelete = () =>
     run(async () => {
       if (selectedItemIds.size === 0) return;
@@ -2713,7 +2711,8 @@ const failed = results.filter((result) => result.status === "rejected");
                 <TabsTrigger value="personal">My Drive</TabsTrigger>
                 <TabsTrigger value="company">Company Drive</TabsTrigger>
                 <TabsTrigger value="shared">Shared with me</TabsTrigger>
-                <TabsTrigger value="admin">Admin</TabsTrigger>
+                {/* ─── UPDATED: tab label ──────────────────────────────────────── */}
+                <TabsTrigger value="admin">Company Control Panel</TabsTrigger>
               </TabsList>
 
               <div className="flex items-center gap-3">
@@ -2822,68 +2821,14 @@ const failed = results.filter((result) => result.status === "rejected");
               )}
             </TabsContent>
 
+            {/* ─── UPDATED: Company Drive view logic ─────────────────────────── */}
             <TabsContent value="company" className="space-y-6 p-6">
-              {workspaces.length > 1 && (
-                <div className="flex flex-wrap gap-2">
-                  {workspaces.map((workspace) => (
-                    <Button
-                      key={workspace.workspaceId}
-                      variant={
-                        activeWorkspace?.workspaceId === workspace.workspaceId
-                          ? "default"
-                          : "outline"
-                      }
-                      size="sm"
-                      onClick={() => setActiveWorkspaceId(workspace.workspaceId)}
-                    >
-                      <Building2 className="size-4" />
-                      {workspace.name}
-                      {workspace.signatureValid === false && (
-                        <Badge variant="destructive" className="ml-1 text-xs">
-                          !
-                        </Badge>
-                      )}
-                    </Button>
-                  ))}
+              {!activeWorkspace ? (
+                <div className="flex flex-col items-center gap-3 py-16 text-zinc-600">
+                  <Building2 className="size-12" />
+                  <p>No company workspace. Create or join one from Company Control Panel.</p>
                 </div>
-              )}
-
-              {canManage(localRole) || !activeWorkspace ? (
-                <Card className="border-zinc-800 bg-zinc-900">
-                  <CardHeader>
-                    <CardTitle className="text-sm">Create Company Workspace</CardTitle>
-                  </CardHeader>
-                  <CardContent className="flex gap-2">
-                    <Input
-                      placeholder="Company name"
-                      value={workspaceNameInput}
-                      onChange={(event) => setWorkspaceNameInput(event.target.value)}
-                      className="border-zinc-700 bg-zinc-950"
-                    />
-                    <Button onClick={createWorkspace} disabled={busy}>
-                      <Building2 className="size-4" />
-                      Create
-                    </Button>
-                  </CardContent>
-                </Card>
-              ) : null}
-
-              {activeWorkspace && (
-                <div className="flex gap-4 text-sm text-zinc-400">
-                  <span>{companyFiles.length} files</span>
-                  <span>{bytes(companyBytes)} used</span>
-                  <span>
-                    {companyFiles.filter((file) => file.replicationStatus === "protected").length}{" "}
-                    protected
-                  </span>
-                  <span>
-                    {companyFiles.filter((file) => file.replicationStatus === "needs-repair").length}{" "}
-                    need repair
-                  </span>
-                </div>
-              )}
-
-              {visibleFiles.length > 0 ? (
+              ) : visibleFiles.length > 0 || companyFolders.length > 0 ? (
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {visibleFiles.map((file) => renderFileCard(file))}
                 </div>
@@ -2909,10 +2854,72 @@ const failed = results.filter((result) => result.status === "rejected");
             </TabsContent>
 
             <TabsContent value="admin" className="space-y-6 p-6">
-              {!activeWorkspace ? (
-                <p className="text-zinc-500">No company workspace. Create one from the Company tab.</p>
-              ) : (
+              {/* ─── UPDATED: Move Workspace Creation to Admin ───────────────── */}
+              {canManage(localRole) || !activeWorkspace ? (
+                <Card className="border-zinc-800 bg-zinc-900">
+                  <CardHeader>
+                    <CardTitle className="text-sm">Create Company Workspace</CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex gap-2">
+                    <Input
+                      placeholder="Company name"
+                      value={workspaceNameInput}
+                      onChange={(event) => setWorkspaceNameInput(event.target.value)}
+                      className="border-zinc-700 bg-zinc-950"
+                    />
+                    <Button onClick={createWorkspace} disabled={busy}>
+                      <Building2 className="size-4" />
+                      Create
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {/* ─── UPDATED: Add Join Company Placeholder ───────────────────── */}
+              <Card className="border-zinc-800 bg-zinc-900">
+                <CardHeader>
+                  <CardTitle className="text-sm">Join Company Workspace</CardTitle>
+                </CardHeader>
+                <CardContent className="flex gap-2">
+                  <Input
+                    placeholder="Paste company invite token"
+                    className="border-zinc-700 bg-zinc-950"
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => toast.error("Join company invite backend is not wired yet")}
+                    disabled={busy}
+                  >
+                    Join
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {activeWorkspace && (
                 <>
+                  <div className="flex flex-wrap gap-2">
+                    {workspaces.map((workspace) => (
+                      <Button
+                        key={workspace.workspaceId}
+                        variant={
+                          activeWorkspace?.workspaceId === workspace.workspaceId
+                            ? "default"
+                            : "outline"
+                        }
+                        size="sm"
+                        onClick={() => setActiveWorkspaceId(workspace.workspaceId)}
+                      >
+                        <Building2 className="size-4" />
+                        {workspace.name}
+                        {workspace.signatureValid === false && (
+                          <Badge variant="destructive" className="ml-1 text-xs">
+                            !
+                          </Badge>
+                        )}
+                      </Button>
+                    ))}
+                  </div>
+
                   <Card className="border-zinc-800 bg-zinc-900">
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-sm">
@@ -3026,66 +3033,53 @@ const failed = results.filter((result) => result.status === "rejected");
                     </Card>
                   )}
 
-                  <div>
+                  <Card className="border-zinc-800 bg-zinc-900">
+                    <CardHeader>
+                      <CardTitle className="flex items-center justify-between gap-2 text-sm">
+                        <span className="flex items-center gap-2">
+                          <ShieldCheck className="size-4" />
+                          Company Drive Audit Log
+                        </span>
 
-                    <Card className="border-zinc-800 bg-zinc-900">
-  <CardHeader>
-    <CardTitle className="flex items-center justify-between gap-2 text-sm">
-      <span className="flex items-center gap-2">
-        <ShieldCheck className="size-4" />
-        Company Drive Audit Log
-      </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void refreshAudit(activeWorkspace.workspaceId)}
+                          disabled={busy}
+                        >
+                          <RefreshCw className="size-3" />
+                          Refresh
+                        </Button>
+                      </CardTitle>
+                    </CardHeader>
 
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={() => void refreshAudit(activeWorkspace.workspaceId)}
-        disabled={busy}
-      >
-        <RefreshCw className="size-3" />
-        Refresh
-      </Button>
-    </CardTitle>
-  </CardHeader>
+                    <CardContent className="space-y-2">
+                      {auditEvents.length === 0 ? (
+                        <p className="text-sm text-zinc-500">No audit events yet.</p>
+                      ) : (
+                        <div className="max-h-80 space-y-2 overflow-auto pr-1">
+                          {auditEvents.map((event) => (
+                            <div key={event.auditId} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-sm font-medium text-zinc-100">{event.action}</p>
+                                <p className="text-xs text-zinc-500">{date(event.at)}</p>
+                              </div>
 
-  <CardContent className="space-y-2">
-    {auditEvents.length === 0 ? (
-      <p className="text-sm text-zinc-500">No audit events yet.</p>
-    ) : (
-      <div className="max-h-80 space-y-2 overflow-auto pr-1">
-        {auditEvents.map((event) => (
-          <div key={event.auditId} className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-sm font-medium text-zinc-100">{event.action}</p>
-              <p className="text-xs text-zinc-500">{date(event.at)}</p>
-            </div>
+                              <p className="mt-1 text-xs text-zinc-400">
+                                Actor: <span className="font-mono">{short(event.actor || "")}</span>
+                              </p>
 
-            <p className="mt-1 text-xs text-zinc-400">
-              Actor: <span className="font-mono">{short(event.actor || "")}</span>
-            </p>
-
-            {event.details && (
-              <pre className="mt-2 max-h-24 overflow-auto rounded bg-zinc-900 p-2 text-[11px] text-zinc-400">
-                {JSON.stringify(event.details, null, 2)}
-              </pre>
-            )}
-          </div>
-        ))}
-      </div>
-    )}
-  </CardContent>
-</Card>
-                    
-                    <p className="mb-3 text-sm font-semibold">Company Files ({companyFiles.length})</p>
-
-                    {visibleFiles.length > 0 ? (
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        {visibleFiles.map((file) => renderFileCard(file))}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-zinc-500">No files.</p>
-                    )}
-                  </div>
+                              {event.details && (
+                                <pre className="mt-2 max-h-24 overflow-auto rounded bg-zinc-900 p-2 text-[11px] text-zinc-400">
+                                  {JSON.stringify(event.details, null, 2)}
+                                </pre>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
                 </>
               )}
             </TabsContent>
