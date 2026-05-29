@@ -936,12 +936,21 @@ const showCompanyFileInfo = (file: P2PFile) => {
     const nextWallet = await api.invoke<WalletState>("wallet:status");
     setWallet(nextWallet);
 
-    const [nextSummary, nextFiles, nextCompany, nextFolders] = await Promise.all([
+    const [nextSummary, nextFiles, nextCompany] = await Promise.all([
       api.invoke<Summary>("p2p:networkSummary"),
       api.invoke<P2PFile[]>("p2p:listFiles", { query: search }),
       api.invoke<CompanyState>("company:state"),
-      api.invoke<DriveFolder[]>("p2p:listFolders"),
     ]);
+
+    let nextFolders: DriveFolder[] = [];
+
+    if (nextWallet?.connected) {
+      try {
+        nextFolders = await api.invoke<DriveFolder[]>("p2p:listFolders");
+      } catch {
+        nextFolders = [];
+      }
+    }
 
     setSummary(nextSummary);
     setFiles(Array.isArray(nextFiles) ? nextFiles : []);
