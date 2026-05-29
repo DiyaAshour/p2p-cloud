@@ -66,6 +66,7 @@ type Channel =
   | "company:deviceIdentity"
   | "company:createWorkspace"
   | "company:inviteMember"
+  | "company:joinWorkspace"
   | "company:changeMemberRole"
   | "company:removeMember"
   | "company:addFile"
@@ -1216,6 +1217,34 @@ const showCompanyFileInfo = (file: P2PFile) => {
       toast.success("Company workspace created and signed");
     });
 
+    const joinWorkspace = () =>
+    run(async () => {
+      const inviteToken = (
+        await askText({
+          title: "Join Company Workspace",
+          message: "Paste the company invite token",
+          placeholder: "chunknet://invite/...",
+          confirmText: "Join",
+        })
+      )?.trim();
+
+      if (!inviteToken) return;
+
+      const result = await api.invoke<{ ok: boolean; workspace: Workspace }>(
+        "company:joinWorkspace",
+        {
+          inviteToken,
+          displayName: wallet?.username || identityLabel,
+        }
+      );
+
+      setActiveWorkspaceId(result.workspace.workspaceId);
+      setView("admin");
+      await refresh();
+
+      toast.success(`Joined ${result.workspace.name}`);
+    });
+  
   const inviteMember = () =>
     run(async () => {
       if (!activeWorkspace) throw new Error("Select a company first");
@@ -2886,12 +2915,12 @@ const failed = results.filter((result) => result.status === "rejected");
                     className="border-zinc-700 bg-zinc-950"
                   />
                   <Button
-                    variant="outline"
-                    onClick={() => toast.error("Join company invite backend is not wired yet")}
-                    disabled={busy}
-                  >
-                    Join
-                  </Button>
+  variant="outline"
+  onClick={joinWorkspace}
+  disabled={busy}
+>
+  Join
+</Button>
                 </CardContent>
               </Card>
 
