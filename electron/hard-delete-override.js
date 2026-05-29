@@ -16,6 +16,32 @@ function saveManifests(v)       { writeManifests(v); }
 function node()                 { return globalThis.__p2pTransportNode || globalThis.__p2pNode || globalThis.p2pTransportNode || globalThis.p2pNode || null; }
 function unique(values = [])    { return Array.from(new Set(values.filter(Boolean))); }
 
+function comparableIds(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+
+  const noFolderPrefix = raw.replace(/^folder:/i, '').trim();
+  const noHexPrefix = noFolderPrefix.replace(/^0x/i, '').trim();
+  const lower = noFolderPrefix.toLowerCase();
+  const lowerNoHex = noHexPrefix.toLowerCase();
+  const parts = raw.split(':').map((part) => part.trim()).filter(Boolean);
+
+  return unique([
+    raw,
+    noFolderPrefix,
+    noHexPrefix,
+    lower,
+    lowerNoHex,
+    ...parts,
+    ...parts.map((part) => part.replace(/^folder:/i, '').replace(/^0x/i, '').trim()),
+    ...parts.map((part) => part.toLowerCase()),
+  ]);
+}
+
+function expandIds(values = []) {
+  return unique(values.flatMap((value) => comparableIds(value)));
+}
+
 function isFolderManifest(item = {}) {
   return (
     item.kind === 'folder' ||
@@ -28,35 +54,38 @@ function isFolderManifest(item = {}) {
 function manifestIds(item = {}) {
   const hash     = String(item.hash     || '').trim();
   const rootHash = String(item.rootHash || '').trim();
-  return unique(
-    [item.id, item.itemId, item.fileId, item.folderId,
-     hash, rootHash,
-     hash.replace(/^folder:/, ''), rootHash.replace(/^folder:/, ''),
-     item.name]
-      .map((x) => String(x || '').trim())
-      .filter(Boolean)
-  );
+  return expandIds([
+    item.id,
+    item.itemId,
+    item.fileId,
+    item.folderId,
+    item.cid,
+    item.root,
+    hash,
+    rootHash,
+    hash.replace(/^folder:/, ''),
+    rootHash.replace(/^folder:/, ''),
+    item.name,
+  ]);
 }
 
 function payloadIds(payload = {}) {
-  return unique(
-    [payload.itemId, payload.id, payload.fileId, payload.folderId,
-     payload.hash, payload.rootHash, payload.name]
-      .map((x) => String(x || '').trim())
-      .filter(Boolean)
-  );
+  return expandIds([
+    payload.itemId,
+    payload.id,
+    payload.fileId,
+    payload.folderId,
+    payload.cid,
+    payload.root,
+    payload.hash,
+    payload.rootHash,
+    payload.name,
+  ]);
 }
 
 function matchesAnyId(item = {}, ids = []) {
-  const wanted = new Set(
-    ids.flatMap((id) => [
-      String(id || '').trim(),
-      String(id || '').replace(/^folder:/, '').trim(),
-    ]).filter(Boolean)
-  );
-  return manifestIds(item).some(
-    (id) => wanted.has(id) || wanted.has(String(id || '').replace(/^folder:/, '').trim())
-  );
+  const wanted = new Set(expandIds(ids));
+  return manifestIds(item).some((id) => wanted.has(id));
 }
 
 function walletOwns(item = {}, owner = identity()) {
@@ -75,11 +104,21 @@ function isDeleteTombstone(item = {}) {
 
 function findItem(payload = {}) {
   const owner = identity();
-  const ids   = payloadIds(payload);
-  return manifests()
-    .filter((m) => !isDeleteTombstone(m))   // never treat a tombstone as a live file
+  const ids = payloadIds(payload);
+  const live = manifests().filter((m) => !isDeleteTombstone(m));
+
+  const ownedMatch = live
     .filter((m) => walletOwns(m, owner))
-    .find((m)   => matchesAnyId(m, ids)) || null;
+    .find((m) => matchesAnyId(m, ids));
+
+  if (ownedMatch) return ownedMatch;
+
+  // Safety fallback for UI-visible legacy records whose owner field is missing or
+  // whose identifier is packed as wallet:hash / wallet:rootHash.
+  const anyMatch = live.find((m) => matchesAnyId(m, ids));
+  if (anyMatch && walletOwns(anyMatch, owner)) return anyMatch;
+
+  return null;
 }
 
 function chunkHashesOf(item = {}) {
@@ -88,6 +127,26 @@ function chunkHashesOf(item = {}) {
       .map((c) => String(c?.hash || '').trim().toLowerCase())
       .filter((h) => /^[a-f0-9]{64}$/.test(h))
   );
+}
+
+function deleteDiagnostics(payload = {}) {
+  const owner = identity();
+  const ids = payloadIds(payload);
+  const all = manifests();
+  const live = all.filter((m) => !isDeleteTombstone(m));
+  const matchingLive = live.filter((m) => matchesAnyId(m, ids));
+  const matchingTombstones = all.filter((m) => isDeleteTombstone(m) && matchesAnyId(m, ids));
+
+  return {
+    owner,
+    payloadIds: ids,
+    totalManifests: all.length,
+    liveManifests: live.length,
+    matchingLive: matchingLive.length,
+    matchingOwnedLive: matchingLive.filter((m) => walletOwns(m, owner)).length,
+    matchingTombstones: matchingTombstones.length,
+    firstLiveOwner: matchingLive[0]?.ownerWallet || matchingLive[0]?.owner || matchingLive[0]?.wallet || null,
+  };
 }
 
 // ─── Low-level chunk deletion ────────────────────────────────────────────────
@@ -158,17 +217,18 @@ async function hardDeleteItem(payload = {}) {
 
   const item = findItem(payload);
   if (!item) {
-    const ids = payloadIds(payload);
-    console.log('[hard-delete] item already missing; treating delete as success', { ids });
+    const diagnostics = deleteDiagnostics(payload);
+    console.log('[hard-delete] item not found in live manifests; treating delete as already applied', diagnostics);
     return {
       ok: true,
       hardDelete: true,
-      deleteMode: 'idempotent-already-deleted',
+      deleteMode: 'idempotent-already-deleted-or-stale-ui',
       alreadyDeleted: true,
       deleted: 0,
       deletedFiles: 0,
       movedFiles: 0,
-      removedIds: ids,
+      removedIds: diagnostics.payloadIds,
+      diagnostics,
       tombstone: null,
       chunkHashes: [],
       localDeleted: [],
