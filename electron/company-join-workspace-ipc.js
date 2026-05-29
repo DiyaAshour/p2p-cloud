@@ -152,7 +152,7 @@ async function joinWorkspace(payload = {}) {
         deviceId: identity.deviceId,
         displayName: payload.displayName || member.displayName || identity.displayName || 'Company Member',
         email: payload.email || member.email || identity.email || invite.email || '',
-        role: member.role && member.role !== 'owner' ? member.role : role,
+        role: member.role === 'owner' ? 'owner' : (member.role || role),
         status: 'active',
         publicKeyPem: identity.publicKeyPem,
         joinedAt: member.joinedAt || now(),
