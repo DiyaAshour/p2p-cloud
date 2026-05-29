@@ -55,6 +55,7 @@ const IPC_CHANNELS = Object.freeze([
   'company:createWorkspace',
   'company:deleteWorkspace',
   'company:inviteMember',
+  'company:joinWorkspace',
   'company:createJoinRequest',
   'company:approveJoinRequest',
   'company:exportWorkspaceAccess',
@@ -66,6 +67,9 @@ const IPC_CHANNELS = Object.freeze([
   'company:removeMember',
   'company:addFile',
   'company:updateFile',
+  'company:createFolder',
+  'company:updateFolder',
+  'company:deleteFolder',
 
   'audit:list',
   'audit:record',
