@@ -260,6 +260,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] network summary normalization import finished');
     await import('./company-workspace-ipc.js');
     console.log('[main-wrapper] company workspace IPC import finished');
+    await import('./company-join-workspace-ipc.js');
+    console.log('[main-wrapper] company portable join workspace IPC import finished');
     await import('./company-offline-invite-ipc.js');
     console.log('[main-wrapper] company offline invite IPC import finished');
     await import('./company-distributed-objects-ipc.js');
@@ -332,14 +334,12 @@ app.on('browser-window-created', (_event, win) => {
   });
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
-});
-
-if (gotSingleInstanceLock) {
-  console.log('[main-wrapper] scheduling runtime import after app ready');
-  app.whenReady().then(importMainWhenReady).catch((error) => {
-    console.error('[main-wrapper] app.whenReady failed:', error?.stack || error?.message || error);
-    createFallbackWindow(error?.message || 'app.whenReady failed');
-  });
+if (app.isReady()) {
+  configureNetworkRuntime();
+  setImmediate(importMainWhenReady);
+} else {
+  app.whenReady().then(importMainWhenReady);
 }
+
+app.on('activate', showMainWindow);
+app.on('before-quit', () => { isQuitting = true; });
