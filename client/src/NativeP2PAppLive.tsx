@@ -2675,7 +2675,7 @@ const failed = results.filter((result) => result.status === "rejected");
         />
 
         <span className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs text-emerald-300">
-          Encryption locked ON for all uploads
+          Always encrypted before upload
         </span>
       </div>
 
