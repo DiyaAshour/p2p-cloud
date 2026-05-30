@@ -26,22 +26,41 @@ const ignoredFiles = new Set([
 
 const secretPatterns = [
   {
-    name: 'WalletConnect project id assigned in committed file',
-    pattern: /VITE_WALLETCONNECT_PROJECT_ID\s*=\s*(?!$|replace-|your-|YOUR_|\s)([A-Za-z0-9_-]{16,})/i,
+    name: 'WalletConnect project id assigned in committed env file',
+    pattern: /^\s*VITE_WALLETCONNECT_PROJECT_ID\s*=\s*(?!$|replace-|your-|YOUR_|\s)([A-Za-z0-9_-]{16,})/im,
+    envOnly: true,
   },
   {
-    name: 'PayPal client secret assigned in committed file',
-    pattern: /PAYPAL_CLIENT_SECRET\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/i,
+    name: 'PayPal client secret assigned in committed env file',
+    pattern: /^\s*PAYPAL_CLIENT_SECRET\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/im,
+    envOnly: true,
   },
   {
-    name: 'Manifest sync auth secret assigned in committed file',
-    pattern: /(?:P2P_)?MANIFEST_SYNC_AUTH_SECRET\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/i,
+    name: 'Manifest sync auth secret assigned in committed env file',
+    pattern: /^\s*(?:P2P_)?MANIFEST_SYNC_AUTH_SECRET\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/im,
+    envOnly: true,
+  },
+  {
+    name: 'Storage admin token assigned in committed env file',
+    pattern: /^\s*STORAGE_PEER_ADMIN_TOKEN\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/im,
+    envOnly: true,
+  },
+  {
+    name: 'Safety peer delete token assigned in committed env file',
+    pattern: /^\s*P2P_SAFETY_PEER_DELETE_TOKEN\s*=\s*(?!$|replace-|your-|YOUR_|\s)([^\s#]+)/im,
+    envOnly: true,
   },
   {
     name: 'Private key assigned in committed file',
     pattern: /(?:PRIVATE_KEY|WALLET_PRIVATE_KEY|DEPLOYER_PRIVATE_KEY)\s*=\s*(0x)?[a-f0-9]{64}/i,
+    envOnly: false,
   },
 ];
+
+function isEnvLikeFile(file) {
+  const base = path.basename(file);
+  return base === '.env' || base.startsWith('.env') || file.endsWith('.env') || file.endsWith('.env.example');
+}
 
 function walk(dir, files = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -65,7 +84,7 @@ function readText(relative) {
   const absolute = path.join(root, relative);
   const buffer = fs.readFileSync(absolute);
   if (buffer.includes(0)) return '';
-  return buffer.toString('utf8');
+  return buffer.toString('utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
 const failures = [];
@@ -73,10 +92,11 @@ const failures = [];
 for (const file of walk(root)) {
   const text = readText(file);
   if (!text) continue;
+  const envLike = isEnvLikeFile(file);
 
   if (file === '.env') {
     const unsafeEnv = text
-      .split(/\r?\n/)
+      .split(/\n/)
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith('#'));
     if (unsafeEnv.length > 0) {
@@ -85,6 +105,7 @@ for (const file of walk(root)) {
   }
 
   for (const rule of secretPatterns) {
+    if (rule.envOnly && !envLike) continue;
     if (rule.pattern.test(text)) failures.push({ file, issue: rule.name });
   }
 }
