@@ -38,7 +38,7 @@ for (const [needle, label] of [
   ['function normalizeRole', 'peer role validator'],
   ['function sanitizePeerMessage', 'peer registration sanitizer'],
   ['function publicPeer', 'public peer shape sanitizer'],
-  ['peer url must use ws:// or wss://', 'ws/wss protocol enforcement'],
+  ['Peer url must use ws:// or wss://', 'ws/wss protocol enforcement'],
   ['Peer url must not include credentials', 'credential-free URL enforcement'],
   ['Peer url must not include query or hash', 'query/hash URL rejection'],
   ['Peer url path is not allowed', 'path URL rejection'],
