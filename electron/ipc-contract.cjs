@@ -15,6 +15,11 @@ const IPC_CHANNELS = Object.freeze([
   'p2p:renameFolder',
   'p2p:moveFolder',
 
+  // Legacy upload/download channels kept for older renderer screens.
+  // New large-file paths should use p2p:uploadFiles / p2p:uploadPath / p2p:downloadToPath.
+  'p2p:upload',
+  'p2p:download',
+
   'p2p:uploadFiles',
   'p2p:uploadFolder',
   'p2p:uploadPath',
