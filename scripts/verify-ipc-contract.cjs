@@ -5,9 +5,27 @@ const { IPC_CHANNELS } = require('../electron/ipc-contract.cjs');
 const root = process.cwd();
 const ignoredDirs = new Set(['.git', 'node_modules', '.pnpm-store', 'dist', 'release', 'coverage']);
 const sourceDirs = ['electron', 'client/src'];
-const channelPattern = /['"]([a-z][a-z0-9-]*:[a-zA-Z0-9-]+)['"]/g;
-const knownNonIpcPrefixes = new Set(['http:', 'https:', 'ws:', 'wss:', 'file:', 'data:']);
+const channelCapture = String.raw`([a-z][a-z0-9-]*:[a-zA-Z0-9-]+)`;
 const contractSet = new Set(IPC_CHANNELS);
+
+const ipcUsagePatterns = [
+  {
+    label: 'ipcMain channel registration',
+    re: new RegExp(String.raw`\bipcMain\s*\.\s*(?:handle|handleOnce|on|once|removeHandler|removeAllListeners)\s*\(\s*['"]${channelCapture}['"]`, 'g'),
+  },
+  {
+    label: 'ipcRenderer channel usage',
+    re: new RegExp(String.raw`\bipcRenderer\s*\.\s*(?:invoke|send|on|once|removeListener|removeAllListeners)\s*\(\s*['"]${channelCapture}['"]`, 'g'),
+  },
+  {
+    label: 'renderer bridge invoke',
+    re: new RegExp(String.raw`\b(?:api|bridge|electron|window\.electron)\s*\.\s*invoke(?:\s*<[^>]+>)?\s*\(\s*['"]${channelCapture}['"]`, 'g'),
+  },
+  {
+    label: 'allowed channel list entry',
+    re: new RegExp(String.raw`\b(?:allowedChannels|IPC_CHANNELS|RETRYABLE_IPC_PREFIXES)\b[\s\S]{0,400}?['"]${channelCapture}['"]`, 'g'),
+  },
+];
 
 function walk(dir, files = []) {
   if (!fs.existsSync(dir)) return files;
@@ -32,13 +50,14 @@ for (const sourceDir of sourceDirs) {
     const relative = path.relative(root, file).replace(/\\/g, '/');
     if (relative === 'electron/ipc-contract.cjs') continue;
     const text = fs.readFileSync(file, 'utf8');
-    for (const match of text.matchAll(channelPattern)) {
-      const channel = match[1];
-      const prefix = channel.split(':')[0] + ':';
-      if (knownNonIpcPrefixes.has(prefix)) continue;
-      if (!discovered.has(channel)) discovered.set(channel, new Set());
-      discovered.get(channel).add(relative);
-      if (!contractSet.has(channel)) failures.push(`${relative}: IPC-like channel is not in electron/ipc-contract.cjs -> ${channel}`);
+    for (const usage of ipcUsagePatterns) {
+      usage.re.lastIndex = 0;
+      for (const match of text.matchAll(usage.re)) {
+        const channel = match[1];
+        if (!discovered.has(channel)) discovered.set(channel, new Set());
+        discovered.get(channel).add(`${relative} (${usage.label})`);
+        if (!contractSet.has(channel)) failures.push(`${relative}: IPC channel is not in electron/ipc-contract.cjs -> ${channel}`);
+      }
     }
   }
 }
