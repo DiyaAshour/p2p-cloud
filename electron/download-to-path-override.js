@@ -11,7 +11,7 @@ import { readJson, readManifests } from './core/storage-json.js';
 import './hard-delete-override.js';
 
 function safeName(name = '') {
-  return String(name || 'download.bin').replace(/[\\/:*?"<>|]/g, '_');
+  return String(name || 'download.bin').replace(/[\/:*?"<>|]/g, '_');
 }
 
 function currentIdentity() {
@@ -44,11 +44,20 @@ function validateDrivePassword(drivePassword) {
   return password;
 }
 
-function deriveDriveKey({ ownerWallet, drivePassword, salt }) {
+function pbkdf2Async(password, saltBuffer, iterations, keylen, digest) {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, saltBuffer, iterations, keylen, digest, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+async function deriveDriveKey({ ownerWallet, drivePassword, salt }) {
   const identity = normalizeIdentity(ownerWallet);
   const password = validateDrivePassword(drivePassword);
   const saltBuffer = Buffer.from(String(salt || ''), 'base64');
-  return crypto.pbkdf2Sync(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
+  return pbkdf2Async(`${identity}:${password}`, saltBuffer, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function readLocalChunkBuffer(hash) {
@@ -108,7 +117,7 @@ async function decryptTempToFile(tempPath, finalPath, manifest, drivePassword) {
   if (enc.algorithm !== ENCRYPTION_ALGORITHM || !enc.salt || !enc.iv || !enc.authTag) {
     throw new Error('Encrypted file metadata is missing or unsupported');
   }
-  const key = deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: enc.salt });
+  const key = await deriveDriveKey({ ownerWallet: manifest.ownerWallet, drivePassword, salt: enc.salt });
   const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, Buffer.from(enc.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(enc.authTag, 'base64'));
   await pipeline(fs.createReadStream(tempPath), decipher, fs.createWriteStream(finalPath));
