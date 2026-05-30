@@ -35,17 +35,24 @@ const TEXT_EXTENSIONS = new Set([
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.yml', '.yaml', '.env', '.example', '.txt', '.sh', '.ps1', '.html', '.css', '.gitignore', ''
 ]);
 
-const suspiciousPatterns = [
-  { name: 'PayPal client secret literal', re: /PAYPAL_CLIENT_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{12,}/i },
-  { name: 'Plan unlock secret literal', re: /(?:P2P_)?PLAN_UNLOCK_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/i },
-  { name: 'Manifest auth secret literal', re: /(?:P2P_)?MANIFEST_SYNC_AUTH_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/i },
-  { name: 'Storage admin token literal', re: /STORAGE_PEER_ADMIN_TOKEN\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/i },
-  { name: 'Safety peer delete token literal', re: /P2P_SAFETY_PEER_DELETE_TOKEN\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/i },
+const directEnvSecretPatterns = [
+  { name: 'PayPal client secret literal', re: /^\s*PAYPAL_CLIENT_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{12,}/im },
+  { name: 'Plan unlock secret literal', re: /^\s*(?:P2P_)?PLAN_UNLOCK_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/im },
+  { name: 'Manifest auth secret literal', re: /^\s*(?:P2P_)?MANIFEST_SYNC_AUTH_SECRET\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/im },
+  { name: 'Storage admin token literal', re: /^\s*STORAGE_PEER_ADMIN_TOKEN\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/im },
+  { name: 'Safety peer delete token literal', re: /^\s*P2P_SAFETY_PEER_DELETE_TOKEN\s*=\s*(?!replace-with|your_|$)[^\s#]{16,}/im },
+];
+
+const sourceSecretPatterns = [
   { name: 'Private key material', re: /-----BEGIN (?:RSA |EC |OPENSSH |PRIVATE )?PRIVATE KEY-----/ },
   { name: 'GitHub token', re: /gh[pousr]_[A-Za-z0-9_]{30,}/ },
   { name: 'AWS access key id', re: /AKIA[0-9A-Z]{16}/ },
   { name: 'Generic hardcoded secret assignment', re: /(?:secret|token|password|private[_-]?key)\s*[:=]\s*['"][A-Za-z0-9_\-/.+=]{24,}['"]/i },
 ];
+
+function normalizeText(content = '') {
+  return String(content).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -64,8 +71,13 @@ function isTextCandidate(file) {
   return TEXT_EXTENSIONS.has(path.extname(file));
 }
 
+function isEnvLikeFile(file) {
+  const base = path.basename(file);
+  return base === '.env' || base.startsWith('.env') || file.endsWith('.env') || file.endsWith('.env.example');
+}
+
 function readFile(file) {
-  return fs.readFileSync(path.join(ROOT, file), 'utf8');
+  return normalizeText(fs.readFileSync(path.join(ROOT, file), 'utf8'));
 }
 
 const failures = [];
@@ -82,11 +94,15 @@ for (const file of walk(ROOT).filter(isTextCandidate)) {
     failures.push(`${file}: .env must stay sanitized; put real values only on your machine/server`);
   }
 
-  for (const pattern of suspiciousPatterns) {
-    if (file === '.env.example') continue;
-    if (pattern.re.test(content)) {
-      failures.push(`${file}: ${pattern.name}`);
+  if (file !== '.env.example' && isEnvLikeFile(file)) {
+    for (const pattern of directEnvSecretPatterns) {
+      if (pattern.re.test(content)) failures.push(`${file}: ${pattern.name}`);
     }
+  }
+
+  for (const pattern of sourceSecretPatterns) {
+    if (file === '.env.example') continue;
+    if (pattern.re.test(content)) failures.push(`${file}: ${pattern.name}`);
   }
 }
 
