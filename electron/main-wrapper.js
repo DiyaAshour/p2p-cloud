@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const APP_TITLE = 'Chunknet';
+const DEFAULT_GLOBAL_BOOTSTRAP_URL = 'ws://54.166.171.208:8788';
 const IS_DEV_WRAPPER = !app.isPackaged || Boolean(process.env.ELECTRON_RENDERER_URL);
 let tray = null;
 let isQuitting = false;
@@ -27,6 +28,8 @@ try {
     dirname: __dirname,
     rendererUrl: process.env.ELECTRON_RENDERER_URL || null,
     publicPeerUrl: process.env.P2P_PUBLIC_URL || null,
+    bootstrapUrl: process.env.P2P_BOOTSTRAP_URL || null,
+    globalDiscovery: globalThis.__chunknetGlobalDiscovery || null,
     chunkStoreDir: process.env.P2P_CHUNK_STORE_DIR || null,
     mainWindowExists: Boolean(globalThis.__p2pCloudMainWindow && !globalThis.__p2pCloudMainWindow.isDestroyed()),
   }));
@@ -97,6 +100,10 @@ function chooseLanAddress() {
 
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
+  if (!process.env.P2P_BOOTSTRAP_URL && String(process.env.P2P_GLOBAL_DISCOVERY_DISABLED || '').toLowerCase() !== 'true') {
+    process.env.P2P_BOOTSTRAP_URL = DEFAULT_GLOBAL_BOOTSTRAP_URL;
+    console.log('[runtime] selected global bootstrap URL:', process.env.P2P_BOOTSTRAP_URL);
+  }
   if (!process.env.P2P_CHUNK_SIZE_BYTES) process.env.P2P_CHUNK_SIZE_BYTES = String(2 * 1024 * 1024);
   if (!process.env.P2P_UPLOAD_CONCURRENCY) process.env.P2P_UPLOAD_CONCURRENCY = '4';
   if (!process.env.P2P_DOWNLOAD_CONCURRENCY) process.env.P2P_DOWNLOAD_CONCURRENCY = '6';
@@ -121,6 +128,8 @@ function configureNetworkRuntime() {
     autoRepairStartDelayMs: process.env.P2P_AUTO_REPAIR_START_DELAY_MS,
     protectionRetryIntervalMs: process.env.P2P_PROTECTION_RETRY_INTERVAL_MS,
     protectionRetryStartDelayMs: process.env.P2P_PROTECTION_RETRY_START_DELAY_MS,
+    bootstrapUrl: process.env.P2P_BOOTSTRAP_URL || null,
+    publicPeerUrl: process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || null,
   });
 }
 
@@ -258,6 +267,8 @@ async function importMainWhenReady() {
     console.log('[main-wrapper] list files normalization import finished');
     await import('./network-summary-normalize-ipc.js');
     console.log('[main-wrapper] network summary normalization import finished');
+    await import('./global-discovery.js');
+    console.log('[main-wrapper] global discovery import finished');
     await import('./company-workspace-ipc.js');
     console.log('[main-wrapper] company workspace IPC import finished');
     await import('./company-join-workspace-ipc.js');
@@ -276,7 +287,7 @@ async function importMainWhenReady() {
     await import('./folder-crud-ipc.js');
     console.log('[main-wrapper] folder CRUD IPC import finished');
     await import('./folder-tree-normalize-ipc.js');
-    console.log('[main-wrapper] folder tree normalization IPC import finished');
+    console.log('[main-wrapper] folder tree normalization import finished');
     await import('./ui-prefs-ipc.js');
     console.log('[main-wrapper] UI preferences IPC import finished');
     await import('./protected-upload-override.js');
