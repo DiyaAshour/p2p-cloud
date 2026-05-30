@@ -38,8 +38,17 @@ function password(value = '') {
   return p;
 }
 
-function driveKey({ ownerWallet, drivePassword, salt }) {
-  return crypto.pbkdf2Sync(`${normalizeIdentity(ownerWallet)}:${password(drivePassword)}`, salt, KDF_ITERATIONS, 32, 'sha256');
+function pbkdf2Async(passwordValue, salt, iterations, keylen, digest) {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(passwordValue, salt, iterations, keylen, digest, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+async function driveKey({ ownerWallet, drivePassword, salt }) {
+  return pbkdf2Async(`${normalizeIdentity(ownerWallet)}:${password(drivePassword)}`, salt, KDF_ITERATIONS, 32, 'sha256');
 }
 
 function folderById(id = '') {
@@ -195,7 +204,8 @@ async function uploadOne(filePath, payload = {}) {
   const privateFile = true;
   const salt = privateFile ? crypto.randomBytes(16) : null;
   const iv = privateFile ? crypto.randomBytes(12) : null;
-  const cipher = privateFile ? crypto.createCipheriv(ENCRYPTION_ALGORITHM, driveKey({ ownerWallet, drivePassword: payload.drivePassword, salt }), iv) : null;
+  const key = privateFile ? await driveKey({ ownerWallet, drivePassword: payload.drivePassword, salt }) : null;
+  const cipher = privateFile ? crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv) : null;
   const originalHasher = crypto.createHash('sha256');
   const storedHasher = crypto.createHash('sha256');
   const chunks = [];
