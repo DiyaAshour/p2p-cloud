@@ -67,7 +67,6 @@ assertMatches(
   failures,
 );
 
-// Open mutating routes are forbidden.
 assertMatches(
   server,
   /function\s+requireManifestAuth\s*\(/,
@@ -75,10 +74,28 @@ assertMatches(
   failures,
 );
 
-const openPostPattern = /app\.post\(\s*["']\/wallet\/:address\/manifests["']\s*,\s*(?!requireManifestAuth)/;
-if (openPostPattern.test(server)) failures.push('POST manifest route appears to be missing requireManifestAuth');
-const openDeletePattern = /app\.delete\(\s*["']\/wallet\/:address\/manifests\/:hash["']\s*,\s*(?!requireManifestAuth)/;
-if (openDeletePattern.test(server)) failures.push('DELETE manifest route appears to be missing requireManifestAuth');
+function routeHasAuth(method, routeLiteral) {
+  const escapedRoute = routeLiteral.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const protectedPattern = new RegExp(
+    `app\\.${method}\\(\\s*["']${escapedRoute}["']\\s*,\\s*requireManifestAuth\\s*,`,
+  );
+  return protectedPattern.test(server);
+}
+
+if (!routeHasAuth('post', '/wallet/:address/manifests')) {
+  failures.push('POST manifest route appears to be missing requireManifestAuth');
+}
+
+if (!routeHasAuth('delete', '/wallet/:address/manifests/:hash')) {
+  failures.push('DELETE manifest route appears to be missing requireManifestAuth');
+}
+
+// Explicitly forbid the simple open route shapes without relying on a backtracking-prone negative lookahead.
+const openPostPattern = /app\.post\(\s*["']\/wallet\/:address\/manifests["']\s*,\s*(?!requireManifestAuth\s*,)(?:async\s*)?\(?\s*(?:req|_req|request)/;
+if (openPostPattern.test(server)) failures.push('POST manifest route appears to be open');
+
+const openDeletePattern = /app\.delete\(\s*["']\/wallet\/:address\/manifests\/:hash["']\s*,\s*(?!requireManifestAuth\s*,)(?:async\s*)?\(?\s*(?:req|_req|request)/;
+if (openDeletePattern.test(server)) failures.push('DELETE manifest route appears to be open');
 
 // .env.example must document auth-on defaults.
 for (const [needle, label] of [
