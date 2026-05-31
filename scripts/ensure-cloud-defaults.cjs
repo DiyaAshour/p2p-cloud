@@ -16,10 +16,12 @@ if (source.includes(marker)) {
   process.exit(0);
 }
 
-const importNeedle = "import { P2PTransportNode } from './p2p-transport.js';\n";
-if (!source.includes(importNeedle)) {
-  throw new Error('Unexpected transport registry layout');
+const match = source.match(/^(?:import[^\n]*\n\s*)+/m);
+if (!match) {
+  throw new Error('Unexpected transport registry layout: no import block found');
 }
 
-fs.writeFileSync(file, source.replace(importNeedle, `${importNeedle}\n${block}`), 'utf8');
+const insertAt = match[0].length;
+const next = `${source.slice(0, insertAt)}\n${block}${source.slice(insertAt)}`;
+fs.writeFileSync(file, next, 'utf8');
 console.log('[ensure-cloud-defaults] injected zero-config cloud defaults');
