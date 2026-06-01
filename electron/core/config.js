@@ -36,11 +36,32 @@ export function quotaBytes(planId = 'free') {
 
 // ─── Chunking ─────────────────────────────────────────────────────────────────
 
-export const CHUNK_SIZE_BYTES = envNumber('P2P_CHUNK_SIZE_BYTES', 2 * 1024 * 1024);
+export const DEFAULT_CHUNK_SIZE_BYTES = envNumber('P2P_CHUNK_SIZE_BYTES', 2 * 1024 * 1024);
+export const CHUNK_SIZE_BYTES = DEFAULT_CHUNK_SIZE_BYTES;
+
+export const ADAPTIVE_CHUNKING_ENABLED = String(process.env.P2P_ADAPTIVE_CHUNKING ?? 'true').toLowerCase() !== 'false';
+export const CHUNK_SIZE_SMALL_BYTES = envNumber('P2P_CHUNK_SIZE_SMALL_BYTES', 2 * 1024 * 1024);
+export const CHUNK_SIZE_MEDIUM_BYTES = envNumber('P2P_CHUNK_SIZE_MEDIUM_BYTES', 8 * 1024 * 1024);
+export const CHUNK_SIZE_LARGE_BYTES = envNumber('P2P_CHUNK_SIZE_LARGE_BYTES', 16 * 1024 * 1024);
+export const CHUNK_SIZE_HUGE_BYTES = envNumber('P2P_CHUNK_SIZE_HUGE_BYTES', 32 * 1024 * 1024);
+export const CHUNK_SIZE_MEDIUM_THRESHOLD_BYTES = envNumber('P2P_CHUNK_SIZE_MEDIUM_THRESHOLD_BYTES', 100 * 1024 * 1024);
+export const CHUNK_SIZE_LARGE_THRESHOLD_BYTES = envNumber('P2P_CHUNK_SIZE_LARGE_THRESHOLD_BYTES', 5 * 1024 ** 3);
+export const CHUNK_SIZE_HUGE_THRESHOLD_BYTES = envNumber('P2P_CHUNK_SIZE_HUGE_THRESHOLD_BYTES', 50 * 1024 ** 3);
+
+export function chunkSizeForFile(fileSizeBytes = 0) {
+  if (!ADAPTIVE_CHUNKING_ENABLED) return DEFAULT_CHUNK_SIZE_BYTES;
+  const size = Number(fileSizeBytes);
+  if (!Number.isFinite(size) || size <= 0) return DEFAULT_CHUNK_SIZE_BYTES;
+  if (size >= CHUNK_SIZE_HUGE_THRESHOLD_BYTES) return CHUNK_SIZE_HUGE_BYTES;
+  if (size >= CHUNK_SIZE_LARGE_THRESHOLD_BYTES) return CHUNK_SIZE_LARGE_BYTES;
+  if (size >= CHUNK_SIZE_MEDIUM_THRESHOLD_BYTES) return CHUNK_SIZE_MEDIUM_BYTES;
+  return CHUNK_SIZE_SMALL_BYTES;
+}
 
 // ─── Replication ──────────────────────────────────────────────────────────────
 
-export const TARGET_REPLICAS = Math.max(1, envNumber('P2P_TARGET_REPLICAS', 4));
+// Million-user target: 3 P2P replicas. Safety peer is emergency protection only.
+export const TARGET_REPLICAS = Math.max(1, envNumber('P2P_TARGET_REPLICAS', 3));
 
 // ─── Encryption ───────────────────────────────────────────────────────────────
 
