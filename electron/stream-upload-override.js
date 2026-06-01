@@ -8,6 +8,7 @@ import { putChunkToSafetyPeer, deleteChunkFromSafetyPeer, SAFETY_PEER_REPLICA_ID
 import { startTransfer, updateTransfer, finishTransfer, failTransfer, throwIfTransferCancelled } from './transfer-progress-state.js';
 import {
   CHUNK_SIZE_BYTES,
+  chunkSizeForFile,
   TARGET_REPLICAS,
   ENCRYPTION_ALGORITHM,
   ENCRYPTION_KEY_SOURCE,
@@ -201,6 +202,8 @@ async function uploadOne(filePath, payload = {}) {
   const stat = fs.statSync(filePath);
   if (usedBytes(manifests(), ownerWallet) + stat.size > quotaBytes(w.planId)) throw new Error('Storage quota exceeded.');
 
+  const selectedChunkSize = Math.max(1, Number(chunkSizeForFile(stat.size) || CHUNK_SIZE_BYTES));
+
   const privateFile = true;
   const salt = privateFile ? crypto.randomBytes(16) : null;
   const iv = privateFile ? crypto.randomBytes(12) : null;
@@ -216,7 +219,7 @@ async function uploadOne(filePath, payload = {}) {
   let index = 0;
   let uploadPlainBytes = 0;
   let uploadProgressChunksDone = 0;
-  const uploadTotalChunks = Math.max(1, Math.ceil(stat.size / CHUNK_SIZE_BYTES));
+  const uploadTotalChunks = Math.max(1, Math.ceil(stat.size / selectedChunkSize));
 
   startTransfer('upload', {
     fileName: path.basename(filePath),
@@ -281,16 +284,16 @@ async function uploadOne(filePath, payload = {}) {
   async function consume(output) {
     if (!output?.length) return;
     carry = carry.length ? Buffer.concat([carry, output]) : Buffer.from(output);
-    while (carry.length >= CHUNK_SIZE_BYTES) {
+    while (carry.length >= selectedChunkSize) {
       throwIfTransferCancelled('upload');
-      const part = carry.subarray(0, CHUNK_SIZE_BYTES);
-      carry = carry.subarray(CHUNK_SIZE_BYTES);
+      const part = carry.subarray(0, selectedChunkSize);
+      carry = carry.subarray(selectedChunkSize);
       await flush(part);
     }
   }
 
   try {
-    for await (const part of fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE_BYTES })) {
+    for await (const part of fs.createReadStream(filePath, { highWaterMark: selectedChunkSize })) {
       throwIfTransferCancelled('upload');
 
       const plain = Buffer.from(part);
@@ -358,7 +361,8 @@ async function uploadOne(filePath, payload = {}) {
     parentFolderId: targetFolder?.folderId || '',
     folderName: targetFolder?.name || String(payload.folderPath || ''),
     folder: targetFolder?.name || String(payload.folderPath || ''),
-    chunkSize: CHUNK_SIZE_BYTES,
+    chunkSize: selectedChunkSize,
+    adaptiveChunking: selectedChunkSize !== CHUNK_SIZE_BYTES,
     totalChunks: chunks.length,
     ownerNodeId: n.peerId,
     ownerWallet,
@@ -430,4 +434,4 @@ ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => {
 await import('./transfer-progress-network-summary-override.js');
 await import('./transfer-cancel-ipc.js');
 await import('./stream-folder-upload-override.js');
-console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, and folder streaming');
+console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, and folder streaming');
