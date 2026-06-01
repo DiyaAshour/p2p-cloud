@@ -6,8 +6,9 @@ import { pipeline } from 'node:stream/promises';
 import { getChunkFromSafetyPeer } from './safety-peer.js';
 import { ENCRYPTION_ALGORITHM, KDF_ITERATIONS, MIN_DRIVE_PASSWORD_LENGTH } from './core/config.js';
 import { activeIdentity, normalizeIdentity } from './core/identity.js';
-import { chunkPath, walletPath } from './core/storage-paths.js';
+import { walletPath } from './core/storage-paths.js';
 import { readJson, readManifests } from './core/storage-json.js';
+import { readChunkBuffer as readStoredChunkBuffer } from './core/chunk-store.js';
 import './hard-delete-override.js';
 
 function safeName(name = '') {
@@ -61,11 +62,7 @@ async function deriveDriveKey({ ownerWallet, drivePassword, salt }) {
 }
 
 function readLocalChunkBuffer(hash) {
-  const file = chunkPath(hash);
-  if (!fs.existsSync(file)) return null;
-  const chunk = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!chunk?.data) return null;
-  return Buffer.from(chunk.data, 'base64');
+  return readStoredChunkBuffer(hash);
 }
 
 async function readNetworkChunk(hash) {
@@ -154,7 +151,7 @@ function installDownloadOverride() {
     try { ipcMain.removeHandler(channel); } catch {}
     ipcMain.handle(channel, async (_event, payload = {}) => downloadManifestToPath(payload));
   }
-  console.log('[download-to-path] installed disk-first streaming download handlers');
+  console.log('[download-to-path] installed disk-first streaming download handlers with binary chunk-store support');
 }
 
 installDownloadOverride();
