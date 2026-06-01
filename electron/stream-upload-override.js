@@ -18,8 +18,9 @@ import {
   quotaBytes,
 } from './core/config.js';
 import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } from './core/identity.js';
-import { chunkPath, chunkStoreDir } from './core/storage-paths.js';
-import { writeJson, readWallet, readManifests, writeManifests } from './core/storage-json.js';
+import { chunkPath } from './core/storage-paths.js';
+import { readWallet, readManifests, writeManifests } from './core/storage-json.js';
+import { writeChunkRecord } from './core/chunk-store.js';
 
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -64,8 +65,7 @@ function folderById(id = '') {
 }
 
 function writeChunk(chunk) {
-  fs.mkdirSync(chunkStoreDir(), { recursive: true });
-  writeJson(chunkPath(chunk.hash), { ...chunk, storedAt: new Date().toISOString() });
+  writeChunkRecord(chunk);
 }
 
 async function uploadChunkToAwsSafety(chunk, peerId, reason = 'under-target') {
@@ -110,8 +110,8 @@ async function rollbackUploadedChunks(uploadedChunks = [], ownerWallet = '', rea
 
     try {
       dropMemoryChunk(hash);
-      const filePath = chunkPath(hash);
-      if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      const legacyFilePath = chunkPath(hash);
+      if (legacyFilePath && fs.existsSync(legacyFilePath)) fs.unlinkSync(legacyFilePath);
       try { n?.chunkReplicas?.delete?.(hash); } catch {}
     } catch (error) {
       console.warn('[stream-upload] rollback local chunk failed:', hash, error?.message || error);
@@ -363,6 +363,7 @@ async function uploadOne(filePath, payload = {}) {
     folder: targetFolder?.name || String(payload.folderPath || ''),
     chunkSize: selectedChunkSize,
     adaptiveChunking: selectedChunkSize !== CHUNK_SIZE_BYTES,
+    localChunkFormat: 'binary-v1',
     totalChunks: chunks.length,
     ownerNodeId: n.peerId,
     ownerWallet,
@@ -434,4 +435,4 @@ ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => {
 await import('./transfer-progress-network-summary-override.js');
 await import('./transfer-cancel-ipc.js');
 await import('./stream-folder-upload-override.js');
-console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, and folder streaming');
+console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, binary local storage, and folder streaming');
