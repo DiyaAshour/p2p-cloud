@@ -1,0 +1,98 @@
+diff --git a/electron/p2p-transport.js b/electron/p2p-transport.js
+--- a/electron/p2p-transport.js
++++ b/electron/p2p-transport.js
+@@
+ import { createTokenBucket, spendAll } from './p2p-bandwidth.js';
+ import { P2P_NETWORK_LIMITS, isPeerRoutable, nextRetryDelayMs, peerBucket, queuePressure } from './p2p-network-limits.js';
+ import { PeerReputationStore } from './p2p-peer-reputation.js';
+ import { calculateNodeStorage, defaultNodeStoragePolicy, directorySizeSync, estimateChunkStorageBytes, inspectDiskSpace } from './storage-capacity.js';
++import { readChunkRecord, writeChunkRecord } from './core/chunk-store.js';
+@@
+-  ensureChunkStore() { if (this.chunkStoreDir) fs.mkdirSync(this.chunkStoreDir, { recursive: true }); }
+-  chunkPath(chunkHash) { if (!this.chunkStoreDir || !chunkHash) return null; const safe = String(chunkHash).replace(/[^a-fA-F0-9]/g, ''); return path.join(this.chunkStoreDir, `${safe}.json`); }
++  ensureChunkStore() { if (this.chunkStoreDir) fs.mkdirSync(this.chunkStoreDir, { recursive: true }); }
++  chunkPath(chunkHash) { if (!this.chunkStoreDir || !chunkHash) return null; const safe = String(chunkHash).replace(/[^a-fA-F0-9]/g, ''); return path.join(this.chunkStoreDir, `${safe}.json`); }
+@@
+-  storeLocalChunk(chunk, { enforceCapacity = false } = {}) { if (!chunk?.hash) throw new Error('chunk.hash is required'); if (enforceCapacity) { const decision = this.canStoreChunk(chunk); if (!decision.ok) throw new Error(decision.reason || 'Node storage cap reached'); } this.localChunks.set(chunk.hash, chunk); const filePath = this.chunkPath(chunk.hash); if (filePath) { this.ensureChunkStore(); fs.writeFileSync(filePath, JSON.stringify({ ...chunk, storedAt: new Date().toISOString() }), 'utf8'); this.refreshStorageSummary(); } return chunk; }
+-  getLocalChunk(chunkHash) { const memoryChunk = this.localChunks.get(chunkHash); if (memoryChunk) return memoryChunk; const filePath = this.chunkPath(chunkHash); if (!filePath || !fs.existsSync(filePath)) return null; try { const chunk = JSON.parse(fs.readFileSync(filePath, 'utf8')); if (chunk?.hash) { this.localChunks.set(chunk.hash, chunk); return chunk; } } catch {} return null; }
++  storeLocalChunk(chunk, { enforceCapacity = false } = {}) {
++    if (!chunk?.hash) throw new Error('chunk.hash is required');
++
++    if (enforceCapacity) {
++      const decision = this.canStoreChunk(chunk);
++      if (!decision.ok) throw new Error(decision.reason || 'Node storage cap reached');
++    }
++
++    this.localChunks.set(chunk.hash, chunk);
++
++    if (this.chunkStoreDir) {
++      this.ensureChunkStore();
++      writeChunkRecord(chunk);
++      this.refreshStorageSummary();
++    }
++
++    return chunk;
++  }
++
++  getLocalChunk(chunkHash) {
++    const memoryChunk = this.localChunks.get(chunkHash);
++    if (memoryChunk) return memoryChunk;
++
++    const chunk = readChunkRecord(chunkHash);
++    if (chunk?.hash) {
++      this.localChunks.set(chunk.hash, chunk);
++      return chunk;
++    }
++
++    return null;
++  }
+ diff --git a/electron/stream-upload-override.js b/electron/stream-upload-override.js
+--- a/electron/stream-upload-override.js
++++ b/electron/stream-upload-override.js
+@@
+ import { chunkPath } from './core/storage-paths.js';
+ import { readWallet, readManifests, writeManifests } from './core/storage-json.js';
+ import { writeChunkRecord } from './core/chunk-store.js';
+-import './p2p-binary-chunk-store-override.js';
+@@
+-console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, binary local storage, P2P binary chunk-store patch, and folder streaming');
++console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, binary local storage, and folder streaming');
+ diff --git a/electron/p2p-binary-chunk-store-override.js b/electron/p2p-binary-chunk-store-override.js
+deleted file mode 100644
+--- a/electron/p2p-binary-chunk-store-override.js
++++ /dev/null
+@@
+-import { P2PTransportNode } from './p2p-transport.js';
+-import { readChunkRecord, writeChunkRecord } from './core/chunk-store.js';
+-
+-if (!P2PTransportNode.prototype.__binaryChunkStorePatched) {
+-  P2PTransportNode.prototype.storeLocalChunk = function storeLocalChunkBinary(chunk, { enforceCapacity = false } = {}) {
+-    if (!chunk?.hash) throw new Error('chunk.hash is required');
+-    if (enforceCapacity) {
+-      const decision = this.canStoreChunk(chunk);
+-      if (!decision.ok) throw new Error(decision.reason || 'Node storage cap reached');
+-    }
+-
+-    this.localChunks.set(chunk.hash, chunk);
+-    if (this.chunkStoreDir) {
+-      writeChunkRecord(chunk);
+-      this.refreshStorageSummary();
+-    }
+-    return chunk;
+-  };
+-
+-  P2PTransportNode.prototype.getLocalChunk = function getLocalChunkBinary(chunkHash) {
+-    const memoryChunk = this.localChunks.get(chunkHash);
+-    if (memoryChunk) return memoryChunk;
+-
+-    const chunk = readChunkRecord(chunkHash);
+-    if (chunk?.hash) {
+-      this.localChunks.set(chunk.hash, chunk);
+-      return chunk;
+-    }
+-    return null;
+-  };
+-
+-  P2PTransportNode.prototype.__binaryChunkStorePatched = true;
+-  console.log('[p2p-binary-chunk-store] patched transport local chunk store with binary-v1 compatibility');
+-}
