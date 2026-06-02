@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { ensureWindowsFirewallRules } from './windows-firewall.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +15,7 @@ let isQuitting = false;
 let closeNoticeShown = false;
 let mainImportStarted = false;
 let lazySeedInstalled = false;
+let startupNetworkConfigured = false;
 
 console.log('[main-wrapper] starting', { isPackaged: app.isPackaged, rendererUrl: process.env.ELECTRON_RENDERER_URL || null, dev: IS_DEV_WRAPPER });
 
@@ -100,6 +102,8 @@ function chooseLanAddress() {
 
 function configureNetworkRuntime() {
   const port = process.env.P2P_TRANSPORT_PORT || '8787';
+  if (!process.env.P2P_TRANSPORT_PORT) process.env.P2P_TRANSPORT_PORT = port;
+  if (!process.env.P2P_TRANSPORT_HOST) process.env.P2P_TRANSPORT_HOST = '0.0.0.0';
   if (!process.env.P2P_BOOTSTRAP_URL && String(process.env.P2P_GLOBAL_DISCOVERY_DISABLED || '').toLowerCase() !== 'true') {
     process.env.P2P_BOOTSTRAP_URL = DEFAULT_GLOBAL_BOOTSTRAP_URL;
     console.log('[runtime] selected global bootstrap URL:', process.env.P2P_BOOTSTRAP_URL);
@@ -121,6 +125,8 @@ function configureNetworkRuntime() {
     console.log('[runtime] selected chunk store:', process.env.P2P_CHUNK_STORE_DIR);
   }
   console.log('[runtime] transfer defaults:', {
+    transportHost: process.env.P2P_TRANSPORT_HOST,
+    transportPort: process.env.P2P_TRANSPORT_PORT,
     chunkSizeBytes: process.env.P2P_CHUNK_SIZE_BYTES,
     uploadConcurrency: process.env.P2P_UPLOAD_CONCURRENCY,
     downloadConcurrency: process.env.P2P_DOWNLOAD_CONCURRENCY,
@@ -131,6 +137,19 @@ function configureNetworkRuntime() {
     bootstrapUrl: process.env.P2P_BOOTSTRAP_URL || null,
     publicPeerUrl: process.env.P2P_PUBLIC_URL || process.env.VITE_P2P_PUBLIC_URL || null,
   });
+}
+
+async function configureStartupNetwork() {
+  if (startupNetworkConfigured) return;
+  startupNetworkConfigured = true;
+  configureNetworkRuntime();
+  try {
+    const firewall = await ensureWindowsFirewallRules();
+    globalThis.__chunknetFirewall = firewall;
+  } catch (error) {
+    console.warn('[runtime] firewall setup failed; app will continue. Run as Administrator once to install rules:', error?.message || error);
+    globalThis.__chunknetFirewall = { ok: false, error: error?.message || String(error) };
+  }
 }
 
 function resolveTrayIcon() {
@@ -315,7 +334,6 @@ async function importMainWhenReady() {
 
 app.on('ready', () => {
   console.log('[main-wrapper] app ready');
-  configureNetworkRuntime();
   createTray();
 });
 
@@ -345,11 +363,21 @@ app.on('browser-window-created', (_event, win) => {
   });
 });
 
+async function startChunknet() {
+  await configureStartupNetwork();
+  await importMainWhenReady();
+}
+
 if (app.isReady()) {
-  configureNetworkRuntime();
-  setImmediate(importMainWhenReady);
+  startChunknet().catch((error) => {
+    console.error('[main-wrapper] startup failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'Chunknet startup failed');
+  });
 } else {
-  app.whenReady().then(importMainWhenReady);
+  app.whenReady().then(startChunknet).catch((error) => {
+    console.error('[main-wrapper] startup failed:', error?.stack || error?.message || error);
+    createFallbackWindow(error?.message || 'Chunknet startup failed');
+  });
 }
 
 app.on('activate', showMainWindow);
