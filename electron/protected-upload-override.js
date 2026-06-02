@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocket } from 'ws';
 import { readChunkRecord } from './core/chunk-store.js';
+import { filterCapacityPeers } from './peer-capacity.js';
 
 const TARGET_REPLICAS = Math.max(1, Number(process.env.P2P_TARGET_REPLICAS || 3));
 const MIN_CONFIRMED_REPLICAS = Math.max(1, Math.min(TARGET_REPLICAS, Number(process.env.P2P_UPLOAD_MIN_CONFIRMED_REPLICAS || TARGET_REPLICAS)));
@@ -68,8 +69,9 @@ function scorePeer(peer = {}) {
   const pressure = peer.pressure || {};
   const remoteStorage = peer.remoteStorage || {};
   const storageBonus = remoteStorage.acceptingChunks === true ? 10 : remoteStorage.acceptingChunks === false ? -80 : 0;
+  const capacityBonus = Math.min(25, Math.floor(Number(remoteStorage.remainingSharedBytes || 0) / (1024 * 1024 * 1024)));
   const pressurePenalty = pressure.overloaded ? 40 : 0;
-  return Number(health.score || 0) + bucketWeight(health.bucket) + storageBonus - pressurePenalty;
+  return Number(health.score || 0) + bucketWeight(health.bucket) + storageBonus + capacityBonus - pressurePenalty;
 }
 
 function mergePeerInfo(summaryPeers = [], healthPeers = []) {
@@ -82,16 +84,17 @@ function mergePeerInfo(summaryPeers = [], healthPeers = []) {
   return Array.from(byId.values());
 }
 
-async function peerTargets(summary = {}, knownReplicas = []) {
+async function peerTargets(summary = {}, knownReplicas = [], incomingBytes = 0) {
   const healthPeers = await queryPeerHealth(summary);
   const blocked = new Set(unique([summary.peerId, ...knownReplicas]));
-  return mergePeerInfo(summary.peers || [], healthPeers)
+  const candidates = mergePeerInfo(summary.peers || [], healthPeers)
     .filter((peer) => peer?.peerId && peer.url && /^wss?:\/\//i.test(peer.url))
     .filter((peer) => !blocked.has(peer.peerId))
     .filter((peer) => peer.status === 'connected' || peer.status === 'connecting' || !peer.status)
-    .filter((peer) => !['dead', 'offline', 'quarantine', 'congested'].includes(peer.health?.bucket))
-    .sort((a, b) => scorePeer(b) - scorePeer(a))
-    .slice(0, MAX_REPLICA_ATTEMPTS);
+    .filter((peer) => !['dead', 'offline', 'quarantine', 'congested'].includes(peer.health?.bucket));
+  const { accepted, rejected } = filterCapacityPeers(candidates, incomingBytes);
+  if (rejected.length) console.log('[protected-upload] capacity rejected peers', rejected.map((p) => ({ peerId: p.peerId, reason: p.admission?.reason })));
+  return accepted.sort((a, b) => scorePeer(b) - scorePeer(a)).slice(0, MAX_REPLICA_ATTEMPTS);
 }
 
 function putChunkWithAck({ peer, chunk, fromPeerId }) {
@@ -119,9 +122,9 @@ function putChunkWithAck({ peer, chunk, fromPeerId }) {
       if (message.payload?.ackTo && message.payload.ackTo !== messageId) return;
       if (message.payload?.chunkHash && message.payload.chunkHash !== chunk.hash) return;
       if (message.payload?.ok === false) return finish({ ok: false, peerId: peer.peerId, error: message.payload?.error || 'chunk rejected' });
-      finish({ ok: true, peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' });
+      finish({ ok: true, peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown', admission: peer.admission || null });
     });
-    socket.on('error', (error) => finish({ ok: false, peerId: peer.peerId, error: error?.message || String(error), score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' }));
+    socket.on('error', (error) => finish({ ok: false, peerId: peer.peerId, error: error?.message || String(error), score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown', admission: peer.admission || null }));
     socket.on('close', () => {});
   });
 }
@@ -137,7 +140,7 @@ async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
   replicas.add(summary.peerId || 'desktop-client');
   const hadSafety = initial.replicas.includes('aws-safety-peer');
   const failedReplicas = [];
-  const selectedPeers = await peerTargets(summary, Array.from(replicas));
+  const selectedPeers = await peerTargets(summary, Array.from(replicas), Number(chunk.size || initial.size || 0));
 
   for (const peer of selectedPeers) {
     if (replicas.size >= TARGET_REPLICAS) break;
@@ -153,7 +156,7 @@ async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
     ...initial,
     replicas: unique([...replicas, hadSafety ? 'aws-safety-peer' : null]),
     confirmedReplicas: confirmed,
-    selectedPeers: selectedPeers.map((peer) => ({ peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown' })),
+    selectedPeers: selectedPeers.map((peer) => ({ peerId: peer.peerId, score: scorePeer(peer), bucket: peer.health?.bucket || 'unknown', admission: peer.admission || null })),
     failedReplicas,
     replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair',
   };
@@ -207,7 +210,7 @@ function installProtectedUploadStatusOverride() {
     });
   }
 
-  console.log('[protected-upload] scored ack replication override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS, maxAttempts: MAX_REPLICA_ATTEMPTS });
+  console.log('[protected-upload] scored ack replication override installed', { targetReplicas: TARGET_REPLICAS, minConfirmed: MIN_CONFIRMED_REPLICAS, maxAttempts: MAX_REPLICA_ATTEMPTS, capacityAdmission: true });
 }
 
 installProtectedUploadStatusOverride();
