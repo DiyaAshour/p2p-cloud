@@ -1,3 +1,4 @@
+import './repair-queue-ipc.js';
 import { app, ipcMain } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
