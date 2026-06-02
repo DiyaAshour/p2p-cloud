@@ -21,7 +21,7 @@ import { normalizeIdentity, activeIdentity, assertVerifiedIdentity, usedBytes } 
 import { chunkPath } from './core/storage-paths.js';
 import { readWallet, readManifests, writeManifests } from './core/storage-json.js';
 import { writeChunkRecord } from './core/chunk-store.js';
-import './p2p-binary-chunk-store-override.js';
+
 
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -436,4 +436,4 @@ ipcMain.handle('p2p:uploadPath', async (_event, payload = {}) => {
 await import('./transfer-progress-network-summary-override.js');
 await import('./transfer-cancel-ipc.js');
 await import('./stream-folder-upload-override.js');
-console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, binary local storage, P2P binary chunk-store patch, and folder streaming');
+console.log('[stream-upload] installed disk-first streaming upload override with progress, cancel rollback, immediate AWS safety, adaptive chunks, binary local storage, and folder streaming');
