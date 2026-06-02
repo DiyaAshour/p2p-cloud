@@ -3,18 +3,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocket } from 'ws';
+import { readChunkRecord } from './core/chunk-store.js';
 
-const TARGET_REPLICAS = Math.max(4, Number(process.env.P2P_TARGET_REPLICAS || 4));
-const MIN_CONFIRMED_REPLICAS = Math.max(3, Number(process.env.P2P_UPLOAD_MIN_CONFIRMED_REPLICAS || 3));
-const MAX_REPLICA_ATTEMPTS = Math.max(4, Number(process.env.P2P_UPLOAD_MAX_REPLICA_ATTEMPTS || 8));
+const TARGET_REPLICAS = Math.max(1, Number(process.env.P2P_TARGET_REPLICAS || 3));
+const MIN_CONFIRMED_REPLICAS = Math.max(1, Math.min(TARGET_REPLICAS, Number(process.env.P2P_UPLOAD_MIN_CONFIRMED_REPLICAS || TARGET_REPLICAS)));
+const MAX_REPLICA_ATTEMPTS = Math.max(TARGET_REPLICAS, Number(process.env.P2P_UPLOAD_MAX_REPLICA_ATTEMPTS || 8));
 const ACK_TIMEOUT_MS = Math.max(2000, Number(process.env.P2P_CHUNK_STORE_ACK_TIMEOUT_MS || 7000));
 const HEALTH_TIMEOUT_MS = Math.max(1000, Number(process.env.P2P_PEER_HEALTH_QUERY_TIMEOUT_MS || 2500));
 const MAX_MESSAGE_BYTES = Math.max(1024 * 1024, Number(process.env.P2P_MAX_MESSAGE_BYTES || 8 * 1024 * 1024));
 
 function dataDir() { return path.join(app.getPath('userData'), 'native-p2p-storage'); }
 function manifestsPath() { return path.join(dataDir(), 'manifests.json'); }
-function chunkStoreDir() { return process.env.P2P_CHUNK_STORE_DIR || path.join(dataDir(), 'chunks'); }
-function chunkPath(chunkHash) { return path.join(chunkStoreDir(), `${String(chunkHash || '').replace(/[^a-fA-F0-9]/g, '')}.json`); }
 function unique(values = []) { return Array.from(new Set(values.filter(Boolean))); }
 
 function readJson(filePath, fallback) {
@@ -26,14 +25,14 @@ function writeJson(filePath, value) {
 }
 function readManifests() { const parsed = readJson(manifestsPath(), []); return Array.isArray(parsed) ? parsed : []; }
 function writeManifests(manifests) { writeJson(manifestsPath(), manifests); }
-function readLocalChunk(hash) { return readJson(chunkPath(hash), null); }
+function readLocalChunk(hash) { return readChunkRecord(hash); }
 
 function classifyChunk(chunk = {}) {
   const replicas = unique(chunk.replicas || []);
   const confirmed = replicas.filter((id) => id !== 'aws-safety-peer').length;
   const hasSafety = replicas.includes('aws-safety-peer');
   const protectedEnough = confirmed >= TARGET_REPLICAS;
-  const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hasSafety && confirmed >= MIN_CONFIRMED_REPLICAS - 1);
+  const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hasSafety && confirmed >= Math.max(1, MIN_CONFIRMED_REPLICAS - 1));
   return { ...chunk, replicas, confirmedReplicas: confirmed, targetReplicas: TARGET_REPLICAS, minimumConfirmedReplicas: MIN_CONFIRMED_REPLICAS, replicationStatus: protectedEnough ? 'protected' : safeEnough ? 'protecting' : 'needs-repair' };
 }
 
@@ -149,7 +148,7 @@ async function replicateChunkToConfirmedPeers({ chunkMeta, summary }) {
 
   const confirmed = replicas.size;
   const protectedEnough = confirmed >= TARGET_REPLICAS;
-  const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hadSafety && confirmed >= MIN_CONFIRMED_REPLICAS - 1);
+  const safeEnough = confirmed >= MIN_CONFIRMED_REPLICAS || (hadSafety && confirmed >= Math.max(1, MIN_CONFIRMED_REPLICAS - 1));
   return {
     ...initial,
     replicas: unique([...replicas, hadSafety ? 'aws-safety-peer' : null]),
