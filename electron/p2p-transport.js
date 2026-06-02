@@ -6,6 +6,7 @@ import { createTokenBucket, spendAll } from './p2p-bandwidth.js';
 import { P2P_NETWORK_LIMITS, isPeerRoutable, nextRetryDelayMs, peerBucket, queuePressure } from './p2p-network-limits.js';
 import { PeerReputationStore } from './p2p-peer-reputation.js';
 import { calculateNodeStorage, defaultNodeStoragePolicy, directorySizeSync, estimateChunkStorageBytes, inspectDiskSpace } from './storage-capacity.js';
+import { readChunkRecord, writeChunkRecord } from './core/chunk-store.js';
 
 const DEFAULT_PORT = Number(process.env.P2P_TRANSPORT_PORT || 8787);
 const DEFAULT_HOST = process.env.P2P_TRANSPORT_HOST || '0.0.0.0';
@@ -54,8 +55,37 @@ export class P2PTransportNode {
   storageSummary({ refresh = false } = {}) { return refresh ? this.refreshStorageSummary() : (this.lastStorageSummary || this.refreshStorageSummary()); }
   refreshStorageSummary() { if (!this.chunkStoreDir) return null; this.ensureChunkStore(); const disk = inspectDiskSpace(this.chunkStoreDir); const usedBytes = directorySizeSync(this.chunkStoreDir); this.lastStorageSummary = calculateNodeStorage({ totalBytes: disk.totalBytes, freeBytes: disk.freeBytes, usedBytes, policy: this.storagePolicy }); this.lastStorageSummary = { ...this.lastStorageSummary, ok: disk.ok && this.lastStorageSummary.ok, error: disk.error || null, chunkStoreDir: this.chunkStoreDir }; return this.lastStorageSummary; }
   canStoreChunk(chunk) { const summary = this.refreshStorageSummary(); if (!summary) return { ok: true, summary: null }; const incomingBytes = estimateChunkStorageBytes(chunk); const ok = Boolean(summary.acceptingChunks && summary.remainingSharedBytes >= incomingBytes); return { ok, incomingBytes, summary, reason: ok ? null : `Node storage cap reached or disk pressure active. Mode=${summary.nodeMode}, remaining=${summary.remainingSharedBytes} bytes, incoming=${incomingBytes} bytes, reservedFree=${summary.reservedFreeBytes} bytes.` }; }
-  storeLocalChunk(chunk, { enforceCapacity = false } = {}) { if (!chunk?.hash) throw new Error('chunk.hash is required'); if (enforceCapacity) { const decision = this.canStoreChunk(chunk); if (!decision.ok) throw new Error(decision.reason || 'Node storage cap reached'); } this.localChunks.set(chunk.hash, chunk); const filePath = this.chunkPath(chunk.hash); if (filePath) { this.ensureChunkStore(); fs.writeFileSync(filePath, JSON.stringify({ ...chunk, storedAt: new Date().toISOString() }), 'utf8'); this.refreshStorageSummary(); } return chunk; }
-  getLocalChunk(chunkHash) { const memoryChunk = this.localChunks.get(chunkHash); if (memoryChunk) return memoryChunk; const filePath = this.chunkPath(chunkHash); if (!filePath || !fs.existsSync(filePath)) return null; try { const chunk = JSON.parse(fs.readFileSync(filePath, 'utf8')); if (chunk?.hash) { this.localChunks.set(chunk.hash, chunk); return chunk; } } catch {} return null; }
+  storeLocalChunk(chunk, { enforceCapacity = false } = {}) {
+    if (!chunk?.hash) throw new Error('chunk.hash is required');
+
+    if (enforceCapacity) {
+      const decision = this.canStoreChunk(chunk);
+      if (!decision.ok) throw new Error(decision.reason || 'Node storage cap reached');
+    }
+
+    this.localChunks.set(chunk.hash, chunk);
+
+    if (this.chunkStoreDir) {
+      this.ensureChunkStore();
+      writeChunkRecord(chunk);
+      this.refreshStorageSummary();
+    }
+
+    return chunk;
+  }
+
+  getLocalChunk(chunkHash) {
+    const memoryChunk = this.localChunks.get(chunkHash);
+    if (memoryChunk) return memoryChunk;
+
+    const chunk = readChunkRecord(chunkHash);
+    if (chunk?.hash) {
+      this.localChunks.set(chunk.hash, chunk);
+      return chunk;
+    }
+
+    return null;
+  }
 
   connectedPeerIds() { return Array.from(this.peerSockets.entries()).filter(([, socket]) => socket.readyState === WebSocket.OPEN).map(([peerId]) => peerId); }
   connectedPeerCount(direction = null) { return Array.from(this.peerSockets.values()).filter((socket) => socket.readyState === WebSocket.OPEN && (!direction || socket.direction === direction)).length; }
